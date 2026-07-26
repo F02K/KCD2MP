@@ -158,6 +158,12 @@ if (BUILD_TESTING)
     target_link_libraries(KCD2MPSignatureCoreTests PRIVATE KCD2MPSignatureCore)
     set_property(TARGET KCD2MPSignatureCoreTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPSignatureCoreTests COMMAND KCD2MPSignatureCoreTests)
+
+    add_executable(KCD2MPEnginePathTests "${PROJECT_SOURCE_DIR}/tests/engine_path_tests.cpp")
+    set_property(TARGET KCD2MPEnginePathTests PROPERTY CXX_STANDARD 23)
+    target_include_directories(KCD2MPEnginePathTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPEnginePathTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPEnginePathTests COMMAND KCD2MPEnginePathTests)
 endif()
 
 if (KCD2MP_WHGAME_PATH)

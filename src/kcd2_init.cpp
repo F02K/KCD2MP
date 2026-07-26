@@ -1,5 +1,6 @@
 #include "kcd2_init.hpp"
 
+#include "engine_path.hpp"
 #include "hooks/hooking.hpp"
 #include "kcd2_address.hpp"
 #include "memory/gm_address.hpp"
@@ -607,12 +608,7 @@ namespace big
 
 	static std::string strip_last_file_separator(const std::string &path)
 	{
-		size_t pos = path.find_last_of("/\\"); // Find last occurrence of '/' or '\'
-		if (pos != std::string::npos)
-		{
-			return path.substr(pos + 1); // Return substring after the last separator
-		}
-		return path; // Return original string if no separator is found
+		return engine_path::filename_bytes(path);
 	}
 
 	static std::string get_normalized_original_filename(const std::string &input)
@@ -796,8 +792,11 @@ namespace big
 			const auto it = g_xml_context_to_xml_filename_to_modifications[xml_context].find(original_filename);
 			if (it != g_xml_context_to_xml_filename_to_modifications[xml_context].end())
 			{
-				std::filesystem::path filename = current_parsed_filename;
-				const auto modded_xml_filename_lowered = big::string::to_lower((char *)filename.filename().u8string().c_str());
+				// Engine paths are byte strings and are not guaranteed to be valid in
+				// the active Windows code page. Avoid std::filesystem here because its
+				// narrow path constructor performs a potentially throwing UTF-16
+				// conversion.
+				const auto &modded_xml_filename_lowered = original_filename;
 				if (!g_xml_context_to_modded_xml_filenames[xml_context].contains(modded_xml_filename_lowered))
 				{
 					LOG(INFO) << "[XML Merger] Applying xml merge patches for " << original_filename << " (" << current_parsed_filename << " - " << modded_xml_filename_lowered << ") xml context: " << xml_context;
@@ -883,20 +882,41 @@ namespace big
 	{
 		if (ptr_to_filename && *ptr_to_filename)
 		{
-			std::filesystem::path filename = *ptr_to_filename;
-			const auto modded_xml_filename_lowered = big::string::to_lower((char *)filename.filename().u8string().c_str());
-			//LOG(INFO) << "*ptr_to_filename " << *ptr_to_filename;
-			const auto xml_context = get_xml_context((char *)filename.u8string().c_str());
-			if (g_xml_context_to_modded_xml_filenames[xml_context].contains(modded_xml_filename_lowered))
+			const char *const engine_filename = *ptr_to_filename;
+
+			try
 			{
-				LOG(INFO) << "[XML Merger] Skipping vanilla parsing of " << *ptr_to_filename << " since we already merged it. xml context: " << xml_context;
-				return true;
+				// Keep the engine-owned path as raw bytes. std::filesystem::path(const
+				// char*) converts through the active Windows code page and previously
+				// terminated the game with ERROR_NO_UNICODE_TRANSLATION (1113).
+				const std::string filename(engine_filename);
+				const auto modded_xml_filename_lowered = get_normalized_original_filename(filename);
+				const auto xml_context                 = get_xml_context(filename);
+				const auto context_it                  = g_xml_context_to_modded_xml_filenames.find(xml_context);
+
+				if (context_it != g_xml_context_to_modded_xml_filenames.end()
+				    && context_it->second.contains(modded_xml_filename_lowered))
+				{
+					LOG(INFO) << "[XML Merger] Skipping vanilla parsing of " << filename
+					          << " since we already merged it. xml context: " << xml_context;
+					return true;
+				}
+			}
+			catch (const std::exception &e)
+			{
+				LOG(ERROR) << "[XML Merger] Failed to inspect engine path at "
+				           << static_cast<const void *>(engine_filename) << ": " << e.what()
+				           << ". Falling back to vanilla XML parsing.";
+			}
+			catch (...)
+			{
+				LOG(ERROR) << "[XML Merger] Failed to inspect engine path at "
+				           << static_cast<const void *>(engine_filename)
+				           << " due to an unknown exception. Falling back to vanilla XML parsing.";
 			}
 		}
 
-		const auto res = big::g_hooking->get_original<hook_XmlParserReadOnly_Read_caller>()(a1, ptr_to_filename, a3);
-
-		return res;
+		return big::g_hooking->get_original<hook_XmlParserReadOnly_Read_caller>()(a1, ptr_to_filename, a3);
 	}
 
 	static __int64 g_CXConsole = 0;
