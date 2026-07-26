@@ -1716,15 +1716,24 @@ namespace big
 
 	std::mutex g_cphysicalentity_mutex;
 
+	static bool safe_unregister_rendernode(IRenderNode *render_node)
+	{
+		__try
+		{
+			big::g_hooking->get_original<hook_C3DEngine_UnRegisterEntityImpl>()(g_C3DEngine, render_node);
+			return true;
+		}
+		__except (EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+	}
+
 	void unregister_all_rendernode()
 	{
 		for (auto render_node : g_rendernodes)
 		{
-			__try
-			{
-				big::g_hooking->get_original<hook_C3DEngine_UnRegisterEntityImpl>()(g_C3DEngine, render_node);
-			}
-			__except (EXCEPTION_EXECUTE_HANDLER)
+			if (!safe_unregister_rendernode(render_node))
 			{
 				continue;
 			}
@@ -1795,7 +1804,6 @@ namespace big
 
 
 					//static auto ResetTerrainVertBuffers =
-					//kcd2_address::scan("48 83 EC ? 48 8B 49 ? 48 85 C9 74 ? 4C 8B C2");
 
 					//ResetTerrainVertBuffers.as_func<void(__int64, void *)>()(g_CTerrain, nullptr);
 
@@ -2149,7 +2157,35 @@ namespace big
 		return res;
 	}
 
-	void kcd2_init()
+	namespace
+	{
+		std::vector<std::function<void()>> g_pending_hook_registrations;
+
+		// kcd2_init_impl still describes hooks next to the signatures that feed
+		// them, but this adapter defers creation of the PolyHook objects until
+		// every required signature has resolved successfully.
+		class transactional_hooking
+		{
+		public:
+			class detour_hook_helper
+			{
+			public:
+				template<auto detour_function>
+				static void *add(std::string name, void *target)
+				{
+					g_pending_hook_registrations.emplace_back(
+					    [name = std::move(name), target]
+					    {
+						    big::hooking::detour_hook_helper::add<detour_function>(name, target);
+					    });
+					return nullptr;
+				}
+			};
+		};
+	}
+
+#define hooking transactional_hooking
+	static void kcd2_init_impl()
 	{
 		static kcd2_address CVegetations_Ctor;
 		static kcd2_address CMergedMeshRenderNode_Ctor;
@@ -2165,111 +2201,99 @@ namespace big
 		void **CXConsoleVFTable              = nullptr;
 		void **C3DEngine_VFTable             = nullptr;
 
-		auto scan_addresses_and_set_ptr = [&]() -> void
-		{
-			game_lua_call = kcd2_address::scan("E8 ? ? ? ? FF C3 3B DF 7E").get_call();
-			game_lua_checkstack = kcd2_address::scan("E8 ? ? ? ? 85 C0 75 ? 48 8D 15 ? ? ? ? 48 8B CF E8 ? ? ? ? 80 7B").get_call();
-			game_lua_concat       = kcd2_address::scan("E8 ? ? ? ? 2B DF").get_call();
-			game_lua_createtable  = kcd2_address::scan("E8 ? ? ? ? 48 8B 5F ? 48 8B CF 48 2B 5F").get_call();
-			game_lua_error        = kcd2_address::scan("E8 ? ? ? ? 41 83 C8 ? 33 D2").get_call();
-			game_lua_gc           = kcd2_address::scan("E8 ? ? ? ? 41 83 3C 9E").get_call();
-			game_lua_getfenv      = kcd2_address::scan("E8 ? ? ? ? 41 8B C3 48 83 C4").get_call();
-			game_lua_getfield     = kcd2_address::scan("E8 ? ? ? ? 44 8D 7D").get_call();
-			game_lua_getmetatable = kcd2_address::scan("E8 ? ? ? ? 85 C0 75 ? 33 D2 44 8D 40").get_call();
-			game_lua_gettable     = kcd2_address::scan("E8 ? ? ? ? 41 83 CB").get_call();
-			game_lua_insert       = kcd2_address::scan("E8 ? ? ? ? 8B 56 ? 44 8B CF").get_call();
-			game_lua_pcall        = kcd2_address::scan("E8 ? ? ? ? 48 8B 4E ? 8B D7 8B D8").get_call();
-			game_luaV_execute =
-			    kcd2_address::scan("48 8B C4 48 89 58 ? 89 50 ? 55 56 57 41 54 41 55 41 56 41 57 48 81 EC");
-			game_lua_load             = kcd2_address::scan("E8 ? ? ? ? 48 83 CE ? 85 C0").get_call();
-			CScriptableBase_Init_func = kcd2_address::scan("E8 ? ? ? ? 48 8B CB E8 ? ? ? ? 39 3D").get_call();
-			game_lua_setmetatable =
-			    kcd2_address::scan("40 53 48 83 EC ? 48 8B DA E8 ? ? ? ? 48 8B D3 E8 ? ? ? ? 48 8B 0D");
-			lua_custom_alloc = kcd2_address::scan("E8 ? ? ? ? 33 FF 48 8B D8 48 85 C0 0F 84 ? ? ? ? 48 8D 88").get_call();
-			game_pushref   = kcd2_address::scan("E8 ? ? ? ? 48 8B CB E8 ? ? ? ? 8D 4E ? 8D 56").get_call();
-			game_index2adr = kcd2_address::scan("85 D2 7F ? B8", "game index2adr");
-			game_luaH_new =
-			    kcd2_address::scan("48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC ? 41 8B F0 8B DA 45 33 C0", "game luaH_new");
-			g_C3DEngine_UnRegisterEntityImpl_ptr =
-			    kcd2_address::scan("E8 ? ? ? ? 49 8D 8E ? ? ? ? 48 8B D7 4C 8D 5C 24").get_call();
-			//	m_p3DEngine = kcd2_address::scan("48 8B 0D ? ? ? ? 48 89 5F 28").offset(3).rip();
-			CXConsole_Ctor = kcd2_address::scan("E8 ? ? ? ? 48 8B C8 EB 03 49 8B CF 48 8B 46 20 48 89 88 A8 00 00 00").get_call();
-			CXConsoleVFTable = CXConsole_Ctor.offset(0x12).rip().as<void **>();
-			CentityVFTable = kcd2_address::scan("48 8D 05 ? ? ? ? 48 89 01 4C 89 A1 A0 00 00 00").offset(3).rip().as<void **>();
-			CStatObjVFTable = kcd2_address::scan("48 8D 05 ? ? ? ? 48 89 77 58 48 89 07").offset(3).rip().as<void **>();
-			CGeomCacheRenderNodeVFTable   = kcd2_address::scan("48 8B F9 4C 89 71 20").offset(0x31).rip().as<void **>();
-			CVegetations_Ctor             = kcd2_address::scan("E8 ? ? ? ? 48 8B D0 F2 0F 10 43").get_call();
-			CVegetationsVFTable           = CVegetations_Ctor.offset(0x3D).rip().as<void **>();
-			CMergedMeshRenderNode_Ctor    = kcd2_address::scan("B9 E0 02 00 00 E8").offset(0x18).get_call();
-			CMergedMeshRenderNode_VFTable = CMergedMeshRenderNode_Ctor.offset(0x95).rip().as<void **>();
-			CBrush_VFTable = kcd2_address::scan("48 8D 05 ? ? ? ? 83 A1 B0 00 00 00 F8").offset(3).rip().as<void **>();
-			CPhysicalEntityVFTable =
-			    kcd2_address::scan("48 8D 05 ? ? ? ? 48 89 06 48 8D 05 ? ? ? ? 88 4E 47").offset(3).rip().as<void **>();
-			C3DEngine_VFTable = kcd2_address::scan("48 8D 0D ? ? ? ? 48 89 0E 48 8D 4E 10").offset(3).rip().as<void **>();
-		};
+		game_lua_call = kcd2_address::resolved("lua_call");
+		game_lua_checkstack = kcd2_address::resolved("lua_checkstack");
+		game_lua_concat = kcd2_address::resolved("lua_concat");
+		game_lua_createtable = kcd2_address::resolved("lua_createtable");
+		game_lua_error = kcd2_address::resolved("lua_error");
+		game_lua_gc = kcd2_address::resolved("lua_gc");
+		game_lua_getfenv = kcd2_address::resolved("lua_getfenv");
+		game_lua_getfield = kcd2_address::resolved("lua_getfield");
+		game_lua_getmetatable = kcd2_address::resolved("lua_getmetatable");
+		game_lua_gettable = kcd2_address::resolved("lua_gettable");
+		game_lua_insert = kcd2_address::resolved("lua_insert");
+		game_lua_pcall = kcd2_address::resolved("lua_pcall");
+		game_luaV_execute = kcd2_address::resolved("luaV_execute");
+		game_lua_load = kcd2_address::resolved("lua_load");
+		CScriptableBase_Init_func = kcd2_address::resolved("CScriptableBase_Init");
+		game_lua_setmetatable = kcd2_address::resolved("lua_setmetatable");
+		lua_custom_alloc = kcd2_address::resolved("lua_custom_alloc");
+		game_pushref = kcd2_address::resolved("game_pushref");
+		game_index2adr = kcd2_address::resolved("game index2adr");
+		game_luaH_new = kcd2_address::resolved("game luaH_new");
+		g_C3DEngine_UnRegisterEntityImpl_ptr =
+		    kcd2_address::resolved("C3DEngine_UnRegisterEntityImpl");
+		CXConsole_Ctor = kcd2_address::resolved("CXConsole_ctor");
+		CVegetations_Ctor = kcd2_address::resolved("CVegetation_ctor");
+		CMergedMeshRenderNode_Ctor = kcd2_address::resolved("CMergedMeshRenderNode_ctor");
 
-		scan_addresses_and_set_ptr();
+		CXConsoleVFTable = kcd2_address::derived("CXConsole vtable").as<void **>();
+		CVegetationsVFTable = kcd2_address::derived("CVegetation vtable").as<void **>();
+		CMergedMeshRenderNode_VFTable =
+		    kcd2_address::derived("CMergedMeshRenderNode vtable").as<void **>();
+		CentityVFTable = kcd2_address::resolved("CEntity vtable").as<void **>();
+		CStatObjVFTable = kcd2_address::resolved("CStatObj vtable").as<void **>();
+		CGeomCacheRenderNodeVFTable =
+		    kcd2_address::resolved("CGeomCacheRenderNode vtable").as<void **>();
+		CBrush_VFTable = kcd2_address::resolved("CBrush vtable").as<void **>();
+		CPhysicalEntityVFTable =
+		    kcd2_address::resolved("CPhysicalEntity vtable").as<void **>();
+		C3DEngine_VFTable = kcd2_address::resolved("C3DEngine vtable").as<void **>();
 
 		{
 			const auto cryengine_attachVariable =
-			    kcd2_address::scan("E8 ? ? ? ? 4C 8D 0D ? ? ? ? 4C 8D 05 ? ? ? ? 48 8B CB");
+			    kcd2_address::resolved("CryEngine attachVariable");
 			if (!cryengine_attachVariable)
 			{
 				LOG(ERROR) << "Failed to find CryEngine attachVariable";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_attachVariable>("attachVariable hook", cryengine_attachVariable.get_call());
+			big::hooking::detour_hook_helper::add<hook_attachVariable>("attachVariable hook", cryengine_attachVariable);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? F2 41 0F 10 46");
+			const auto ptr = kcd2_address::resolved("LoadCommonData");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find LoadCommonData";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_LoadCommonData>("hook_LoadCommonData", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_LoadCommonData>("hook_LoadCommonData", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 33 D2 83 8B");
+			const auto ptr = kcd2_address::resolved("CPhysicalEntity_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CPhysicalEntity_ctor";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CPhysicalEntity_ctor>("hook_CPhysicalEntity_ctor", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CPhysicalEntity_ctor>("hook_CPhysicalEntity_ctor", ptr);
 			big::hooking::detour_hook_helper::add<hook_CPhysicalEntity_dctor>("hook_CPhysicalEntity_dctor", CPhysicalEntityVFTable[0]);
 		}
 
 		{
-			const auto ptr =
-			    kcd2_address::scan("E8 ? ? ? ? 48 8B 0D ? ? ? ? 48 8D 1D ? ? ? ? 48 85 C9 74 ? 48 8B 01 4C 8D 05");
+			const auto ptr = kcd2_address::resolved("CryEngine REGISTER_CVAR");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CryEngine REGISTER_CVAR";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_REGISTER_CVAR>("attachVariable hook", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_REGISTER_CVAR>("attachVariable hook", ptr);
 		}
 
 		{
-			//const auto init_renderer =
-			//kcd2_address::scan("48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 54 41 55 41 56 "
-			//"41 57 48 8B EC 48 83 EC ? 48 8B F1 45 8B F1");
-			const auto init_renderer = kcd2_address::scan("E8 ? ? ? ? 48 83 3D ? ? ? ? ? 75 ? 48 8D 0D");
+			const auto init_renderer = kcd2_address::resolved("Initializing Direct3D");
 			if (!init_renderer)
 			{
 				LOG(ERROR) << "Failed to find init_renderer";
 				return;
 			}
-			//big::hooking::detour_hook_helper::add<hook_Initializing_Direct3D>("hook_Initializing_Direct3D", init_renderer.get_call());
 			big::hooking::detour_hook_helper::add<hook_Initializing_Direct3D>("hook_Initializing_Direct3D", init_renderer);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan(
-			    "48 89 5C 24 ? 57 48 83 EC ? 48 8B DA 48 8B F9 45 84 C0 75 ? 44 38 81 ? ? ? ? 74 ? 83 7A");
+			const auto ptr = kcd2_address::resolved("PostInputEvent");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find PostInputEvent";
@@ -2279,10 +2303,9 @@ namespace big
 		}
 
 		{
-			g_hook_log_write_enabled = big::config::general().bind("Logging", "Output Vanilla Game Log", false, "Output to the KCD2ModLoader log the vanilla game log kcd.log");
+			g_hook_log_write_enabled = big::config::general().bind("Logging", "Output Vanilla Game Log", false, "Output to the KCD2MP log the vanilla game log kcd.log");
 
-			const auto ptr = kcd2_address::scan(
-			    "40 53 56 57 41 54 41 55 41 56 41 57 B8 ? ? ? ? E8 ? ? ? ? 48 2B E0 0F 29 B4 24 ? ? ? ? 48 8B 05");
+			const auto ptr = kcd2_address::resolved("CLog_LogV");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CLog_LogV";
@@ -2307,30 +2330,33 @@ namespace big
 		}
 
 		{
-			EachImportFunction(::GetModuleHandleA("WHGame.dll"),
-			                   "fmodstudio.dll",
-			                   [](const char *funcname, void *&func)
-			                   {
-				                   if (strcmp(funcname, "?getEvent@System@Studio@FMOD@@QEBA?AW4FMOD_RESULT@@PEBDPEAPEAVEventDescription@23@@Z") == 0)
-				                   {
-					                   fmodstudio_getevent_orig = (fmodstudio_getevent_t)func;
-					                   ForceWrite<void *>(func, hook_fmodstudio_getevent);
-				                   }
-				                   else if (strcmp(funcname, "?loadBankFile@System@Studio@FMOD@@QEAA?AW4FMOD_RESULT@@PEBDIPEAPEAVBank@23@@Z") == 0)
-				                   {
-					                   fmodstudio_loadbankfile_orig = (fmodstudio_loadbankfile_t)func;
-					                   big::ForceWrite<void *>(func, hook_fmodstudio_loadbankfile);
-				                   }
-				                   else if (strcmp(funcname, "?unload@Bank@Studio@FMOD@@QEAA?AW4FMOD_RESULT@@XZ") == 0)
-				                   {
-					                   fmodstudio_bank_unload_orig = (fmodstudio_bank_unload_t)func;
-				                   }
-			                   });
+			g_pending_hook_registrations.emplace_back(
+			    []
+			    {
+				    EachImportFunction(::GetModuleHandleA("WHGame.dll"),
+				                       "fmodstudio.dll",
+				                       [](const char *funcname, void *&func)
+				                       {
+					                       if (strcmp(funcname, "?getEvent@System@Studio@FMOD@@QEBA?AW4FMOD_RESULT@@PEBDPEAPEAVEventDescription@23@@Z") == 0)
+					                       {
+						                       fmodstudio_getevent_orig = (fmodstudio_getevent_t)func;
+						                       ForceWrite<void *>(func, hook_fmodstudio_getevent);
+					                       }
+					                       else if (strcmp(funcname, "?loadBankFile@System@Studio@FMOD@@QEAA?AW4FMOD_RESULT@@PEBDIPEAPEAVBank@23@@Z") == 0)
+					                       {
+						                       fmodstudio_loadbankfile_orig = (fmodstudio_loadbankfile_t)func;
+						                       big::ForceWrite<void *>(func, hook_fmodstudio_loadbankfile);
+					                       }
+					                       else if (strcmp(funcname, "?unload@Bank@Studio@FMOD@@QEAA?AW4FMOD_RESULT@@XZ") == 0)
+					                       {
+						                       fmodstudio_bank_unload_orig = (fmodstudio_bank_unload_t)func;
+					                       }
+				                       });
+			    });
 		}
 
 		{
-			const auto ptr = kcd2_address::scan(
-			    "40 53 56 57 41 56 41 57 48 81 EC ? ? ? ? 48 8B 05 ? ? ? ? 48 33 C4 48 89 84 24 ? ? ? ? 41 8A D9");
+			const auto ptr = kcd2_address::resolved("XmlParserImp_ParseFile");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find XmlParserImp_ParseFile";
@@ -2340,58 +2366,57 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8D 4D ? 83 F8");
+			const auto ptr = kcd2_address::resolved("XML_Parse");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find XML_Parse";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_XML_Parse>("hook_XML_Parse", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_XML_Parse>("hook_XML_Parse", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? B3 ? 84 C0 75");
+			const auto ptr = kcd2_address::resolved("CCryFile_Open");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CCryFile_Open";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CCryFile_Open>("hook_CCryFile_Open", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CCryFile_Open>("hook_CCryFile_Open", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B F8 8A 83");
+			const auto ptr = kcd2_address::resolved("CCryPak_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CCryPak_ctor";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CCryPak_ctor>("hook_CCryPak_ctor", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CCryPak_ctor>("hook_CCryPak_ctor", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? E9 ? ? ? ? 8B 52 ? 44 8B 79");
+			const auto ptr = kcd2_address::resolved("wh_db_table_patched");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find wh_db_table_patched";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_wh_db_table_patched>("hook_wh_db_table_patched", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_wh_db_table_patched>("hook_wh_db_table_patched", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 83 F8 ? 75 ? 48 8B CB E8 ? ? ? ? 45 33 C9");
+			const auto ptr = kcd2_address::resolved("wh_db_table_patch_find_line");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find wh_db_table_patch_find_line";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_wh_db_table_patch_find_line>("hook_wh_db_table_patch_find_line", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_wh_db_table_patch_find_line>("hook_wh_db_table_patch_find_line", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC ? 41 8A E8 48 "
-			                                    "8B FA 48 8B F1 E8 ? ? ? ? 48 8B 88");
+			const auto ptr = kcd2_address::resolved("XmlParserReadOnly_Read_caller");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find XmlParserReadOnly_Read_caller";
@@ -2403,13 +2428,13 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B C3 48 8B 5C 24 ? 48 8B 6C 24 ? 0F 28 74 24");
+			const auto ptr = kcd2_address::resolved("CXConsole_RegisterVar");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CXConsole_RegisterVar";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CXConsole_RegisterVar>("hook_CXConsole_RegisterVar", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CXConsole_RegisterVar>("hook_CXConsole_RegisterVar", ptr);
 		}
 
 		{
@@ -2425,57 +2450,47 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B D8 48 8B D7 48 89 1D");
+			const auto ptr = kcd2_address::resolved("CEntitySystem_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CEntitySystem_CEntitySystem";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CEntitySystem_CEntitySystem>("hook_CEntitySystem_CEntitySystem", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CEntitySystem_CEntitySystem>("hook_CEntitySystem_CEntitySystem", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B D8 EB ? 48 8B DF 41 8B C7");
+			const auto ptr = kcd2_address::resolved("CEntity_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CEntity_ctor";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CEntity_ctor>("hook_CEntity_ctor", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CEntity_ctor>("hook_CEntity_ctor", ptr);
 			big::hooking::detour_hook_helper::add<hook_CEntity_dctor>("hook_CEntity_dctor", CentityVFTable[0]);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B D8 4C 8B 8C 24");
+			const auto ptr = kcd2_address::resolved("CBrush_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CBrush_ctor";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CBrush_ctor>("hook_CBrush_ctor", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CBrush_ctor>("hook_CBrush_ctor", ptr);
 			big::hooking::detour_hook_helper::add<hook_CBrush_dctor>("hook_CBrush_dctor", CBrush_VFTable[0]);
 		}
 
-		//{
-		//const auto ptr = kcd2_address::scan(
-		//"E8 ? ? ? ? EB ? B9 ? ? ? ? E8 ? ? ? ? 48 8B C8 33 C0 48 85 C9 74 ? E8 ? ? ? ? 48 8B 5C 24");
-		//if (!ptr)
-		//{
-		//LOG(ERROR) << "Failed to find CMovableBrush_ctor";
-		//return;
-		//}
-		//big::hooking::detour_hook_helper::add<hook_CMovableBrush_ctor>("hook_CMovableBrush_ctor", ptr.get_call());
-		//}
-
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 84 C0 0F 84 ? ? ? ? 4C 8B 45 ? 4C 3B C7");
+			const auto ptr = kcd2_address::resolved("CPlayerStateMovement_Ledge_callback");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find a function that uses gEnv->pGame";
 				return;
 			}
 
-			g_gEnv_pGame_ptr = ptr.get_call().offset(0x65).rip().as<uintptr_t *>();
+			g_gEnv_pGame_ptr =
+			    kcd2_address::derived("gEnv pGame pointer").as<uintptr_t *>();
 
 			// Reproduction of CryEngine SetFlyMode inside CDevMode::OnGameplayCommand
 			// Doesn't work well cause of custom movement system of KCD
@@ -2489,88 +2504,73 @@ namespace big
 			//}
 		}
 
-		//{
-		//const auto ptr = kcd2_address::scan(
-		//"4C 8D 05 ? ? ? ? 48 8D 15 ? ? ? ? 8D 41 ? 48 8D 4D ? 89 83 ? ? ? ? E8 ? ? ? ? 48 89 75");
-		//if (!ptr)
-		//{
-		//LOG(ERROR) << "Failed to find CPlayerStateMovement_Ledge_callback";
-		//return;
-		//}
-		//big::hooking::detour_hook_helper::add<hook_CPlayerStateMovement_Ledge_callback>(
-		//"hook_CPlayerStateMovement_Ledge_callback",
-		//ptr.offset(3).rip());
-		//}
-
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? EB ? 45 33 C0 F7 43");
+			const auto ptr = kcd2_address::resolved("CMovableBrush_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CEntity_SetWorldTM";
 				return;
 			}
 
-			g_CEntity_SetWorldTM = ptr.get_call().as<decltype(g_CEntity_SetWorldTM)>();
+			g_CEntity_SetWorldTM = ptr.as<decltype(g_CEntity_SetWorldTM)>();
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 84 C0 74 ? 48 8B 45 ? 48 89 18");
+			const auto ptr = kcd2_address::resolved("StepDataSBrush");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find StepDataSBrush";
 				return;
 			}
 
-			big::hooking::detour_hook_helper::add<hook_StepDataSBrush>("hook_StepDataSBrush", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_StepDataSBrush>("hook_StepDataSBrush", ptr);
 		}
 
 		{
-			const auto ptr =
-			    kcd2_address::scan("E8 ? ? ? ? 84 C0 75 ? 48 8B 0D ? ? ? ? 48 85 C9 74 ? 48 8B 01 41 8B D5");
+			const auto ptr = kcd2_address::resolved("CTerrain_Load");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CTerrain_Load";
 				return;
 			}
 
-			big::hooking::detour_hook_helper::add<hook_CTerrain_Load>("hook_CTerrain_Load", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CTerrain_Load>("hook_CTerrain_Load", ptr);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 8B 57 ? 49 8B CF");
+			const auto ptr = kcd2_address::resolved("CBrush_SetStatObj");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CBrush_SetStatObj";
 				return;
 			}
 
-			g_CBrush_SetStatObj = ptr.get_call().as<decltype(g_CBrush_SetStatObj)>();
+			g_CBrush_SetStatObj = ptr.as<decltype(g_CBrush_SetStatObj)>();
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B F8 4C 89 BF");
+			const auto ptr = kcd2_address::resolved("CStatObj_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CStatObj_ctor";
 				return;
 			}
 
-			g_CStatObj_ctor = ptr.get_call().as<decltype(g_CStatObj_ctor)>();
+			g_CStatObj_ctor = ptr.as<decltype(g_CStatObj_ctor)>();
 
 			big::hooking::detour_hook_helper::add<hook_CStatObj_ctor>("hook_CStatObj_ctor", g_CStatObj_ctor);
 			big::hooking::detour_hook_helper::add<hook_CStatObj_dctor>("hook_CStatObj_dctor", CStatObjVFTable[0]);
 		}
 
 		{
-			const auto ptr = kcd2_address::scan(
-			    "E8 ? ? ? ? E9 ? ? ? ? B9 ? ? ? ? E8 ? ? ? ? 48 8B C8 33 C0 48 85 C9 0F 84 ? ? ? ? E8 ? ? ? ? EB");
+			const auto ptr = kcd2_address::resolved("CGeomCacheRenderNode_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CGeomCacheRenderNode_ctor";
 				return;
 			}
 
-			big::hooking::detour_hook_helper::add<hook_CGeomCacheRenderNode_ctor>("hook_CGeomCacheRenderNode_ctor", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_CGeomCacheRenderNode_ctor>("hook_CGeomCacheRenderNode_ctor", ptr);
 			big::hooking::detour_hook_helper::add<hook_CGeomCacheRenderNode_dctor>("hook_CGeomCacheRenderNode_dctor", CGeomCacheRenderNodeVFTable[0]);
 		}
 
@@ -2599,8 +2599,7 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("48 89 5C 24 ? 48 89 74 24 ? 48 89 7C 24 ? 55 41 54 41 55 41 56 41 "
-			                                    "57 48 8B EC 48 83 EC ? 48 8B F9 E8");
+			const auto ptr = kcd2_address::resolved("C_PlayerStateMovement_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find C_PlayerStateMovement_ctor";
@@ -2610,8 +2609,7 @@ namespace big
 		}
 
 		{
-			const auto ptr =
-			    kcd2_address::scan("40 55 53 56 57 41 56 48 8B EC 48 81 EC ? ? ? ? 48 8B D9 E8 ? ? ? ? 33 F6");
+			const auto ptr = kcd2_address::resolved("C_Player_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find C_Player_ctor";
@@ -2621,13 +2619,13 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 8B 5C 24 ? 48 89 47 ? B0");
+			const auto ptr = kcd2_address::resolved("C3DEngine_ctor");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find C3DEngine_ctor";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_C3DEngine_ctor>("hook_C3DEngine_ctor", ptr.get_call());
+			big::hooking::detour_hook_helper::add<hook_C3DEngine_ctor>("hook_C3DEngine_ctor", ptr);
 			big::hooking::detour_hook_helper::add<hook_C3DEngine_RegisterEntity>("hook_C3DEngine_RegisterEntity", C3DEngine_VFTable[38]);
 			big::hooking::detour_hook_helper::add<hook_C3DEngine_UnRegisterEntityImpl>(
 			    "hook_C3DEngine_UnRegisterEntityImpl",
@@ -2636,14 +2634,15 @@ namespace big
 
 		{
 			const auto ptr =
-			    kcd2_address::scan("E8 ? ? ? ? F3 44 0F 10 05 ? ? ? ? 48 8D 45 ? 48 89 44 24 ? 41 0F 28 D8");
+			    kcd2_address::resolved("CD3D9Renderer_UnProjectFromScreen");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CD3D9Renderer_UnProjectFromScreen";
 				return;
 			}
 
-			g_CD3D9Renderer_UnProjectFromScreen = ptr.get_call().as<decltype(g_CD3D9Renderer_UnProjectFromScreen)>();
+			g_CD3D9Renderer_UnProjectFromScreen =
+			    ptr.as<decltype(g_CD3D9Renderer_UnProjectFromScreen)>();
 
 			big::hooking::detour_hook_helper::add<hook_CD3D9Renderer_UnProjectFromScreen>(
 			    "hook_CD3D9Renderer_UnProjectFromScreen",
@@ -2651,7 +2650,8 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("48 83 EC ? 48 8B 0D ? ? ? ? 0F 29 74 24 ? 0F 28 F2 0F 29 7C 24");
+			const auto ptr =
+			    kcd2_address::resolved("CD3D9Renderer_ProjectToScreen");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find CD3D9Renderer_ProjectToScreen";
@@ -2662,14 +2662,14 @@ namespace big
 		}
 
 		{
-			const auto ptr = kcd2_address::scan("E8 ? ? ? ? 48 FF 03 48 81 C4");
+			const auto ptr = kcd2_address::resolved("game_lua_call_internal");
 			if (!ptr)
 			{
 				LOG(ERROR) << "Failed to find RayWorldIntersection";
 				return;
 			}
 
-			g_RayWorldIntersection = ptr.get_call().as<decltype(g_RayWorldIntersection)>();
+			g_RayWorldIntersection = ptr.as<decltype(g_RayWorldIntersection)>();
 		}
 
 		// Early main Lua
@@ -2702,17 +2702,19 @@ namespace big
 		}
 
 		{
-			const auto cryscriptsystem_init = kcd2_address::scan("E8 ? ? ? ? 84 C0 74 ? E8 ? ? ? ? 41 38 BE");
+			const auto cryscriptsystem_init =
+			    kcd2_address::resolved("CryScriptSystem_Init");
 			if (!cryscriptsystem_init)
 			{
 				LOG(ERROR) << "Failed to find CryScriptSystem::Init";
 				return;
 			}
-			big::hooking::detour_hook_helper::add<hook_CryScriptSystem_Init>("hook_CryScriptSystem_Init",
-			                                                                 cryscriptsystem_init.get_call());
+			big::hooking::detour_hook_helper::add<hook_CryScriptSystem_Init>(
+			    "hook_CryScriptSystem_Init",
+			    cryscriptsystem_init);
 
 			const auto lua_system_update_tick =
-			    kcd2_address::scan("48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8B 3D ? ? ? ? 48 8B F1 33 D2");
+			    kcd2_address::resolved("CScriptSystem_Update");
 			if (!lua_system_update_tick)
 			{
 				LOG(ERROR) << "Failed to find CryScriptSystem::Update";
@@ -2720,8 +2722,8 @@ namespace big
 			}
 			big::hooking::detour_hook_helper::add<hook_CScriptSystem_Update>("hook_lua_system_update_tick", lua_system_update_tick);
 
-			const auto lua_execute_buffer = kcd2_address::scan(
-			    "48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 48 8B F9 48 89 50");
+			const auto lua_execute_buffer =
+			    kcd2_address::resolved("CScriptSystem_ExecuteBuffer");
 			if (!lua_execute_buffer)
 			{
 				LOG(ERROR) << "Failed to find CryScriptSystem::ExecuteBuffer";
@@ -2868,5 +2870,70 @@ namespace big
 				}
 			}
 		}
+	}
+#undef hooking
+
+	kcd2_init_result kcd2_init()
+	{
+		kcd2_address::begin_scan_session();
+		g_pending_hook_registrations.clear();
+
+		auto summary = kcd2_address::get_scan_summary();
+		if (summary.failures.empty()
+		    && summary.requested == summary.resolved
+		    && summary.derived_requested == summary.derived_resolved)
+		{
+			kcd2_init_impl();
+			summary = kcd2_address::get_scan_summary();
+		}
+
+		kcd2_init_result result{
+		    .success              = summary.failures.empty()
+		        && summary.requested == summary.resolved
+		        && summary.derived_requested == summary.derived_resolved,
+		    .signatures_requested = summary.requested,
+		    .signatures_resolved  = summary.resolved,
+		    .derived_requested    = summary.derived_requested,
+		    .derived_resolved     = summary.derived_resolved,
+		};
+
+		for (const auto &failure : summary.failures)
+		{
+			std::string status;
+			switch (failure.status)
+			{
+			case kcd2_address::scan_status::ambiguous:
+				status = std::format("{} matches", failure.match_count);
+				break;
+			case kcd2_address::scan_status::invalid_pattern:
+				status = "invalid pattern";
+				break;
+			case kcd2_address::scan_status::invalid_target:
+				status = "invalid derived target";
+				break;
+			case kcd2_address::scan_status::module_unavailable:
+				status = "WHGame.dll unavailable";
+				break;
+			default:
+				status = "no match";
+				break;
+			}
+			result.errors.push_back(std::format(
+			    "{} ({}): {}",
+			    failure.name,
+			    status,
+			    failure.detail.empty() ? "no diagnostic detail" : failure.detail));
+		}
+
+		if (result.success)
+		{
+			for (auto &register_hook : g_pending_hook_registrations)
+			{
+				register_hook();
+			}
+		}
+		g_pending_hook_registrations.clear();
+
+		return result;
 	}
 } // namespace big

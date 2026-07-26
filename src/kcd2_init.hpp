@@ -1623,5 +1623,15 @@ namespace big
 		return true;
 	}
 
-	void kcd2_init();
+	struct kcd2_init_result
+	{
+		bool success{};
+		size_t signatures_requested{};
+		size_t signatures_resolved{};
+		size_t derived_requested{};
+		size_t derived_resolved{};
+		std::vector<std::string> errors;
+	};
+
+	kcd2_init_result kcd2_init();
 } // namespace big

@@ -20,7 +20,7 @@ jobs:
           toolset: 14.44
           
       - name: Generate CMake project
-        run: cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FINAL=YES -S. -Bbuild -G Ninja
+        run: cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FINAL=YES -D BUILD_TESTING=ON -S. -Bbuild -G Ninja
         #run: cmake -D CMAKE_BUILD_TYPE=Debug -S. -Bbuild -G Ninja
 
       - name: Prepare 64bit release DLL
@@ -28,8 +28,8 @@ jobs:
         run: |
           set -x
 
-          namespace="KCD2ModLoader"
-          mod_name="KCD2ModLoader"
+          namespace="KCD2MP"
+          mod_name="KCD2MP"
 
           version_number="1.0.0"
 
@@ -37,17 +37,20 @@ jobs:
           version_number=$(echo "$version_number" | tr -d '"')
 
           # For the FILEVERSION we want a , format
-          version_number_comma=$(echo $version_number | tr . ,)
+          version_number_comma=$(echo $version_number | tr . ,),0
 
           cd src
           sed -i 's/FILEVERSION .*/FILEVERSION '"$version_number_comma"'/' resources.rc
+          sed -i 's/PRODUCTVERSION .*/PRODUCTVERSION '"$version_number_comma"'/' resources.rc
+          sed -i 's/"FileVersion", *"[^"]*"/"FileVersion", "'"$version_number"'"/g' resources.rc
           sed -i 's/"ProductVersion", *"[^"]*"/"ProductVersion", "'"$version_number"'"/g' resources.rc
           cd ..
 
       - name: Build 64bit release DLL
         run: |
-          cmake --build ./build --config RelWithDebInfo --target KCD2ModLoader --
-          #cmake --build ./build --config Debug --target KCD2ModLoader --
+          cmake --build ./build --config RelWithDebInfo --target KCD2MP KCD2MPSignatureAudit KCD2MPSignatureCoreTests --
+          ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MPSignatureCoreTests$" --output-on-failure
+          #cmake --build ./build --config Debug --target KCD2MP --
           mv ./build/d3d12_.dll ./build/d3d12.dll
           mv ./build/d3d12_.pdb ./build/d3d12.pdb
 

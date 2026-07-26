@@ -1,89 +1,85 @@
-# KCD2ModLoader
+# KCD2MP
 
-[Kingdom Come: Deliverance II Modding Discord](https://discord.gg/8nSKqQCJ)
+KCD2MP is a work-in-progress multiplayer framework for Kingdom Come: Deliverance II.
 
----
+The project is forked from [KCD2ModLoader](https://github.com/xiaoxiao921/KCD2ModLoader) and uses
+[ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase) as its modding foundation.
 
-KCD2ModLoader is a modding plugin / framework for Kingdom Come: Deliverance II.
+> Multiplayer functionality is not available yet. The current codebase provides the loader and
+> modding framework that the multiplayer implementation will build on.
 
-(A game made with CryEngine 5)
+## Build tool
 
-It's using [ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase) as a base. You can check its README for more information on how it works.
+Requirements:
 
-## Mod Manager Installation
+- Windows 10 or Windows 11
+- Python 3.9 or newer
+- CMake
+- Visual Studio with the MSVC x64 C++ workload
 
-- TODO
+Run `build.bat` from the repository root. On first launch it creates an isolated `.venv-build`
+environment, installs the pinned Textual dependency, and opens the build TUI.
 
-## Manual Installation
+The TUI supports:
 
-- Place the main KCD2ModLoader file, called `d3d12.dll`, next to the game executable called `KingdomCome.exe` inside the game folder.
+- Debug builds
+- Optimized Release builds with debug symbols
+- Automatic Kingdom Come: Deliverance II discovery through Steam
+- A persistent game-directory override
+- Native signature auditing with live output
+- Building and deploying `d3d12.dll` and `d3d12.pdb`
 
-- To uninstall the mod loader or revert to a vanilla experience without mods, you can simply rename or delete the `d3d12.dll` file.
+`Build & Deploy` runs the signature audit against the installed `WHGame.dll` before copying any
+files. The deploy action does not start or stop the game. Close the game before deploying so
+Windows does not lock the DLL.
 
-## Feature Summary
+## Supported game build and diagnostics
 
-- Easy hot reloading of .lua files through a file watcher system, just save your .lua file and your main.lua file will get executed again by the mod loader.
+KCD2MP currently enables hooks only for Steam build `23914554` / WHGame build
+`1308617_856` (game version 1.5). Other builds are reported as unsupported and continue without
+KCD2MP hooks.
 
-- Dear ImGui library integrated into lua directly, [documented here](https://github.com/xiaoxiao921/KCD2ModLoader/blob/master/docs/lua/tables/ImGui.md) [and here](https://github.com/xiaoxiao921/KCD2ModLoader/blob/master/docs/lua/tables/rom.gui.md).
+The diagnostic console is always visible in Debug and Release. Startup reports each major stage,
+the detected PE fingerprint, signature validation, and whether hooks were enabled. A successful
+startup ends with:
 
-- FMOD modding.
+```text
+KCD2MP initialization completed - 64/64 signatures resolved - hooks enabled
+```
 
-- Generic game file modifications.
+Signatures can be checked without starting the game through the TUI's `Audit signatures` action.
+The same native tool can be built and run from a terminal:
 
-- ASI mod loading, it has the same feature set as [this one](https://github.com/ThirteenAG/Ultimate-ASI-Loader), minus the configuration part.
+```powershell
+cmake --build out\build\debug --config Debug --target KCD2MPSignatureAudit
+out\build\debug\Debug\KCD2MPSignatureAudit.exe "C:\path\to\WHGame.dll"
+```
 
-- XML Merging System. For files like InventoryPreset which are not supported fully by the game PTF System.
+Runtime and audit share one typed 64-entry registry and the same Zydis-based call, RIP-relative,
+VTable, and PE-range validation.
 
-- Trainer, right now with a very easy and nice to use Noclip.
+## Manual installation
 
-- Debug Inspectors: PTF, Entities.
+Copy the built loader to the directory containing `KingdomCome.exe` and name it `d3d12.dll`.
+The default Steam destination is:
 
-## Test Mod
+```text
+KingdomComeDeliverance2\Bin\Win64MasterMasterSteamPGO
+```
 
-[The Test Mod is located here](https://github.com/xiaoxiao921/KCD2ModLoader/tree/master/examples/plugins/KCD2ModLoader-TestMod)
+To uninstall KCD2MP, remove or rename `d3d12.dll`.
 
-It showcase multiple things:
+## Existing modding features
 
-### Custom UI
+- Lua plugin loading and hot reload
+- Dear ImGui Lua bindings ([ImGui API](docs/lua/tables/ImGui.md),
+  [GUI API](docs/lua/tables/rom.gui.md))
+- FMOD modding
+- Generic game-file modifications
+- ASI mod loading
+- XML merging
+- Debug inspectors and trainer utilities
 
-- The usage of the Dear ImGui library, for easy creation of an UI for your mod.
+## Test mod
 
-### FMOD
-
-- FMOD getevent function is hooked the passed string identifier can be modified, meaning that you can easily swap and replace sounds.
- 
-- You can also add additional FMOD events through xml modifications (more on that just below) since FMOD event names are also described inside xml nodes.
- 
-- The mod loader also provide a way of loading / unloading additional FMOD sound banks. This specific feature is untested for now but should work with more details available inside the `rom.audio.md` file inside the lua docs.
-
-### Generic game file modifications
-
-#### XML
-
-- ~XML parsing function from the game is hooked and modified on the fly, you can then hook up a xml <-> lua table library ([like this one](https://github.com/manoelcampos/xml2lua)) for very easy modifications for merging and so on.~ (Currently disabled due to crashes related to the Lua VM being used across multiple threads, will try to re-enable it in the future.)
-
-- XML Merging System: 
-
-- For files like InventoryPreset which are not supported fully by the game PTF System yet.
-
-- For `levels` xmls, right now only `objects_mission0` files are supported.
-
-#### CryEngine Pak Files
-
-- `rom.game_data.on_cryfile_open` for swapping almost any files that the game loads
-
-- `rom.game_data.on_pak_openable` event for loading / oepning pak files as soon as possible through the usage of `rom.game_data.open_pak`.
-
-### Using the vanilla Lua game api
-
-- Example usage of:
-
-- `player.inventory:CreateItem`
-
-- `System.GetEntityByName`
-
-- `Entity:SetWorldPos`
-
-- `ItemManager`
-
-- `inventory:GetInventoryTable`
+The example plugin is available in [`examples/plugins/KCD2MP-TestMod`](examples/plugins/KCD2MP-TestMod).

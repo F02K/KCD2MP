@@ -1,3 +1,8 @@
+set(GIT_SHA1 "unknown")
+set(GIT_DATE "unknown")
+set(GIT_COMMIT_SUBJECT "unknown")
+set(GIT_BRANCH "unknown")
+
 find_package(Git)
 if(Git_FOUND)
     message("Git found: ${GIT_EXECUTABLE}")
@@ -33,6 +38,9 @@ if(Git_FOUND)
         OUTPUT_VARIABLE GIT_BRANCH
         ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
 
-    # generate version.cpp
-    configure_file("${SRC_DIR}/version.cpp.in" "${SRC_DIR}/version.cpp" @ONLY)
 endif()
+
+# Generate this into the build tree so a clean checkout never mutates src/ and
+# the source can be added to the target during the first configure.
+set(GENERATED_VERSION_SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/version.cpp")
+configure_file("${SRC_DIR}/version.cpp.in" "${GENERATED_VERSION_SOURCE}" @ONLY)

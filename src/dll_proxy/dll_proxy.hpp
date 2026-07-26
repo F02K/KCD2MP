@@ -4,6 +4,6 @@ namespace big
 {
 	struct dll_proxy
 	{
-		static void init();
+		static bool init();
 	};
 } // namespace big

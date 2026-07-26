@@ -1,6 +1,7 @@
 include(FetchContent)
 
 set(MI_OVERRIDE OFF)
+set(MI_BUILD_TESTS OFF CACHE BOOL "Do not build mimalloc's test executables" FORCE)
 
 FetchContent_Declare(
 	mimalloc

@@ -988,7 +988,7 @@ namespace big
 			if (!onboarding_open)
 			{
 				toggle(true);
-				ImGui::OpenPopup("Welcome to KCD2ModLoader");
+				ImGui::OpenPopup("Welcome to KCD2MP");
 				onboarding_open = true;
 			}
 
@@ -1005,7 +1005,7 @@ namespace big
 			}
 			ImGui::SetNextWindowPos(window_position, ImGuiCond_Always);
 
-			if (ImGui::BeginPopupModal("Welcome to KCD2ModLoader"))
+			if (ImGui::BeginPopupModal("Welcome to KCD2MP"))
 			{
 				//ImGui::SeparatorText("Change the GUI opening key if you wish");
 				if (ImGui::Hotkey("Open GUI Keybind", g_gui_toggle))
@@ -1241,7 +1241,7 @@ namespace big
 
 				if (ImGui::BeginMenu("Log"))
 				{
-					ImGui::ConfigBind(ImGui::Checkbox, "Output to the KCD2ModLoader log\nthe vanilla game log (kcd.log)", g_hook_log_write_enabled);
+					ImGui::ConfigBind(ImGui::Checkbox, "Output to the KCD2MP log\nthe vanilla game log (kcd.log)", g_hook_log_write_enabled);
 
 					ImGui::EndMenu();
 				}

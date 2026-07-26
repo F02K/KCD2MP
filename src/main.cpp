@@ -4,118 +4,222 @@
 #include "gui/renderer.hpp"
 #include "hooks/hooking.hpp"
 #include "input/hotkey.hpp"
-#include "kcd2_address.hpp"
 #include "kcd2_init.hpp"
 #include "logger/exception_handler.hpp"
 #include "memory/byte_patch_manager.hpp"
+#include "memory/module.hpp"
 #include "paths/paths.hpp"
 #include "threads/thread_pool.hpp"
-#include "threads/util.hpp"
 #include "version.hpp"
 
 #include <mimalloc-new-delete.h>
 
-//#include "debug/debug.hpp"
-
-BOOL APIENTRY DllMain(HMODULE hmod, DWORD reason, PVOID)
+namespace
 {
-	using namespace big;
+	constexpr DWORD SUPPORTED_WHGAME_TIMESTAMP = 0x6A350E20;
+	constexpr size_t SUPPORTED_WHGAME_IMAGE_SIZE = 0x5B2D000;
+	constexpr auto WHGAME_WAIT_TIMEOUT = std::chrono::seconds(30);
 
-	if (reason == DLL_PROCESS_ATTACH)
+	void flush_logs()
 	{
-		dll_proxy::init();
+		if (big::g_log)
+		{
+			al::Logger::FlushQueue();
+		}
+	}
+
+	bool initialize_kcd2mp(HMODULE module)
+	{
+		using namespace big;
+		const auto started_at = std::chrono::steady_clock::now();
 
 		if (!rom::is_rom_enabled())
 		{
-			return true;
+			return false;
 		}
 
-		// Lua API: Namespace
-		// Name: rom
-		rom::init("KCD2ModLoader", "WHGame.dll", "rom");
-
-		// Purposely leak it, we are not unloading this module in any case.
-		{
-			auto exception_handling = new exception_handler(true, big::big_exception_handler);
-
-			// SetUnhandledExceptionFilter is not working correctly it seems,
-			// sometimes it's straight up not called even on unhandled exceptions.
-			//AddVectoredContinueHandler(true, big::big_exception_handler);
-		}
-
-		// https://learn.microsoft.com/en-us/cpp/c-runtime-library/reference/setlocale-wsetlocale?view=msvc-170#utf-8-support
+		rom::init("KCD2MP", "WHGame.dll", "rom");
 		setlocale(LC_ALL, ".utf8");
-		// This also change things like stringstream outputs and add comma to numbers and things like that, we don't want that, so just set locale on the C apis instead.
-		//std::locale::global(std::locale(".utf8"));
 
-		std::filesystem::path root_folder = paths::get_project_root_folder();
+		const std::filesystem::path root_folder = paths::get_project_root_folder();
 		g_file_manager.init(root_folder);
 		paths::init_dump_file_path();
+		config::init_general();
 
-		big::config::init_general();
+		// KCD2MP is currently a development fork. Keep the diagnostic console
+		// available in both Debug and Release, even if an older config disabled it.
+		config::general()
+		    .bind("Logging", "Console Enabled", true, "KCD2MP always displays its diagnostic console.")
+		    ->set_value(true);
 
-		// Purposely leak it, we are not unloading this module in any case.
-		auto logger_instance = new logger(rom::g_project_name, g_file_manager.get_project_file("./LogOutput.log"));
+		// Intentionally leaked: the proxy DLL remains loaded for the process lifetime.
+		new logger(rom::g_project_name, g_file_manager.get_project_file("./LogOutput.log"));
+		// Keep ROM's dump-producing top-level filter, but do not detour
+		// SetUnhandledExceptionFilter. That anti-removal detour is not required
+		// for KCD2MP and failed during startup on the supported game build.
+		new exception_handler(false, big_exception_handler);
 
-		static struct logger_cleanup
-		{
-			~logger_cleanup()
-			{
-				Logger::Destroy();
-			}
-		} g_logger_cleanup;
-
-		std::srand(std::chrono::system_clock::now().time_since_epoch().count());
-
-		LOG(INFO) << rom::g_project_name;
+		LOG(INFO) << "KCD2MP bootstrap thread started outside DllMain.";
 		LOGF(INFO, "Build (GIT SHA1): {}", version::GIT_SHA1);
-
 #ifdef FINAL
-		LOG(INFO) << "This is a final build";
+		LOG(INFO) << "Build profile: Release (FINAL)";
+#else
+		LOG(INFO) << "Build profile: Debug";
 #endif
 
-		auto thread_pool_instance = new thread_pool();
+		memory::module whgame("WHGame.dll");
+		if (!whgame.wait_for_module(WHGAME_WAIT_TIMEOUT))
+		{
+			LOG(ERROR) << "WHGame.dll did not load within 30 seconds. KCD2MP hooks will remain disabled; the game may continue without the mod.";
+			flush_logs();
+			return false;
+		}
 
-		// Purposely leak it, we are not unloading this module in any case.
-		auto byte_patch_manager_instance = new byte_patch_manager();
-		LOG(INFO) << "Byte Patch Manager initialized.";
-		kcd2_init();
+		LOGF(
+		    INFO,
+		    "Detected WHGame.dll: TimeDateStamp=0x{:08X}, SizeOfImage=0x{:X}",
+		    whgame.timestamp(),
+		    whgame.size());
 
-		// Purposely leak it, we are not unloading this module in any case.
-		auto hooking_instance = new hooking();
-		LOG(INFO) << "Hooking initialized.";
+		if (whgame.timestamp() != SUPPORTED_WHGAME_TIMESTAMP || whgame.size() != SUPPORTED_WHGAME_IMAGE_SIZE)
+		{
+			LOGF(
+			    ERROR,
+			    "Unsupported WHGame.dll build. Expected TimeDateStamp=0x{:08X}, SizeOfImage=0x{:X}. KCD2MP hooks will remain disabled; the game will continue without the mod.",
+			    SUPPORTED_WHGAME_TIMESTAMP,
+			    SUPPORTED_WHGAME_IMAGE_SIZE);
+			flush_logs();
+			return false;
+		}
 
-		auto renderer_instance = new renderer();
+		LOG(INFO) << "Supported Steam build 23914554 / WHGame build 1308617_856 detected.";
+
+		std::srand(static_cast<unsigned int>(std::chrono::system_clock::now().time_since_epoch().count()));
+
+		// These process-lifetime services are intentionally leaked. They are only
+		// created after DllMain returned, so their worker threads cannot deadlock
+		// against the Windows loader lock.
+		new thread_pool();
+		new byte_patch_manager();
+		LOG(INFO) << "Runtime services initialized.";
+
+		const auto init_result = kcd2_init();
+		if (!init_result.success)
+		{
+			LOGF(
+			    ERROR,
+			    "KCD2MP address validation failed ({}/{} signatures, {}/{} derived targets). No hooks will be enabled.",
+			    init_result.signatures_resolved,
+			    init_result.signatures_requested,
+			    init_result.derived_resolved,
+			    init_result.derived_requested);
+			for (const auto &error : init_result.errors)
+			{
+				LOG(ERROR) << "  - " << error;
+			}
+			LOG(ERROR) << "The game will continue without KCD2MP hooks.";
+			flush_logs();
+			return false;
+		}
+
+		LOGF(
+		    INFO,
+		    "Signature validation completed: {}/{} signatures resolved.",
+		    init_result.signatures_resolved,
+		    init_result.signatures_requested);
+		LOGF(
+		    INFO,
+		    "Derived target validation completed: {}/{} valid.",
+		    init_result.derived_resolved,
+		    init_result.derived_requested);
+
+		new hooking();
+		LOG(INFO) << "Hook objects initialized.";
+
+		new renderer();
 		LOG(INFO) << "Renderer initialized.";
 
 		hotkey::init_hotkeys();
-
 		g_hooking->enable();
-		LOG(INFO) << "Hooking enabled.";
+		LOG(INFO) << "Hooks enabled.";
 
-		asi_loader::init(hmod);
-
+		asi_loader::init(module);
 		g_running = true;
 
-		DisableThreadLibraryCalls(hmod);
-		g_hmodule     = hmod;
-		g_main_thread = CreateThread(
-		    nullptr,
-		    0,
-		    [](PVOID) -> DWORD
-		    {
-			    while (g_running)
-			    {
-				    std::this_thread::sleep_for(500ms);
-			    }
-
-			    CloseHandle(g_main_thread);
-			    FreeLibraryAndExitThread(g_hmodule, 0);
-		    },
-		    nullptr,
-		    0,
-		    &g_main_thread_id);
+		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+		    std::chrono::steady_clock::now() - started_at);
+		LOGF(
+		    INFO,
+		    "KCD2MP initialization completed - {}/{} signatures resolved - hooks enabled ({} ms).",
+		    init_result.signatures_resolved,
+		    init_result.signatures_requested,
+		    elapsed.count());
+		flush_logs();
+		return true;
 	}
 
-	return true;
+	DWORD WINAPI bootstrap_thread(PVOID parameter) noexcept
+	{
+		const auto module = static_cast<HMODULE>(parameter);
+		try
+		{
+			initialize_kcd2mp(module);
+		}
+		catch (const std::exception &exception)
+		{
+			if (big::g_log)
+			{
+				LOG(ERROR) << "Unhandled exception during KCD2MP initialization: " << exception.what();
+				LOG(ERROR) << "KCD2MP hooks remain disabled; the game may continue without the mod.";
+				flush_logs();
+			}
+			else
+			{
+				OutputDebugStringA("KCD2MP initialization failed before the logger was available.\n");
+			}
+		}
+		catch (...)
+		{
+			if (big::g_log)
+			{
+				LOG(ERROR) << "Unknown exception during KCD2MP initialization.";
+				LOG(ERROR) << "KCD2MP hooks remain disabled; the game may continue without the mod.";
+				flush_logs();
+			}
+			else
+			{
+				OutputDebugStringA("KCD2MP initialization failed with an unknown exception.\n");
+			}
+		}
+		return 0;
+	}
+}
+
+BOOL APIENTRY DllMain(HMODULE module, DWORD reason, PVOID)
+{
+	if (reason != DLL_PROCESS_ATTACH)
+	{
+		return TRUE;
+	}
+
+	if (!big::dll_proxy::init())
+	{
+		return FALSE;
+	}
+
+	big::g_hmodule = module;
+	DisableThreadLibraryCalls(module);
+
+	DWORD thread_id{};
+	const auto thread = CreateThread(nullptr, 0, bootstrap_thread, module, 0, &thread_id);
+	if (!thread)
+	{
+		// The D3D12 proxy remains usable even when mod initialization cannot start.
+		OutputDebugStringA("KCD2MP failed to create its bootstrap thread; continuing as a D3D12 proxy only.\n");
+		return TRUE;
+	}
+
+	big::g_main_thread_id = thread_id;
+	CloseHandle(thread);
+	return TRUE;
 }
