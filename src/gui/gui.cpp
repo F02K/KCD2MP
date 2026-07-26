@@ -6,6 +6,8 @@
 #include "lua/bindings/imgui_window.hpp"
 #include "lua_extensions/lua_manager_extension.hpp"
 #include "lua_extensions/lua_module_ext.hpp"
+#include "multiplayer/client.hpp"
+#include "multiplayer/game_bridge.hpp"
 
 #include <gui/widgets/imgui_extensions.hpp>
 #include <gui/widgets/imgui_hotkey.hpp>
@@ -19,6 +21,180 @@
 namespace big
 {
 	extern toml_v2::config_file::config_entry<bool>* g_hook_log_write_enabled;
+
+	namespace
+	{
+		bool g_show_multiplayer = true;
+
+		void RenderMultiplayer()
+		{
+			if (!g_show_multiplayer || !kcd2mp::g_multiplayer_client)
+			{
+				return;
+			}
+
+			static auto* saved_address = config::general().bind(
+			    "Multiplayer",
+			    "Address",
+			    std::string{"127.0.0.1:27020"},
+			    "Last Direct-IP server address.");
+			static auto* saved_name = config::general().bind(
+			    "Multiplayer",
+			    "Display Name",
+			    std::string{"Henry"},
+			    "Last multiplayer display name.");
+			static std::string address = saved_address->get_value();
+			static std::string display_name = saved_name->get_value();
+			static std::string password;
+			static std::string claim_code;
+			static std::string chat_text;
+
+			ImGui::SetNextWindowSize({520.0F, 560.0F}, ImGuiCond_FirstUseEver);
+			if (!ImGui::Begin("KCD2MP Multiplayer", &g_show_multiplayer))
+			{
+				ImGui::End();
+				return;
+			}
+
+			auto status = kcd2mp::g_multiplayer_client->status();
+			ImGui::Text("Status: %s", kcd2mp::to_string(status.state));
+			if (!status.server_name.empty())
+			{
+				ImGui::SameLine();
+				ImGui::TextDisabled("(%s)", status.server_name.c_str());
+			}
+			const auto sandbox = kcd2mp::game::sandbox_capability();
+			const auto frontend = kcd2mp::game::is_frontend_without_player();
+			ImGui::Text(
+			    "Sandbox gate: %s",
+			    sandbox.available ? "ready" : "blocked");
+			if (!sandbox.available)
+			{
+				ImGui::TextWrapped("%s", sandbox.diagnostic.c_str());
+			}
+			if (status.ping_ms >= 0)
+			{
+				ImGui::Text(
+				    "Ping: %d ms | Loss: %.1f%% | Queue: %zu",
+				    status.ping_ms,
+				    status.packet_loss_percent,
+				    status.game_queue_size);
+			}
+			if (!status.error.empty())
+			{
+				ImGui::TextColored(
+				    ImVec4(1.0F, 0.35F, 0.25F, 1.0F),
+				    "%s",
+				    status.error.c_str());
+			}
+
+			const bool disconnected =
+			    status.state == kcd2mp::client_state::disconnected;
+			ImGui::BeginDisabled(!disconnected);
+			if (ImGui::InputText("Address", &address))
+			{
+				saved_address->set_value(address);
+			}
+			if (ImGui::InputText("Name", &display_name))
+			{
+				saved_name->set_value(display_name);
+			}
+			ImGui::InputText(
+			    "Password",
+			    &password,
+			    ImGuiInputTextFlags_Password);
+			ImGui::InputText("Recovery claim code", &claim_code);
+			ImGui::EndDisabled();
+
+			ImGui::BeginDisabled(
+			    !disconnected || !sandbox.available || !frontend);
+			if (ImGui::Button("Connect"))
+			{
+				kcd2mp::client_options options;
+				options.address = address;
+				options.display_name = display_name;
+				options.password = password;
+				options.claim_code = claim_code;
+				if (!kcd2mp::g_multiplayer_client->connect(std::move(options)))
+				{
+					LOG(WARNING) << "Multiplayer connect request was invalid.";
+				}
+				password.clear();
+				claim_code.clear();
+			}
+			ImGui::EndDisabled();
+			ImGui::SameLine();
+			ImGui::BeginDisabled(disconnected);
+			if (ImGui::Button("Disconnect"))
+			{
+				kcd2mp::g_multiplayer_client->disconnect();
+				password.clear();
+			}
+			ImGui::EndDisabled();
+
+			ImGui::SeparatorText("Players");
+			const auto players = kcd2mp::g_multiplayer_client->remote_players();
+			ImGui::Text(
+			    "You: %llu | Remote players: %zu",
+			    static_cast<unsigned long long>(status.local_player_id),
+			    players.size());
+			if (ImGui::BeginTable(
+			        "MultiplayerPlayers",
+			        4,
+			        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg))
+			{
+				ImGui::TableSetupColumn("ID");
+				ImGui::TableSetupColumn("Name");
+				ImGui::TableSetupColumn("State");
+				ImGui::TableSetupColumn("Movement");
+				ImGui::TableHeadersRow();
+				for (const auto& player : players)
+				{
+					ImGui::TableNextRow();
+					ImGui::TableNextColumn();
+					ImGui::Text("%llu", static_cast<unsigned long long>(player.id));
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(player.display_name.c_str());
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(player.connected ? "online" : "reconnecting");
+					ImGui::TableNextColumn();
+					ImGui::TextUnformatted(
+					    kcd2mp::protocol::MovementMode_Name(player.movement_mode).c_str());
+				}
+				ImGui::EndTable();
+			}
+
+			ImGui::SeparatorText("Global Chat");
+			if (ImGui::BeginChild("MultiplayerChat", {0.0F, 150.0F}, true))
+			{
+				for (const auto& entry :
+				     kcd2mp::g_multiplayer_client->chat_history())
+				{
+					ImGui::TextWrapped(
+					    "%s: %s",
+					    entry.display_name.c_str(),
+					    entry.text.c_str());
+				}
+			}
+			ImGui::EndChild();
+			ImGui::BeginDisabled(
+			    status.state != kcd2mp::client_state::connected);
+			const bool submit = ImGui::InputText(
+			    "##ChatInput",
+			    &chat_text,
+			    ImGuiInputTextFlags_EnterReturnsTrue);
+			ImGui::SameLine();
+			if ((submit || ImGui::Button("Send")) && !chat_text.empty())
+			{
+				if (kcd2mp::g_multiplayer_client->send_chat(chat_text))
+				{
+					chat_text.clear();
+				}
+			}
+			ImGui::EndDisabled();
+			ImGui::End();
+		}
+	}
 
 	gui::gui()
 	{
@@ -1246,6 +1422,12 @@ namespace big
 					ImGui::EndMenu();
 				}
 
+				if (ImGui::BeginMenu("Multiplayer"))
+				{
+					ImGui::MenuItem("Open Multiplayer", nullptr, &g_show_multiplayer);
+					ImGui::EndMenu();
+				}
+
 				if (ImGui::BeginMenu("Trainer"))
 				{
 					if (ImGui::BeginMenu("Noclip"))
@@ -1444,6 +1626,7 @@ namespace big
 			ImGui::SetMouseCursor(g_gui->m_mouse_cursor);
 
 			g_lua_manager->draw_independent_gui();
+			RenderMultiplayer();
 
 			/*if (ImGui::Button("Crash it"))
 			{

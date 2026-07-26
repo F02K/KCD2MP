@@ -8,6 +8,7 @@
 #include "logger/exception_handler.hpp"
 #include "memory/byte_patch_manager.hpp"
 #include "memory/module.hpp"
+#include "multiplayer/client.hpp"
 #include "paths/paths.hpp"
 #include "threads/thread_pool.hpp"
 #include "version.hpp"
@@ -138,6 +139,11 @@ namespace
 
 		new renderer();
 		LOG(INFO) << "Renderer initialized.";
+
+		// The D3D12 proxy remains loaded for the process lifetime. Keep the network
+		// thread out of CRT static destruction under the Windows loader lock.
+		kcd2mp::g_multiplayer_client = new kcd2mp::multiplayer_client();
+		LOG(INFO) << "Multiplayer client initialized.";
 
 		hotkey::init_hotkeys();
 		g_hooking->enable();

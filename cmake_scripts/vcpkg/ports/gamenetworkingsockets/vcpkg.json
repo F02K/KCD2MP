@@ -1,0 +1,19 @@
+{
+  "name": "gamenetworkingsockets",
+  "version": "1.5.1",
+  "description": "GameNetworkingSockets configured for KCD2MP's static Windows BCrypt build.",
+  "homepage": "https://github.com/ValveSoftware/GameNetworkingSockets",
+  "license": "BSD-3-Clause",
+  "supports": "windows & !uwp & !arm64",
+  "dependencies": [
+    "protobuf",
+    {
+      "name": "vcpkg-cmake",
+      "host": true
+    },
+    {
+      "name": "vcpkg-cmake-config",
+      "host": true
+    }
+  ]
+}

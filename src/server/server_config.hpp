@@ -1,0 +1,46 @@
+#pragma once
+
+#include <cstdint>
+#include <filesystem>
+#include <optional>
+#include <string>
+
+namespace kcd2mp::server
+{
+	struct initial_spawn_config
+	{
+		float x{};
+		float y{};
+		float z{};
+		float qx{};
+		float qy{};
+		float qz{};
+		float qw{1.0F};
+	};
+
+	struct server_config
+	{
+		std::string bind_address{"0.0.0.0"};
+		std::uint16_t port{27020};
+		std::string name{"KCD2MP Server"};
+		std::string password;
+		std::uint32_t max_players{8};
+		std::string level_id;
+		std::string required_content_hash;
+		std::uint32_t tick_rate{30};
+		std::uint32_t snapshot_rate{20};
+		std::uint32_t handshake_timeout_seconds{10};
+		std::uint32_t idle_timeout_seconds{15};
+		std::uint32_t reconnect_grace_seconds{30};
+		std::uint32_t bootstrap_timeout_seconds{180};
+		std::uint32_t profile_snapshot_interval_seconds{15};
+		float max_player_speed_mps{15.0F};
+		float movement_tolerance_m{2.0F};
+		std::filesystem::path world_directory{"world"};
+		std::optional<initial_spawn_config> initial_spawn;
+	};
+
+	[[nodiscard]] server_config load_server_config(
+	    const std::filesystem::path &path);
+	void validate_server_config(const server_config &config);
+}

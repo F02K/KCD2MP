@@ -4,6 +4,8 @@
 #include "hooks/hooking.hpp"
 #include "kcd2_address.hpp"
 #include "memory/gm_address.hpp"
+#include "multiplayer/client.hpp"
+#include "multiplayer/game_bridge.hpp"
 
 #include <config/config.hpp>
 #include <gui/gui.hpp>
@@ -28,6 +30,7 @@ namespace big
 	static lua_State *g_early_main_lua_state = nullptr;
 
 	extern void render_imgui_frame();
+	static void ensure_multiplayer_console_commands();
 
 	static bool lua_init_once = true;
 
@@ -38,6 +41,8 @@ namespace big
 		std::scoped_lock l2(g_lua_manager->m_module_lock);
 
 		const auto res = big::g_hooking->get_original<hook_CScriptSystem_Update>()(a1);
+		ensure_multiplayer_console_commands();
+		kcd2mp::game::game_thread_tick();
 
 		if (g_lua_execute_buffer_queue.size())
 		{
@@ -920,30 +925,285 @@ namespace big
 	}
 
 	static __int64 g_CXConsole = 0;
+	static uintptr_t *g_CXConsole_pointer = nullptr;
+	static void **g_expected_CXConsole_vtable = nullptr;
+	static bool g_multiplayer_console_commands_registered = false;
+	static void register_multiplayer_console_commands(__int64 console);
 
-	struct cvar_vtable_helper
+	static cry_cvar *find_engine_cvar(std::string_view name)
 	{
-		virtual ~cvar_vtable_helper()
+		const std::string owned(name);
+		if (const auto found = g_cvars.find(owned);
+		    found != g_cvars.end() && found->second)
 		{
+			return found->second;
+		}
+		if (!g_CXConsole || owned.empty())
+		{
+			return nullptr;
 		}
 
-		virtual void *func_1()            = 0;
-		virtual void *func_2()            = 0;
-		virtual void *func_3()            = 0;
-		virtual float GetFVal()           = 0;
-		virtual const char *GetString()   = 0;
-		virtual void *func_6()            = 0;
-		virtual void *func_7()            = 0;
-		virtual void *func_8()            = 0;
-		virtual void *func_9()            = 0;
-		virtual void *func_10()           = 0;
-		virtual void *func_11()           = 0;
-		virtual void *func_12()           = 0;
-		virtual void *func_13()           = 0;
-		virtual int GetType()             = 0;
-		virtual const char *GetName()     = 0;
-		virtual const char *GetHelpText() = 0;
+		using get_cvar = cry_cvar *(__fastcall *)(__int64, const char *);
+		auto **vtable = *reinterpret_cast<void ***>(g_CXConsole);
+		if (!vtable || !vtable[23])
+		{
+			return nullptr;
+		}
+		auto *cvar =
+		    reinterpret_cast<get_cvar>(vtable[23])(g_CXConsole, owned.c_str());
+		if (cvar)
+		{
+			g_cvars.insert_or_assign(owned, cvar);
+		}
+		return cvar;
+	}
+
+	static bool attach_existing_engine_console()
+	{
+		if (g_CXConsole)
+		{
+			return true;
+		}
+		if (!g_CXConsole_pointer || !g_expected_CXConsole_vtable)
+		{
+			LOG(ERROR) << "Late CXConsole attach is missing signature-gated targets.";
+			return false;
+		}
+
+		const auto console = static_cast<__int64>(*g_CXConsole_pointer);
+		if (!console)
+		{
+			LOG(WARNING) << "Late CXConsole attach found a null engine console pointer.";
+			return false;
+		}
+		auto **vtable = *reinterpret_cast<void ***>(console);
+		if (vtable != g_expected_CXConsole_vtable)
+		{
+			LOG(ERROR) << "Late CXConsole attach rejected an unexpected engine console vtable.";
+			return false;
+		}
+
+		g_CXConsole = console;
+		LOG(INFO) << "Attached to the existing engine console after retail initialization.";
+		return true;
+	}
+
+	bool engine_console_available()
+	{
+		return g_CXConsole != 0;
+	}
+
+	bool engine_console_has_command(std::string_view name)
+	{
+		if (g_console_command_name_to_help_text.contains(std::string(name)))
+		{
+			return true;
+		}
+
+		// A late attach cannot replay commands registered before our hooks were
+		// enabled. These two built-ins are verified for the signature-gated retail
+		// image and are the only vanilla commands used by the sandbox wrapper.
+		return g_CXConsole && (name == "map" || name == "unload");
+	}
+
+	bool engine_cvar_available(std::string_view name)
+	{
+		return find_engine_cvar(name) != nullptr;
+	}
+
+	std::optional<int> engine_cvar_int(std::string_view name)
+	{
+		auto *cvar = find_engine_cvar(name);
+		if (!cvar)
+		{
+			return std::nullopt;
+		}
+		return cvar->GetIVal();
+	}
+
+	std::optional<std::string> engine_cvar_string(std::string_view name)
+	{
+		auto *cvar = find_engine_cvar(name);
+		if (!cvar)
+		{
+			return std::nullopt;
+		}
+		const auto *value = cvar->GetString();
+		return value ? std::optional(std::string(value)) : std::nullopt;
+	}
+
+	bool engine_cvar_set_int_unrestricted(
+	    std::string_view name,
+	    int value)
+	{
+		auto *cvar = find_engine_cvar(name);
+		if (!cvar)
+		{
+			return false;
+		}
+
+		// The isolated multiplayer bootstrap only calls this wrapper with its
+		// hard-coded CVar allowlist. Retail marks some harmless transition
+		// controls (including g_skipIntro) as VF_CHEAT, so temporarily remove
+		// only that flag while writing and restore it immediately afterwards.
+		constexpr int vf_cheat = 0x00000002;
+		const auto had_cheat_flag = (cvar->GetFlags() & vf_cheat) != 0;
+		if (had_cheat_flag)
+		{
+			cvar->ClearFlags(vf_cheat);
+		}
+		cvar->Set(value);
+		const auto accepted = cvar->GetIVal() == value;
+		if (had_cheat_flag)
+		{
+			cvar->SetFlags(vf_cheat);
+		}
+		return accepted;
+	}
+
+	bool engine_console_execute(
+	    std::string_view command,
+	    bool defer_execution)
+	{
+		if (!g_CXConsole || command.empty())
+		{
+			return false;
+		}
+		using execute_string = void(__fastcall *)(
+		    __int64,
+		    const char *,
+		    bool,
+		    bool);
+		auto **vtable = *reinterpret_cast<void ***>(g_CXConsole);
+		if (!vtable || !vtable[35])
+		{
+			return false;
+		}
+		const std::string owned(command);
+		reinterpret_cast<execute_string>(vtable[35])(
+		    g_CXConsole,
+		    owned.c_str(),
+		    false,
+		    defer_execution);
+		return true;
+	}
+
+	struct console_command_args
+	{
+		virtual ~console_command_args() = default;
+		virtual int GetArgCount() const = 0;
+		virtual const char *GetArg(int index) const = 0;
+		virtual const char *GetCommandLine() const = 0;
 	};
+
+	static void mp_connect_command(console_command_args *args)
+	{
+		if (!kcd2mp::g_multiplayer_client || !args || args->GetArgCount() < 2)
+		{
+			LOG(INFO) << "Usage: mp_connect <host:port> [name]";
+			return;
+		}
+		kcd2mp::client_options options;
+		options.address = args->GetArg(1);
+		options.display_name =
+		    args->GetArgCount() >= 3 ? args->GetArg(2) : "Henry";
+		const auto sandbox = kcd2mp::game::sandbox_capability();
+		if (!sandbox.available)
+		{
+			LOG(WARNING) << "mp_connect blocked: " << sandbox.diagnostic;
+			return;
+		}
+		if (!kcd2mp::game::is_frontend_without_player())
+		{
+			LOG(WARNING) << "mp_connect blocked: return to the main menu first.";
+			return;
+		}
+		if (!kcd2mp::g_multiplayer_client->connect(std::move(options)))
+		{
+			LOG(WARNING) << "mp_connect rejected the request. Check address, name, and client state.";
+		}
+	}
+
+	static void mp_disconnect_command(console_command_args *)
+	{
+		if (kcd2mp::g_multiplayer_client)
+		{
+			kcd2mp::g_multiplayer_client->disconnect();
+		}
+	}
+
+	static void mp_status_command(console_command_args *)
+	{
+		if (!kcd2mp::g_multiplayer_client)
+		{
+			LOG(INFO) << "Multiplayer client is not initialized.";
+			return;
+		}
+		const auto status = kcd2mp::g_multiplayer_client->status();
+		LOGF(
+		    INFO,
+		    "Multiplayer: state={}, player={}, server='{}', level='{}', ping={} ms, loss={:.1f}%, queue={}, error='{}'",
+		    kcd2mp::to_string(status.state),
+		    status.local_player_id,
+		    status.server_name,
+		    status.level_id,
+		    status.ping_ms,
+		    status.packet_loss_percent,
+		    status.game_queue_size,
+		    status.error);
+	}
+
+	static void mp_say_command(console_command_args *args)
+	{
+		if (!kcd2mp::g_multiplayer_client || !args || args->GetArgCount() < 2)
+		{
+			LOG(INFO) << "Usage: mp_say <text>";
+			return;
+		}
+		std::string text;
+		for (int index = 1; index < args->GetArgCount(); ++index)
+		{
+			if (!text.empty())
+			{
+				text += ' ';
+			}
+			text += args->GetArg(index);
+		}
+		if (!kcd2mp::g_multiplayer_client->send_chat(std::move(text)))
+		{
+			LOG(WARNING) << "mp_say failed: client is disconnected or the message is invalid.";
+		}
+	}
+
+	static void register_multiplayer_console_commands(__int64 console)
+	{
+		if (!console || g_multiplayer_console_commands_registered)
+		{
+			return;
+		}
+		using callback = void (*)(console_command_args *);
+		using add_command = __int64(__fastcall *)(
+		    __int64,
+		    const char *,
+		    callback,
+		    int,
+		    const char *);
+		auto **vtable = *reinterpret_cast<void ***>(console);
+		const auto add = reinterpret_cast<add_command>(vtable[33]);
+		add(console, "mp_connect", mp_connect_command, 0, "Connect to KCD2MP: mp_connect <host:port> [name]. Passwords are accepted only in ImGui.");
+		add(console, "mp_disconnect", mp_disconnect_command, 0, "Disconnect from the KCD2MP server.");
+		add(console, "mp_status", mp_status_command, 0, "Print KCD2MP connection diagnostics.");
+		add(console, "mp_say", mp_say_command, 0, "Send global chat: mp_say <text>.");
+		g_multiplayer_console_commands_registered = true;
+	}
+
+	static void ensure_multiplayer_console_commands()
+	{
+		if (g_CXConsole && !g_multiplayer_console_commands_registered)
+		{
+			register_multiplayer_console_commands(g_CXConsole);
+		}
+	}
 
 	std::string to_string_us(float value)
 	{
@@ -953,7 +1213,7 @@ namespace big
 		return oss.str();
 	}
 
-	static __int64 hook_CXConsole_RegisterVar(__int64 a1, cvar_vtable_helper *pCvar, __int64 pChangeFunc)
+	static __int64 hook_CXConsole_RegisterVar(__int64 a1, cry_cvar *pCvar, __int64 pChangeFunc)
 	{
 		// https://github.com/ValtoGameEngines/CryEngine/blob/d9d2c9f000836f0676e65a90bed40dcc3b1451eb/Code/CryEngine/CryCommon/CrySystem/IConsole.h#L612
 		const char *cvar_name      = pCvar->GetName();
@@ -973,6 +1233,7 @@ namespace big
 		}
 
 		g_cvar_name_to_cvar_data[cvar_name] = {cvar_help_text, default_value};
+		g_cvars[cvar_name] = pCvar;
 
 		const auto res = big::g_hooking->get_original<hook_CXConsole_RegisterVar>()(a1, pCvar, pChangeFunc);
 
@@ -1006,6 +1267,7 @@ namespace big
 		const auto res = big::g_hooking->get_original<hook_CXConsole_Ctor>()(a1);
 
 		g_CXConsole = a1;
+		register_multiplayer_console_commands(a1);
 
 		return res;
 	}
@@ -1021,6 +1283,11 @@ namespace big
 
 	static __int64 hook_CEntity_dctor(CEntity *centity_inst, char a2)
 	{
+		if (g_player_entity == centity_inst)
+		{
+			g_player_entity = nullptr;
+			LOG(INFO) << "Player entity released";
+		}
 		const auto res = big::g_hooking->get_original<hook_CEntity_dctor>()(centity_inst, a2);
 
 		const auto it = std::find(g_entities.begin(), g_entities.end(), centity_inst);
@@ -2248,6 +2515,9 @@ namespace big
 		CMergedMeshRenderNode_Ctor = kcd2_address::resolved("CMergedMeshRenderNode_ctor");
 
 		CXConsoleVFTable = kcd2_address::derived("CXConsole vtable").as<void **>();
+		g_CXConsole_pointer =
+		    kcd2_address::resolved("gEnv pConsole pointer").as<uintptr_t *>();
+		g_expected_CXConsole_vtable = CXConsoleVFTable;
 		CVegetationsVFTable = kcd2_address::derived("CVegetation vtable").as<void **>();
 		CMergedMeshRenderNode_VFTable =
 		    kcd2_address::derived("CMergedMeshRenderNode vtable").as<void **>();
@@ -2950,6 +3220,10 @@ namespace big
 			for (auto &register_hook : g_pending_hook_registrations)
 			{
 				register_hook();
+			}
+			if (!attach_existing_engine_console())
+			{
+				LOG(WARNING) << "Sandbox join will remain unavailable until CXConsole is constructed.";
 			}
 		}
 		g_pending_hook_registrations.clear();

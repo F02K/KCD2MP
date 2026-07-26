@@ -1,0 +1,149 @@
+#include "multiplayer/protocol.hpp"
+
+#include <cassert>
+#include <cmath>
+#include <cstddef>
+#include <limits>
+#include <string>
+#include <vector>
+
+namespace
+{
+	kcd2mp::protocol::TransformState transform(
+	    float x,
+	    float speed,
+	    std::uint64_t sequence)
+	{
+		kcd2mp::protocol::TransformState value;
+		value.mutable_position()->set_x(x);
+		value.mutable_position()->set_y(2.0F);
+		value.mutable_position()->set_z(3.0F);
+		value.mutable_rotation()->set_w(2.0F);
+		value.mutable_velocity()->set_x(speed);
+		value.set_sequence(sequence);
+		value.set_client_time_ms(sequence * 10);
+		return value;
+	}
+}
+
+int main()
+{
+	using namespace kcd2mp;
+
+	assert(is_valid_display_name("Henry"));
+	assert(is_valid_display_name("Jindřich"));
+	assert(!is_valid_display_name("ab"));
+	assert(!is_valid_display_name(" leading"));
+	assert(!valid_utf8_with_codepoint_count("\xC0\xAF", 1, 10));
+	assert(is_valid_chat("Hello, Kuttenberg!"));
+	assert(!is_valid_chat(""));
+
+	protocol::Envelope envelope;
+	auto *hello = envelope.mutable_client_hello();
+	hello->set_protocol_version(protocol_version);
+	hello->set_display_name("Henry");
+	hello->set_level_id("sandbox");
+	std::string error;
+	const auto encoded = encode(envelope, reliability::reliable, &error);
+	assert(encoded);
+	assert(encoded->delivery == reliability::reliable);
+	const auto decoded = decode(encoded->bytes, &error);
+	assert(decoded);
+	assert(decoded->client_hello().display_name() == "Henry");
+	auto truncated = encoded->bytes;
+	truncated.pop_back();
+	assert(!decode(truncated, &error));
+
+	std::vector<std::byte> empty;
+	assert(!decode(empty, &error));
+	std::vector<std::byte> oversized(max_application_message_size + 1);
+	assert(!decode(oversized, &error));
+
+	auto value = transform(1.0F, 0.0F, 1);
+	assert(is_finite_transform(value));
+	assert(normalize_rotation(value.mutable_rotation()));
+	assert(std::abs(value.rotation().w() - 1.0F) < 0.0001F);
+	assert(movement_mode_for(value) == protocol::MOVEMENT_MODE_IDLE);
+	value.mutable_velocity()->set_x(2.0F);
+	assert(movement_mode_for(value) == protocol::MOVEMENT_MODE_WALK);
+	value.mutable_velocity()->set_x(5.0F);
+	assert(movement_mode_for(value) == protocol::MOVEMENT_MODE_RUN);
+	value.mutable_position()->set_x(std::numeric_limits<float>::infinity());
+	assert(!is_finite_transform(value));
+
+	protocol::Envelope no_payload;
+	assert(!encode(no_payload, reliability::reliable, &error));
+
+	protocol::Envelope invalid_enum;
+	auto *snapshot = invalid_enum.mutable_player_joined()->mutable_player();
+	snapshot->set_player_id(1);
+	snapshot->set_display_name("Henry");
+	snapshot->set_movement_mode(
+	    static_cast<protocol::MovementMode>(999));
+	assert(!encode(invalid_enum, reliability::reliable, &error));
+
+	protocol::Envelope too_many_players;
+	auto *world = too_many_players.mutable_world_snapshot();
+	for (std::size_t index = 0; index < max_players + 1; ++index)
+	{
+		auto *player = world->add_players();
+		player->set_player_id(index + 1);
+		player->set_display_name("Player" + std::to_string(index));
+		player->set_movement_mode(protocol::MOVEMENT_MODE_IDLE);
+	}
+	assert(!encode(too_many_players, reliability::unreliable, &error));
+
+	protocol::Envelope authentication;
+	auto *credentials = authentication.mutable_client_authenticate();
+	credentials->set_identity_token("token");
+	credentials->set_enroll(true);
+	assert(!encode(authentication, reliability::reliable, &error));
+
+	protocol::Envelope profile_envelope;
+	auto *profile_update =
+	    profile_envelope.mutable_client_profile_update();
+	profile_update->set_base_revision(1);
+	auto *profile = profile_update->mutable_profile();
+	profile->set_player_id(42);
+	profile->set_revision(1);
+	profile->set_display_name("Henry");
+	profile->set_level_id("sandbox");
+	profile->set_money(200);
+	auto *skill = profile->add_skills();
+	skill->set_id("sword");
+	skill->set_level(5);
+	skill->set_xp(12.5F);
+	auto *item = profile->add_inventory();
+	item->set_instance_id("instance-1");
+	item->set_definition_id("item.sword");
+	item->set_count(1);
+	item->set_quality(80.0F);
+	item->set_condition(95.0F);
+	item->set_equipped_slot("right_hand");
+	assert(is_valid_profile(*profile));
+	const auto encoded_profile =
+	    encode(profile_envelope, reliability::reliable, &error);
+	assert(encoded_profile);
+	const auto decoded_profile = decode(encoded_profile->bytes, &error);
+	assert(decoded_profile);
+	assert(decoded_profile->client_profile_update().profile().money() == 200);
+
+	profile->mutable_inventory(0)->set_quality(
+	    std::numeric_limits<float>::quiet_NaN());
+	assert(!is_valid_profile(*profile));
+	profile->mutable_inventory(0)->set_quality(80.0F);
+	*profile->add_inventory() = profile->inventory(0);
+	assert(!is_valid_profile(*profile));
+	profile->mutable_inventory()->RemoveLast();
+	for (std::size_t index = 1;
+	     index <= max_profile_inventory_items;
+	     ++index)
+	{
+		*profile->add_inventory() = profile->inventory(0);
+		profile->mutable_inventory(
+		    static_cast<int>(index))->set_instance_id(
+		    "instance-" + std::to_string(index + 1));
+	}
+	assert(!is_valid_profile(*profile));
+	return 0;
+}

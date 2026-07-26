@@ -1,0 +1,20 @@
+{
+  "$schema": "https://raw.githubusercontent.com/microsoft/vcpkg-tool/main/docs/vcpkg.schema.json",
+  "name": "kcd2mp",
+  "version-string": "0.2.0",
+  "builtin-baseline": "908da3a305a0a8028d9602ab241b433652b3df69",
+  "dependencies": [
+    {
+      "name": "gamenetworkingsockets",
+      "default-features": false,
+      "version>=": "1.5.1"
+    },
+    "protobuf"
+  ],
+  "overrides": [
+    {
+      "name": "gamenetworkingsockets",
+      "version": "1.5.1"
+    }
+  ]
+}

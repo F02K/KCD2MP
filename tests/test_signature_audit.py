@@ -9,19 +9,27 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SignatureArchitectureTests(unittest.TestCase):
-    def test_registry_is_the_single_source_for_64_signatures(self) -> None:
+    def test_registry_is_the_single_source_for_65_signatures(self) -> None:
         core = (
             PROJECT_ROOT / "src" / "signatures" / "signature_core.cpp"
         ).read_text(encoding="utf-8")
         init = (PROJECT_ROOT / "src" / "kcd2_init.cpp").read_text(encoding="utf-8")
         entries = re.findall(r'signature_spec\{"([^"]+)",\s*"([^"]+)"', core)
 
-        self.assertEqual(len(entries), 64)
-        self.assertEqual(len({name for name, _ in entries}), 64)
+        self.assertEqual(len(entries), 65)
+        self.assertEqual(len({name for name, _ in entries}), 65)
         self.assertIn("static_assert(signature_registry.size()", core)
         self.assertNotIn("kcd2_address::scan(", init)
         self.assertNotIn(".get_call()", init)
         self.assertNotIn(".rip()", init)
+        self.assertIn(
+            'validate_named_vtable("CXConsole vtable", "CXConsole vtable[35]"',
+            core,
+        )
+        self.assertIn('"gEnv pConsole pointer"', core)
+        self.assertIn('resolved("gEnv pConsole pointer")', init)
+        self.assertIn("attach_existing_engine_console()", init)
+        self.assertIn("vtable[23]", init)
 
     def test_zydis_is_explicit_and_shared_with_native_audit(self) -> None:
         cmake = (PROJECT_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")

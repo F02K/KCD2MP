@@ -230,7 +230,17 @@ class BuildDirectoryTests(unittest.TestCase):
             (build_dir / "CMakeCache.txt").write_text(
                 "CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026\n"
                 "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64\n"
-                "CMAKE_HOME_DIRECTORY:INTERNAL={}\n".format(project),
+                "CMAKE_TOOLCHAIN_FILE:FILEPATH={}\n"
+                "VCPKG_TARGET_TRIPLET:STRING=x64-windows-static\n"
+                "CMAKE_HOME_DIRECTORY:INTERNAL={}\n".format(
+                    project
+                    / ".cache"
+                    / "vcpkg"
+                    / "scripts"
+                    / "buildsystems"
+                    / "vcpkg.cmake",
+                    project,
+                ),
                 encoding="utf-8",
             )
             marker = build_dir / "keep.txt"
@@ -269,6 +279,31 @@ class BuildDirectoryTests(unittest.TestCase):
             self.assertTrue(build_dir.is_dir())
             self.assertFalse(marker.exists())
             self.assertIn("generator changed", logs[0])
+
+    def test_recreates_legacy_directory_without_vcpkg_toolchain(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            build_dir = project / "out" / "build" / "release"
+            build_dir.mkdir(parents=True)
+            (build_dir / "CMakeCache.txt").write_text(
+                "CMAKE_GENERATOR:INTERNAL=Visual Studio 18 2026\n"
+                "CMAKE_GENERATOR_PLATFORM:INTERNAL=x64\n"
+                "CMAKE_HOME_DIRECTORY:INTERNAL={}\n".format(project),
+                encoding="utf-8",
+            )
+            marker = build_dir / "stale.txt"
+            marker.write_text("stale", encoding="utf-8")
+            logs = []
+
+            BuildService(project)._prepare_build_directory(
+                build_dir,
+                self._environment(project, "Visual Studio 18 2026"),
+                logs.append,
+            )
+
+            self.assertTrue(build_dir.is_dir())
+            self.assertFalse(marker.exists())
+            self.assertIn("vcpkg toolchain changed or was missing", logs[0])
 
 
 class SignatureAuditServiceTests(unittest.TestCase):

@@ -34,8 +34,43 @@ namespace big
 		std::string m_default_value;
 	};
 
+	struct cry_cvar
+	{
+		virtual ~cry_cvar() = default;
+		virtual void Release() = 0;
+		virtual int GetIVal() const = 0;
+		virtual std::int64_t GetI64Val() const = 0;
+		virtual float GetFVal() const = 0;
+		virtual const char *GetString() const = 0;
+		virtual void Set(const char *value) = 0;
+		virtual void Set(float value) = 0;
+		virtual void Set(int value) = 0;
+		virtual void Set(std::int64_t value) = 0;
+		virtual void ClearFlags(int flags) = 0;
+		virtual int GetFlags() const = 0;
+		virtual int SetFlags(int flags) = 0;
+		virtual int GetRealIVal() const = 0;
+		virtual int GetType() const = 0;
+		virtual const char *GetName() const = 0;
+		virtual const char *GetHelpText() const = 0;
+	};
+
 	inline std::map<std::string, cvar_data> g_cvar_name_to_cvar_data;
+	inline std::map<std::string, cry_cvar *> g_cvars;
 	inline std::map<std::string, std::string> g_console_command_name_to_help_text;
+
+	[[nodiscard]] bool engine_console_available();
+	[[nodiscard]] bool engine_console_has_command(std::string_view name);
+	[[nodiscard]] bool engine_cvar_available(std::string_view name);
+	[[nodiscard]] std::optional<int> engine_cvar_int(std::string_view name);
+	[[nodiscard]] std::optional<std::string> engine_cvar_string(
+	    std::string_view name);
+	[[nodiscard]] bool engine_cvar_set_int_unrestricted(
+	    std::string_view name,
+	    int value);
+	[[nodiscard]] bool engine_console_execute(
+	    std::string_view command,
+	    bool defer_execution = true);
 
 	inline std::vector<vanilla_mod_system_info> g_vanilla_mods;
 
@@ -826,18 +861,26 @@ namespace big
 
 		inline void SetWorldPos(const Vec3 &newPos)
 		{
-			const auto Entity = (uintptr_t)g_player_entity;
-
 			float matrix[3 * 4];
-
-			memcpy(matrix, (void *)(Entity + 88), sizeof(matrix));
+			memcpy(matrix, reinterpret_cast<const std::byte *>(this) + 88, sizeof(matrix));
 
 			matrix[3]  = newPos.x;
 			matrix[7]  = newPos.y;
 			matrix[11] = newPos.z;
 
-			// Apply the new transformation matrix
-			g_CEntity_SetWorldTM(g_player_entity, matrix, 0x40'00'00);
+			g_CEntity_SetWorldTM(this, matrix, 0x40'00'00);
+		}
+
+		inline void GetWorldTM(float (&matrix)[3 * 4]) const
+		{
+			memcpy(matrix, reinterpret_cast<const std::byte *>(this) + 88, sizeof(matrix));
+		}
+
+		inline void SetWorldTM(const float (&matrix)[3 * 4])
+		{
+			float copy[3 * 4];
+			memcpy(copy, matrix, sizeof(copy));
+			g_CEntity_SetWorldTM(this, copy, 0x40'00'00);
 		}
 	};
 

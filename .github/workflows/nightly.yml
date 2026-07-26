@@ -4,7 +4,49 @@ on:
   workflow_dispatch:
 
 jobs:
+  validate:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - config: Debug
+            final: "NO"
+          - config: RelWithDebInfo
+            final: "YES"
+    name: Validate ${{ matrix.config }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          git -C .cache/vcpkg checkout --detach 908da3a305a0a8028d9602ab241b433652b3df69
+          .cache/vcpkg/bootstrap-vcpkg.bat -disableMetrics
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build-${{ matrix.config }} -G Ninja
+          -D CMAKE_BUILD_TYPE=${{ matrix.config }}
+          -D FINAL=${{ matrix.final }}
+          -D BUILD_TESTING=ON
+          -D CMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/.cache/vcpkg/scripts/buildsystems/vcpkg.cmake"
+          -D VCPKG_TARGET_TRIPLET=x64-windows-static
+          -D VCPKG_OVERLAY_PORTS="${{ github.workspace }}/cmake_scripts/vcpkg/ports"
+
+      - name: Build and test
+        shell: pwsh
+        run: |
+          cmake --build build-${{ matrix.config }} --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPSignatureCoreTests KCD2MPEnginePathTests KCD2MPProtocolTests KCD2MPServerCoreTests KCD2MPGameCommandQueueTests KCD2MPNetworkingTests KCD2MPIdentityStoreTests
+          ctest --test-dir build-${{ matrix.config }} -C ${{ matrix.config }} -R "^KCD2MP" --output-on-failure
+
   build_nightly:
+    needs: validate
     runs-on: windows-latest
     name: Build Nightly
     outputs:
@@ -17,10 +59,14 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: amd64
-          toolset: 14.44
-          
+      - name: Bootstrap pinned vcpkg
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none https://github.com/microsoft/vcpkg.git .cache/vcpkg
+          git -C .cache/vcpkg checkout --detach 908da3a305a0a8028d9602ab241b433652b3df69
+          .cache/vcpkg/bootstrap-vcpkg.bat -disableMetrics
       - name: Generate CMake project
-        run: cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FINAL=YES -D BUILD_TESTING=ON -S. -Bbuild -G Ninja
+        run: cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FINAL=YES -D BUILD_TESTING=ON -D CMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/.cache/vcpkg/scripts/buildsystems/vcpkg.cmake" -D VCPKG_TARGET_TRIPLET=x64-windows-static -D VCPKG_OVERLAY_PORTS="${{ github.workspace }}/cmake_scripts/vcpkg/ports" -S. -Bbuild -G Ninja
         #run: cmake -D CMAKE_BUILD_TYPE=Debug -S. -Bbuild -G Ninja
 
       - name: Prepare 64bit release DLL
@@ -31,7 +77,7 @@ jobs:
           namespace="KCD2MP"
           mod_name="KCD2MP"
 
-          version_number="1.0.0"
+          version_number="0.2.0"
 
           # Remove quotes from output
           version_number=$(echo "$version_number" | tr -d '"')
@@ -48,8 +94,8 @@ jobs:
 
       - name: Build 64bit release DLL
         run: |
-          cmake --build ./build --config RelWithDebInfo --target KCD2MP KCD2MPSignatureAudit KCD2MPSignatureCoreTests --
-          ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MPSignatureCoreTests$" --output-on-failure
+          cmake --build ./build --config RelWithDebInfo --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPSignatureCoreTests KCD2MPEnginePathTests KCD2MPProtocolTests KCD2MPServerCoreTests KCD2MPGameCommandQueueTests KCD2MPNetworkingTests KCD2MPIdentityStoreTests --
+          ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MP" --output-on-failure
           #cmake --build ./build --config Debug --target KCD2MP --
           mv ./build/d3d12_.dll ./build/d3d12.dll
           mv ./build/d3d12_.pdb ./build/d3d12.pdb
@@ -61,7 +107,8 @@ jobs:
           path: |
             build/d3d12.dll
             build/d3d12.pdb
-          
+            build/KCD2MPServer.exe
+            build/server.toml.example
       - name: Generate Build Info
         id: var
         run: |

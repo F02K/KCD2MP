@@ -1,0 +1,252 @@
+syntax = "proto3";
+
+package kcd2mp.protocol;
+
+enum MovementMode {
+  MOVEMENT_MODE_IDLE = 0;
+  MOVEMENT_MODE_WALK = 1;
+  MOVEMENT_MODE_RUN = 2;
+}
+
+enum RejectReason {
+  REJECT_REASON_UNSPECIFIED = 0;
+  REJECT_REASON_PROTOCOL_MISMATCH = 1;
+  REJECT_REASON_GAME_BUILD_MISMATCH = 2;
+  REJECT_REASON_LEVEL_MISMATCH = 3;
+  REJECT_REASON_AUTHENTICATION_FAILED = 4;
+  REJECT_REASON_DUPLICATE_NAME = 5;
+  REJECT_REASON_SERVER_FULL = 6;
+  REJECT_REASON_MALFORMED_MESSAGE = 7;
+  REJECT_REASON_CONTENT_MISMATCH = 8;
+  REJECT_REASON_IDENTITY_REQUIRED = 9;
+  REJECT_REASON_IDENTITY_IN_USE = 10;
+  REJECT_REASON_SESSION_MISMATCH = 11;
+  REJECT_REASON_BOOTSTRAP_FAILED = 12;
+  REJECT_REASON_PROFILE_CONFLICT = 13;
+}
+
+enum BootstrapMode {
+  BOOTSTRAP_MODE_WAIT = 0;
+  BOOTSTRAP_MODE_INITIALIZE = 1;
+  BOOTSTRAP_MODE_LOAD = 2;
+}
+
+message Vec3 {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+}
+
+message Quaternion {
+  float x = 1;
+  float y = 2;
+  float z = 3;
+  float w = 4;
+}
+
+message TransformState {
+  Vec3 position = 1;
+  Quaternion rotation = 2;
+  Vec3 velocity = 3;
+  uint64 sequence = 4;
+  uint64 client_time_ms = 5;
+}
+
+message PlayerSnapshot {
+  uint64 player_id = 1;
+  string display_name = 2;
+  TransformState transform = 3;
+  MovementMode movement_mode = 4;
+  bool transform_valid = 5;
+  bool connected = 6;
+}
+
+message ClientHello {
+  uint32 protocol_version = 1;
+  string client_version = 2;
+  uint32 whgame_timestamp = 3;
+  uint64 whgame_image_size = 4;
+  string display_name = 5;
+  string password = 6;
+  string level_id = 7;
+  string content_hash = 8;
+  string resume_token = 9;
+}
+
+message ServerChallenge {
+  string server_id = 1;
+}
+
+message ClientAuthenticate {
+  string identity_token = 1;
+  string claim_code = 2;
+  bool enroll = 3;
+  string resume_token = 4;
+}
+
+message RpgValue {
+  string id = 1;
+  int32 level = 2;
+  float xp = 3;
+}
+
+message InventoryItem {
+  string instance_id = 1;
+  string definition_id = 2;
+  uint32 count = 3;
+  float quality = 4;
+  float condition = 5;
+  string equipped_slot = 6;
+}
+
+message PlayerProfile {
+  uint64 player_id = 1;
+  uint64 revision = 2;
+  string display_name = 3;
+  string level_id = 4;
+  TransformState last_transform = 5;
+  bool transform_valid = 6;
+  int64 money = 7;
+  repeated RpgValue stats = 8;
+  repeated RpgValue skills = 9;
+  repeated InventoryItem inventory = 10;
+}
+
+message ServerBootstrap {
+  string server_id = 1;
+  string session_id = 2;
+  uint64 manifest_revision = 3;
+  string level_id = 4;
+  uint64 world_seed = 5;
+  BootstrapMode mode = 6;
+  TransformState spawn = 7;
+  bool spawn_valid = 8;
+  PlayerProfile profile = 9;
+  string issued_identity_token = 10;
+  uint32 timeout_seconds = 11;
+}
+
+message ClientWorldReady {
+  string session_id = 1;
+  uint64 manifest_revision = 2;
+  string level_id = 3;
+  TransformState initial_spawn = 4;
+  bool initialized_session = 5;
+}
+
+message ClientWorldFailed {
+  string session_id = 1;
+  string reason = 2;
+}
+
+message ClientProfileUpdate {
+  uint64 base_revision = 1;
+  PlayerProfile profile = 2;
+}
+
+message ProfileAccepted {
+  uint64 revision = 1;
+}
+
+message ProfileRejected {
+  uint64 authoritative_revision = 1;
+  string reason = 2;
+}
+
+message StoredPlayerProfile {
+  bytes identity_token_hash = 1;
+  PlayerProfile profile = 2;
+}
+
+message ServerAccepted {
+  uint64 player_id = 1;
+  string resume_token = 2;
+  uint32 tick_rate = 3;
+  uint32 snapshot_rate = 4;
+  uint32 max_players = 5;
+  string server_name = 6;
+  string level_id = 7;
+  repeated PlayerSnapshot players = 8;
+  uint32 profile_snapshot_interval_seconds = 9;
+}
+
+message ServerRejected {
+  RejectReason reason = 1;
+  string message = 2;
+}
+
+message PlayerJoined {
+  PlayerSnapshot player = 1;
+}
+
+message PlayerLeft {
+  uint64 player_id = 1;
+  string reason = 2;
+}
+
+message ClientTransform {
+  TransformState transform = 1;
+}
+
+message WorldSnapshot {
+  uint64 server_tick = 1;
+  uint64 server_time_ms = 2;
+  repeated PlayerSnapshot players = 3;
+}
+
+message StateCorrection {
+  TransformState accepted_transform = 1;
+  string reason = 2;
+}
+
+message ChatSend {
+  string text = 1;
+}
+
+message ChatBroadcast {
+  uint64 player_id = 1;
+  string display_name = 2;
+  string text = 3;
+  uint64 server_time_ms = 4;
+}
+
+message Ping {
+  uint64 nonce = 1;
+  uint64 client_time_ms = 2;
+}
+
+message Pong {
+  uint64 nonce = 1;
+  uint64 client_time_ms = 2;
+  uint64 server_time_ms = 3;
+}
+
+message ServerShutdown {
+  string reason = 1;
+}
+
+message Envelope {
+  oneof payload {
+    ClientHello client_hello = 1;
+    ServerAccepted server_accepted = 2;
+    ServerRejected server_rejected = 3;
+    PlayerJoined player_joined = 4;
+    PlayerLeft player_left = 5;
+    ClientTransform client_transform = 6;
+    WorldSnapshot world_snapshot = 7;
+    StateCorrection state_correction = 8;
+    ChatSend chat_send = 9;
+    ChatBroadcast chat_broadcast = 10;
+    Ping ping = 11;
+    Pong pong = 12;
+    ServerShutdown server_shutdown = 13;
+    ServerChallenge server_challenge = 14;
+    ClientAuthenticate client_authenticate = 15;
+    ServerBootstrap server_bootstrap = 16;
+    ClientWorldReady client_world_ready = 17;
+    ClientWorldFailed client_world_failed = 18;
+    ClientProfileUpdate client_profile_update = 19;
+    ProfileAccepted profile_accepted = 20;
+    ProfileRejected profile_rejected = 21;
+  }
+}

@@ -1,0 +1,28 @@
+[server]
+bind_address = "0.0.0.0"
+port = 27020
+name = "KCD2MP Server"
+password = ""
+max_players = 8
+level_id = "replace-with-the-level-id-shown-by-the-client"
+required_content_hash = ""
+tick_rate = 30
+snapshot_rate = 20
+handshake_timeout_seconds = 10
+idle_timeout_seconds = 15
+reconnect_grace_seconds = 30
+bootstrap_timeout_seconds = 180
+profile_snapshot_interval_seconds = 15
+max_player_speed_mps = 15.0
+movement_tolerance_m = 2.0
+world_directory = "world"
+
+# Optional. If omitted, the first authenticated client initializes the spawn.
+# [server.initial_spawn]
+# x = 0.0
+# y = 0.0
+# z = 0.0
+# qx = 0.0
+# qy = 0.0
+# qz = 0.0
+# qw = 1.0

@@ -40,6 +40,7 @@ namespace kcd2::signatures
 		    signature_spec{"game luaH_new", "48 89 5C 24 ? 48 89 6C 24 ? 48 89 74 24 ? 57 48 83 EC ? 41 8B F0 8B DA 45 33 C0", resolution_kind::direct, target_region::executable},
 		    signature_spec{"C3DEngine_UnRegisterEntityImpl", "E8 ? ? ? ? 49 8D 8E ? ? ? ? 48 8B D7 4C 8D 5C 24", resolution_kind::relative_call, target_region::executable},
 		    signature_spec{"CXConsole_ctor", "E8 ? ? ? ? 48 8B C8 EB 03 49 8B CF 48 8B 46 20 48 89 88 A8 00 00 00", resolution_kind::relative_call, target_region::executable},
+		    signature_spec{"gEnv pConsole pointer", "48 8B 0D ? ? ? ? 48 8D 94 24 C0 00 00 00 45 33 C9 41 B0 01 48 8B 01 FF 90 18 01 00 00", resolution_kind::rip_relative_memory, target_region::readable},
 		    signature_spec{"CEntity vtable", "48 8D 05 ? ? ? ? 48 89 01 4C 89 A1 A0 00 00 00", resolution_kind::rip_relative_memory, target_region::readable},
 		    signature_spec{"CStatObj vtable", "48 8D 05 ? ? ? ? 48 89 77 58 48 89 07", resolution_kind::rip_relative_memory, target_region::readable},
 		    signature_spec{"CGeomCacheRenderNode vtable", "48 8D 05 ? ? ? ? 33 ED 48 89 01 4C 8D 71 50 48 8D 05", resolution_kind::rip_relative_memory, target_region::readable},
@@ -1031,6 +1032,7 @@ namespace kcd2::signatures
 		};
 		validate_named_vtable("CXConsole vtable", "CXConsole vtable[32]", 32, true);
 		validate_named_vtable("CXConsole vtable", "CXConsole vtable[33]", 33, true);
+		validate_named_vtable("CXConsole vtable", "CXConsole vtable[35]", 35, true);
 		validate_named_vtable("CEntity vtable", "CEntity vtable[0]", 0, false);
 		validate_named_vtable("CStatObj vtable", "CStatObj vtable[0]", 0, false);
 		validate_named_vtable("CGeomCacheRenderNode vtable", "CGeomCacheRenderNode vtable[0]", 0, false);

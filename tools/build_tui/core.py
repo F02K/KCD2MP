@@ -17,7 +17,20 @@ APP_ID = "1771300"
 GAME_BIN_RELATIVE = Path("Bin") / "Win64MasterMasterSteamPGO"
 GAME_EXECUTABLE = "KingdomCome.exe"
 PROJECT_TARGET = "KCD2MP"
+SERVER_TARGET = "KCD2MPServer"
 AUDIT_TARGET = "KCD2MPSignatureAudit"
+TEST_TARGETS = (
+    "KCD2MPSignatureCoreTests",
+    "KCD2MPEnginePathTests",
+    "KCD2MPProtocolTests",
+    "KCD2MPServerCoreTests",
+    "KCD2MPGameCommandQueueTests",
+    "KCD2MPNetworkingTests",
+    "KCD2MPIdentityStoreTests",
+)
+VCPKG_BASELINE = "908da3a305a0a8028d9602ab241b433652b3df69"
+VCPKG_REPOSITORY = "https://github.com/microsoft/vcpkg.git"
+VCPKG_TRIPLET = "x64-windows-static"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 LogCallback = Callable[[str], None]
@@ -55,6 +68,7 @@ class BuildResult:
     dll_path: Path
     pdb_path: Path
     audit_path: Optional[Path] = None
+    server_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -466,10 +480,37 @@ class BuildService:
             profile.cmake_config,
             "--target",
             PROJECT_TARGET,
+            SERVER_TARGET,
             AUDIT_TARGET,
             "--parallel",
         ]
         self._run(build_command, log)
+        self._run(
+            [
+                environment.cmake,
+                "--build",
+                str(build_dir),
+                "--config",
+                profile.cmake_config,
+                "--target",
+                *TEST_TARGETS,
+                "--parallel",
+            ],
+            log,
+        )
+        self._run(
+            [
+                "ctest",
+                "--test-dir",
+                str(build_dir),
+                "-C",
+                profile.cmake_config,
+                "-R",
+                "^KCD2MP",
+                "--output-on-failure",
+            ],
+            log,
+        )
 
         artifact_dir = build_dir / profile.cmake_config
         result = BuildResult(
@@ -478,10 +519,16 @@ class BuildService:
             dll_path=artifact_dir / "d3d12_.dll",
             pdb_path=artifact_dir / "d3d12_.pdb",
             audit_path=artifact_dir / "{}.exe".format(AUDIT_TARGET),
+            server_path=artifact_dir / "{}.exe".format(SERVER_TARGET),
         )
         missing = [
             str(path)
-            for path in (result.dll_path, result.pdb_path, result.audit_path)
+            for path in (
+                result.dll_path,
+                result.pdb_path,
+                result.audit_path,
+                result.server_path,
+            )
             if path is not None and not path.is_file()
         ]
         if missing:
@@ -543,6 +590,7 @@ class BuildService:
         profile: BuildProfile,
         log: LogCallback,
     ) -> None:
+        toolchain = self._ensure_vcpkg(log)
         self._run(
             [
                 environment.cmake,
@@ -556,9 +604,65 @@ class BuildService:
                 "x64",
                 "-D",
                 "FINAL={}".format("YES" if profile.final else "NO"),
+                "-D",
+                "BUILD_TESTING=ON",
+                "-D",
+                "CMAKE_TOOLCHAIN_FILE={}".format(toolchain),
+                "-D",
+                "VCPKG_TARGET_TRIPLET={}".format(VCPKG_TRIPLET),
+                "-D",
+                "VCPKG_OVERLAY_PORTS={}".format(
+                    self.project_root / "cmake_scripts" / "vcpkg" / "ports"
+                ),
             ],
             log,
         )
+
+    def _ensure_vcpkg(self, log: LogCallback) -> Path:
+        git = shutil.which("git")
+        if not git:
+            raise BuildToolError("Git was not found on PATH; it is required to bootstrap vcpkg.")
+
+        root = self.project_root / ".cache" / "vcpkg"
+        if not (root / ".git").is_dir():
+            root.parent.mkdir(parents=True, exist_ok=True)
+            self._run(
+                [
+                    git,
+                    "clone",
+                    "--filter=blob:none",
+                    "--no-checkout",
+                    VCPKG_REPOSITORY,
+                    str(root),
+                ],
+                log,
+            )
+
+        try:
+            current = _capture_text([git, "-C", str(root), "rev-parse", "HEAD"]).strip()
+        except BuildToolError:
+            current = ""
+        if current != VCPKG_BASELINE:
+            self._run(
+                [git, "-C", str(root), "fetch", "origin", VCPKG_BASELINE],
+                log,
+            )
+            self._run(
+                [git, "-C", str(root), "checkout", "--detach", VCPKG_BASELINE],
+                log,
+            )
+
+        executable = root / "vcpkg.exe"
+        if not executable.is_file():
+            bootstrap = root / "bootstrap-vcpkg.bat"
+            if not bootstrap.is_file():
+                raise BuildToolError("The pinned vcpkg checkout has no bootstrap-vcpkg.bat.")
+            self._run([str(bootstrap), "-disableMetrics"], log)
+
+        toolchain = root / "scripts" / "buildsystems" / "vcpkg.cmake"
+        if not toolchain.is_file():
+            raise BuildToolError("The vcpkg CMake toolchain is missing: {}".format(toolchain))
+        return toolchain
 
     def _prepare_build_directory(
         self,
@@ -605,6 +709,34 @@ class BuildService:
                 same_source = False
             if not same_source:
                 incompatibilities.append("source directory changed")
+
+        if cache_path.is_file():
+            expected_toolchain = (
+                self.project_root
+                / ".cache"
+                / "vcpkg"
+                / "scripts"
+                / "buildsystems"
+                / "vcpkg.cmake"
+            ).resolve(strict=False)
+            cached_toolchain = cached.get("CMAKE_TOOLCHAIN_FILE")
+            try:
+                same_toolchain = (
+                    cached_toolchain is not None
+                    and Path(cached_toolchain).resolve(strict=False) == expected_toolchain
+                )
+            except OSError:
+                same_toolchain = False
+            if not same_toolchain:
+                incompatibilities.append("vcpkg toolchain changed or was missing")
+
+            cached_triplet = cached.get("VCPKG_TARGET_TRIPLET")
+            if cached_triplet != VCPKG_TRIPLET:
+                incompatibilities.append(
+                    "vcpkg triplet changed from {!r} to {!r}".format(
+                        cached_triplet, VCPKG_TRIPLET
+                    )
+                )
 
         if incompatibilities and resolved_build_dir.exists():
             log(
