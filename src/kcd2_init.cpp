@@ -1032,33 +1032,43 @@ namespace big
 		return value ? std::optional(std::string(value)) : std::nullopt;
 	}
 
-	bool engine_cvar_set_int_unrestricted(
-	    std::string_view name,
-	    int value)
+	bool engine_cvar_set_int(std::string_view name, int value)
 	{
 		auto *cvar = find_engine_cvar(name);
 		if (!cvar)
 		{
 			return false;
 		}
+		const auto previous = cvar->GetIVal();
+		if (previous == value)
+		{
+			return true;
+		}
 
-		// The isolated multiplayer bootstrap only calls this wrapper with its
-		// hard-coded CVar allowlist. Retail marks some harmless transition
-		// controls (including g_skipIntro) as VF_CHEAT, so temporarily remove
-		// only that flag while writing and restore it immediately afterwards.
-		constexpr int vf_cheat = 0x00000002;
-		const auto had_cheat_flag = (cvar->GetFlags() & vf_cheat) != 0;
-		if (had_cheat_flag)
+		// The supported retail image calls ICVar::Set(int) through VTable slot
+		// 7 (+0x38). Calling the overloaded declaration directly is not safe
+		// across the retail MSVC ABI because the local overload order is not
+		// part of the signature audit.
+		using set_int = void(__fastcall *)(cry_cvar *, int);
+		auto **vtable = *reinterpret_cast<void ***>(cvar);
+		if (!vtable || !vtable[7])
 		{
-			cvar->ClearFlags(vf_cheat);
+			return false;
 		}
-		cvar->Set(value);
-		const auto accepted = cvar->GetIVal() == value;
-		if (had_cheat_flag)
+		reinterpret_cast<set_int>(vtable[7])(cvar, value);
+		const auto actual = cvar->GetIVal();
+		if (actual != value)
 		{
-			cvar->SetFlags(vf_cheat);
+			LOGF(
+			    ERROR,
+			    "Retail CVar '{}' rejected integer change {} -> {}; actual value is {}.",
+			    name,
+			    previous,
+			    value,
+			    actual);
+			return false;
 		}
-		return accepted;
+		return true;
 	}
 
 	bool engine_console_execute(

@@ -66,10 +66,11 @@ namespace kcd2mp::game
 		    std::pair{"g_EnableLoadSave", 0},
 		    std::pair{"autotest_disable_saveload", 1},
 		    // The retail map path identifies a frontend map load as a new game
-		    // and otherwise plays intro_new_game. Do not disable all movie
-		    // sequences here: the native level-start sequence also dismisses
-		    // the loading UI and finishes activating the player.
-		    std::pair{"g_skipIntro", 1},
+		    // and otherwise plays intro_new_game. This Warhorse-owned switch is
+		    // registered without VF_CHEAT in the supported retail image.
+		    std::pair{"wh_sys_HideIntroVideo", 1},
+		    // Do not disable all movie sequences here: the native level-start
+		    // sequence also dismisses the loading UI and activates the player.
 		    std::pair{"g_disableSequencePlayback", 0},
 		    std::pair{"wh_sys_FreezePlayline", 1},
 		    std::pair{"wh_sys_NoPlaylineDeleting", 1},
@@ -95,7 +96,7 @@ namespace kcd2mp::game
 			     change != sandbox.cvar_changes.rend();
 			     ++change)
 			{
-				if (!big::engine_cvar_set_int_unrestricted(
+				if (!big::engine_cvar_set_int(
 				        change->name,
 				        change->previous))
 				{
@@ -129,7 +130,7 @@ namespace kcd2mp::game
 					return false;
 				}
 				sandbox.cvar_changes.push_back({name, *previous});
-				if (!big::engine_cvar_set_int_unrestricted(name, value))
+				if (!big::engine_cvar_set_int(name, value))
 				{
 					error = std::format(
 					    "sandbox CVar '{}' rejected value {}",

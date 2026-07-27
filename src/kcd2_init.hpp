@@ -43,8 +43,8 @@ namespace big
 		virtual float GetFVal() const = 0;
 		virtual const char *GetString() const = 0;
 		virtual void Set(const char *value) = 0;
-		virtual void Set(float value) = 0;
 		virtual void Set(int value) = 0;
+		virtual void Set(float value) = 0;
 		virtual void Set(std::int64_t value) = 0;
 		virtual void ClearFlags(int flags) = 0;
 		virtual int GetFlags() const = 0;
@@ -65,9 +65,7 @@ namespace big
 	[[nodiscard]] std::optional<int> engine_cvar_int(std::string_view name);
 	[[nodiscard]] std::optional<std::string> engine_cvar_string(
 	    std::string_view name);
-	[[nodiscard]] bool engine_cvar_set_int_unrestricted(
-	    std::string_view name,
-	    int value);
+	[[nodiscard]] bool engine_cvar_set_int(std::string_view name, int value);
 	[[nodiscard]] bool engine_console_execute(
 	    std::string_view command,
 	    bool defer_execution = true);
