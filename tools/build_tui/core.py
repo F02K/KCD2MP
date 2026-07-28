@@ -19,15 +19,7 @@ GAME_EXECUTABLE = "KingdomCome.exe"
 PROJECT_TARGET = "KCD2MP"
 SERVER_TARGET = "KCD2MPServer"
 AUDIT_TARGET = "KCD2MPSignatureAudit"
-TEST_TARGETS = (
-    "KCD2MPSignatureCoreTests",
-    "KCD2MPEnginePathTests",
-    "KCD2MPProtocolTests",
-    "KCD2MPServerCoreTests",
-    "KCD2MPGameCommandQueueTests",
-    "KCD2MPNetworkingTests",
-    "KCD2MPIdentityStoreTests",
-)
+TEST_TARGETS = ("KCD2MPTests",)
 VCPKG_BASELINE = "908da3a305a0a8028d9602ab241b433652b3df69"
 VCPKG_REPOSITORY = "https://github.com/microsoft/vcpkg.git"
 VCPKG_TRIPLET = "x64-windows-static"

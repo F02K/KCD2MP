@@ -10,10 +10,12 @@
 #include <string_view>
 #include <vector>
 
+#include "npc/catalog.hpp"
+
 namespace kcd2mp
 {
-	constexpr std::uint32_t protocol_version = 2;
-	constexpr std::string_view version_string = "0.2.0";
+	constexpr std::uint32_t protocol_version = 3;
+	constexpr std::string_view version_string = "0.3.0";
 	constexpr std::uint32_t supported_whgame_timestamp = 0x6A350E20;
 	constexpr std::uint64_t supported_whgame_image_size = 0x5B2D000;
 	constexpr std::size_t max_application_message_size = 64 * 1024;
@@ -23,6 +25,10 @@ namespace kcd2mp
 	constexpr std::size_t max_chat_codepoints = 256;
 	constexpr std::size_t max_profile_rpg_values = 128;
 	constexpr std::size_t max_profile_inventory_items = 512;
+	constexpr std::size_t max_avatar_equipment_items = 32;
+	constexpr std::size_t max_avatar_archetypes = 32;
+	constexpr std::string_view default_avatar_archetype_id =
+	    npc::default_soul_id;
 
 	using player_id = std::uint64_t;
 	using connection_id = std::uint64_t;
@@ -53,6 +59,10 @@ namespace kcd2mp
 	[[nodiscard]] bool is_valid_display_name(std::string_view value);
 	[[nodiscard]] bool is_valid_chat(std::string_view value);
 	[[nodiscard]] bool is_valid_profile(const protocol::PlayerProfile &profile);
+	[[nodiscard]] bool is_valid_avatar_descriptor(
+	    const protocol::AvatarDescriptor &avatar);
+	[[nodiscard]] bool is_valid_avatar_policy(
+	    const protocol::AvatarPolicy &policy);
 	[[nodiscard]] bool is_finite_transform(const protocol::TransformState &transform);
 	[[nodiscard]] bool normalize_rotation(protocol::Quaternion *rotation);
 	[[nodiscard]] protocol::MovementMode movement_mode_for(

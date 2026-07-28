@@ -109,6 +109,13 @@ int main()
 	profile->set_display_name("Henry");
 	profile->set_level_id("sandbox");
 	profile->set_money(200);
+	auto *avatar = profile->mutable_avatar();
+	avatar->set_archetype_id(
+	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
+	avatar->set_revision(1);
+	auto *visible_item = avatar->add_equipment();
+	visible_item->set_definition_id("item.sword");
+	visible_item->set_equipped_slot("right_hand");
 	auto *skill = profile->add_skills();
 	skill->set_id("sword");
 	skill->set_level(5);
@@ -127,6 +134,54 @@ int main()
 	const auto decoded_profile = decode(encoded_profile->bytes, &error);
 	assert(decoded_profile);
 	assert(decoded_profile->client_profile_update().profile().money() == 200);
+
+	protocol::Envelope avatar_update_envelope;
+	auto *avatar_update =
+	    avatar_update_envelope.mutable_client_avatar_update();
+	avatar_update->set_base_revision(1);
+	*avatar_update->mutable_avatar() = *avatar;
+	assert(encode(
+	    avatar_update_envelope,
+	    reliability::reliable,
+	    &error));
+
+	auto duplicate_slot = *avatar;
+	*duplicate_slot.add_equipment() = duplicate_slot.equipment(0);
+	duplicate_slot.mutable_equipment(1)->set_definition_id("item.shield");
+	assert(!is_valid_avatar_descriptor(duplicate_slot));
+
+	protocol::AvatarPolicy policy;
+	policy.set_default_archetype_id(
+	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
+	policy.add_allowed_archetype_ids(
+	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
+	assert(is_valid_avatar_policy(policy));
+	policy.add_allowed_archetype_ids(
+	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
+	assert(!is_valid_avatar_policy(policy));
+
+	protocol::Envelope static_avatar_in_snapshot;
+	auto *static_player =
+	    static_avatar_in_snapshot.mutable_world_snapshot()->add_players();
+	static_player->set_player_id(1);
+	static_player->set_display_name("Henry");
+	*static_player->mutable_avatar() = *avatar;
+	assert(!encode(
+	    static_avatar_in_snapshot,
+	    reliability::unreliable,
+	    &error));
+
+	protocol::Envelope entity_control;
+	entity_control.mutable_server_entity_control()
+	    ->set_non_player_entities_disabled(true);
+	const auto encoded_control =
+	    encode(entity_control, reliability::reliable, &error);
+	assert(encoded_control);
+	const auto decoded_control = decode(encoded_control->bytes, &error);
+	assert(decoded_control);
+	assert(decoded_control->server_entity_control()
+	    .non_player_entities_disabled());
+	assert(version_string == "0.3.0");
 
 	profile->mutable_inventory(0)->set_quality(
 	    std::numeric_limits<float>::quiet_NaN());

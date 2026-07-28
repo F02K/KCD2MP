@@ -83,6 +83,8 @@ namespace kcd2::signatures
 		    signature_spec{"CryScriptSystem_Init", "E8 ? ? ? ? 84 C0 74 ? E8 ? ? ? ? 41 38 BE", resolution_kind::relative_call, target_region::executable},
 		    signature_spec{"CScriptSystem_Update", "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8B 3D ? ? ? ? 48 8B F1 33 D2", resolution_kind::direct, target_region::executable},
 		    signature_spec{"CScriptSystem_ExecuteBuffer", "48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 48 8B F9 48 89 50", resolution_kind::direct, target_region::executable},
+		    signature_spec{"C_NewGameHelper_Start", "48 89 5C 24 ? 55 48 8B EC 48 81 EC ? ? ? ? 48 8B D9 E8 ? ? ? ? F3 0F 10 0D ? ? ? ? 48 8B 88 A8 01 00 00", resolution_kind::direct, target_region::executable},
+		    signature_spec{"C_Game instance pointer", "48 89 1D ? ? ? ? E8 ? ? ? ? 48 85 C0 74 ? 48 8B C8 E8 ? ? ? ? EB ? 48 8B C7 48 89 83 50 01 00 00", resolution_kind::rip_relative_memory, target_region::readable},
 		};
 
 		static_assert(signature_registry.size() == expected_signature_count);
@@ -997,6 +999,7 @@ namespace kcd2::signatures
 			    ctor ? std::move(error) : "constructor signature target is unavailable");
 		};
 		derive_constructor("CXConsole_ctor", "CXConsole vtable", 0x80);
+		derive_constructor("CEntitySystem_ctor", "CEntitySystem vtable", 0x180);
 		derive_constructor("CVegetation_ctor", "CVegetation vtable", 0x80);
 		derive_constructor("CMergedMeshRenderNode_ctor", "CMergedMeshRenderNode vtable", 0x120);
 
@@ -1034,6 +1037,32 @@ namespace kcd2::signatures
 		validate_named_vtable("CXConsole vtable", "CXConsole vtable[33]", 33, true);
 		validate_named_vtable("CXConsole vtable", "CXConsole vtable[35]", 35, true);
 		validate_named_vtable("CEntity vtable", "CEntity vtable[0]", 0, false);
+		validate_named_vtable("CEntity vtable", "CEntity::SetFlags", 5, false);
+		validate_named_vtable("CEntity vtable", "CEntity::GetFlags", 6, false);
+		validate_named_vtable("CEntity vtable", "CEntity::Activate", 52, false);
+		validate_named_vtable("CEntity vtable", "CEntity::IsActive", 53, false);
+		validate_named_vtable("CEntity vtable", "CEntity::Hide", 63, false);
+		validate_named_vtable("CEntity vtable", "CEntity::IsHidden", 64, false);
+		validate_named_vtable(
+		    "CEntitySystem vtable",
+		    "CEntitySystem::SpawnEntity",
+		    12,
+		    true);
+		validate_named_vtable(
+		    "CEntitySystem vtable",
+		    "CEntitySystem::RemoveEntity",
+		    19,
+		    true);
+		validate_named_vtable(
+		    "CEntitySystem vtable",
+		    "CEntitySystem::GetEntityIterator",
+		    21,
+		    true);
+		validate_named_vtable(
+		    "CEntitySystem vtable",
+		    "CEntitySystem::GetEntityLayerData",
+		    71,
+		    true);
 		validate_named_vtable("CStatObj vtable", "CStatObj vtable[0]", 0, false);
 		validate_named_vtable("CGeomCacheRenderNode vtable", "CGeomCacheRenderNode vtable[0]", 0, false);
 		validate_named_vtable("CVegetation vtable", "CVegetation vtable[0]", 0, true);

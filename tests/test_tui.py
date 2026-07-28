@@ -117,8 +117,8 @@ class BuildAppTests(unittest.IsolatedAsyncioTestCase):
                 def audit(self, profile, selected_root, log, build_result=None):
                     self.profile = profile
                     self.root = selected_root
-                    log("Signatures: 65/65 uniquely resolved")
-                    log("Derived targets: 80/80 valid")
+                    log("Signatures: 67/67 uniquely resolved")
+                    log("Derived targets: 93/93 valid")
 
             service = FakeService()
             app = BuildApp(

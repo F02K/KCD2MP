@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <exception>
 #include <string>
@@ -110,6 +111,8 @@ namespace
 		message->set_session_id(bootstrap.session_id());
 		message->set_manifest_revision(bootstrap.manifest_revision());
 		message->set_level_id(bootstrap.level_id());
+		assert(bootstrap.profile().has_avatar());
+		*message->mutable_avatar() = bootstrap.profile().avatar();
 		return envelope;
 	}
 
@@ -192,6 +195,23 @@ namespace
 		    });
 	}
 
+	bool has_entity_control(
+	    const std::vector<outbound_message> &messages,
+	    connection_id connection,
+	    bool disabled)
+	{
+		return std::ranges::any_of(
+		    messages,
+		    [&](const outbound_message &message)
+		    {
+			    return message.connection == connection
+			        && message.envelope.has_server_entity_control()
+			        && message.envelope.server_entity_control()
+			               .non_player_entities_disabled()
+			            == disabled;
+		    });
+	}
+
 	std::string connect_new_player(
 	    server_core &core,
 	    connection_id connection,
@@ -214,6 +234,10 @@ namespace
 		core.on_message(connection, ready(bootstrap), now + 2ms);
 		outbound = core.take_outbound();
 		assert(has_accepted(outbound, connection, expected_id));
+		assert(has_entity_control(
+		    outbound,
+		    connection,
+		    core.non_player_entities_disabled()));
 		return token;
 	}
 }
@@ -240,6 +264,22 @@ int main()
 	using namespace kcd2mp;
 	using namespace kcd2mp::server;
 	const auto start = clock::now();
+
+	temporary_world parsed_config_world;
+	{
+		const auto path = parsed_config_world.path / "server.toml";
+		std::ofstream output(path);
+		output
+		    << "[server]\n"
+		       "level_id = \"sandbox\"\n"
+		       "world_directory = \"world\"\n"
+		       "disable_non_player_entities = true\n";
+		output.close();
+		const auto parsed = load_server_config(path);
+		assert(parsed.disable_non_player_entities);
+		assert(parsed.world_directory
+		    == parsed_config_world.path / "world");
+	}
 
 	temporary_world invalid_config_world;
 	{
@@ -404,6 +444,159 @@ int main()
 		    outbound,
 		    31,
 		    protocol::REJECT_REASON_SERVER_FULL));
+	}
+
+	temporary_world entity_control_world;
+	{
+		auto config = config_for(entity_control_world.path);
+		config.disable_non_player_entities = true;
+		server_core core(config);
+		assert(core.non_player_entities_disabled());
+		(void)connect_new_player(core, 35, start, 1);
+
+		assert(!core.set_non_player_entities_disabled(true));
+		assert(core.take_outbound().empty());
+		assert(core.set_non_player_entities_disabled(false));
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(has_entity_control(outbound, 35, false));
+		assert(!core.non_player_entities_disabled());
+		assert(!core.set_non_player_entities_disabled(false));
+		assert(core.take_outbound().empty());
+	}
+
+	temporary_world dummy_world;
+	{
+		server_core core(config_for(dummy_world.path));
+		(void)connect_new_player(core, 36, start, 1);
+
+		std::string error;
+		const auto dummy_id =
+		    core.spawn_dummy("Training Dummy", &error);
+		assert(dummy_id);
+		assert(error.empty());
+		const auto players_with_dummy = core.players();
+		assert(players_with_dummy.size() == 2);
+		const auto dummy = std::ranges::find(
+		    players_with_dummy,
+		    *dummy_id,
+		    &player_view::id);
+		assert(dummy != players_with_dummy.end());
+		assert(dummy->dummy);
+		assert(dummy->connected);
+		assert(dummy->has_transform);
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().connection == 36);
+		assert(outbound.front().envelope.has_player_joined());
+		const auto &joined =
+		    outbound.front().envelope.player_joined().player();
+		assert(joined.player_id() == *dummy_id);
+		assert(joined.display_name() == "Training Dummy");
+		assert(joined.connected());
+		assert(joined.transform_valid());
+		assert(joined.transform().position().x() == 12.0F);
+		assert(joined.has_avatar());
+		assert(
+		    joined.avatar().archetype_id()
+		    == core.config().default_avatar_archetype);
+		assert(joined.avatar().revision() == 1);
+		assert(encode(
+		    outbound.front().envelope,
+		    outbound.front().delivery));
+		assert(!core.create_profile_claim(*dummy_id, start + 1ms));
+
+		assert(!core.spawn_dummy("Training Dummy", &error));
+		assert(error == "display name is already in use");
+		assert(core.take_outbound().empty());
+
+		assert(core.remove_dummy(*dummy_id, start + 2ms));
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_player_left());
+		assert(
+		    outbound.front().envelope.player_left().player_id()
+		    == *dummy_id);
+		assert(core.players().size() == 1);
+		assert(!core.remove_dummy(*dummy_id, start + 3ms));
+	}
+
+	temporary_world avatar_world;
+	{
+		constexpr std::string_view knight_soul =
+		    "11111111-2222-4333-8444-555555555555";
+		auto config = config_for(avatar_world.path);
+		config.known_avatar_archetypes.insert(std::string(knight_soul));
+		config.allowed_avatar_archetypes.push_back(std::string(knight_soul));
+		server_core core(config);
+		(void)connect_new_player(core, 37, start, 1);
+
+		protocol::Envelope update;
+		auto *message = update.mutable_client_avatar_update();
+		message->set_base_revision(1);
+		auto *avatar = message->mutable_avatar();
+		avatar->set_archetype_id(std::string(knight_soul));
+		avatar->set_revision(1);
+		avatar->set_stance(protocol::AVATAR_STANCE_READY);
+		avatar->set_weapon_class(
+		    protocol::AVATAR_WEAPON_CLASS_ONE_HANDED);
+		avatar->set_weapon_drawn(true);
+		auto *item = avatar->add_equipment();
+		item->set_definition_id("item.sword");
+		item->set_equipped_slot("right_hand");
+		core.on_message(37, update, start + 1ms);
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_avatar_accepted());
+		assert(outbound.front().envelope.avatar_accepted().revision() == 2);
+
+		core.on_message(37, update, start + 2ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_avatar_rejected());
+		assert(outbound.front()
+		           .envelope.avatar_rejected()
+		           .authoritative_avatar()
+		           .revision()
+		    == 2);
+		assert(outbound.front()
+		           .envelope.avatar_rejected()
+		           .authoritative_avatar()
+		           .archetype_id()
+		    == knight_soul);
+
+		message->set_base_revision(2);
+		avatar->set_revision(2);
+		avatar->set_archetype_id("unknown.network.soul");
+		core.on_message(37, update, start + 3ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_avatar_rejected());
+		assert(outbound.front()
+		           .envelope.avatar_rejected()
+		           .authoritative_avatar()
+		           .revision()
+		    == 3);
+		assert(outbound.front()
+		           .envelope.avatar_rejected()
+		           .authoritative_avatar()
+		           .archetype_id()
+		    == npc::default_soul_id);
+	}
+
+	{
+		server_config config;
+		config.default_avatar_archetype = "unknown.default";
+		config.allowed_avatar_archetypes = {
+		    "unknown.allowed",
+		    std::string(npc::default_soul_id),
+		    "unknown.allowed"};
+		normalize_avatar_config(config);
+		assert(config.default_avatar_archetype == npc::default_soul_id);
+		assert(config.allowed_avatar_archetypes.size() == 1);
+		assert(
+		    config.allowed_avatar_archetypes.front()
+		    == npc::default_soul_id);
 	}
 
 	temporary_world lease_world;

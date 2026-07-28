@@ -4,6 +4,10 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <unordered_set>
+#include <vector>
+
+#include "npc/catalog.hpp"
 
 namespace kcd2mp::server
 {
@@ -34,6 +38,13 @@ namespace kcd2mp::server
 		std::uint32_t reconnect_grace_seconds{30};
 		std::uint32_t bootstrap_timeout_seconds{180};
 		std::uint32_t profile_snapshot_interval_seconds{15};
+		bool disable_non_player_entities{};
+		std::string default_avatar_archetype{
+		    npc::default_soul_id};
+		std::vector<std::string> allowed_avatar_archetypes{
+		    std::string(npc::default_soul_id)};
+		std::unordered_set<std::string> known_avatar_archetypes{
+		    std::string(npc::default_soul_id)};
 		float max_player_speed_mps{15.0F};
 		float movement_tolerance_m{2.0F};
 		std::filesystem::path world_directory{"world"};
@@ -42,5 +53,6 @@ namespace kcd2mp::server
 
 	[[nodiscard]] server_config load_server_config(
 	    const std::filesystem::path &path);
+	void normalize_avatar_config(server_config &config);
 	void validate_server_config(const server_config &config);
 }

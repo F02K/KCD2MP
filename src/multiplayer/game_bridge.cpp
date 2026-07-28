@@ -2,6 +2,9 @@
 
 #include "kcd2_init.hpp"
 #include "multiplayer/client.hpp"
+#include "multiplayer/entity_control.hpp"
+#include "multiplayer/remote_avatar.hpp"
+#include "npc/catalog.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,6 +24,223 @@ namespace kcd2mp::game
 		clock::time_point previous_sample{};
 		bool previous_position_valid{};
 
+		class retail_entity_control_backend final :
+		    public entity_control_backend
+		{
+		public:
+			bool is_active(controlled_entity entity) const override
+			{
+				return static_cast<big::CEntity *>(entity)->IsActive();
+			}
+
+			bool is_hidden(controlled_entity entity) const override
+			{
+				return static_cast<big::CEntity *>(entity)->IsHidden();
+			}
+
+			bool set_active(
+			    controlled_entity entity,
+			    bool active) override
+			{
+				static_cast<big::CEntity *>(entity)->Activate(active);
+				return true;
+			}
+
+			bool set_hidden(
+			    controlled_entity entity,
+			    bool hidden) override
+			{
+				static_cast<big::CEntity *>(entity)->Hide(hidden);
+				return true;
+			}
+		};
+
+		retail_entity_control_backend entity_backend;
+		entity_controller entities{entity_backend};
+
+		class retail_npc_backend final : public npc::backend
+		{
+		public:
+			npc::capability get_capability() const override
+			{
+				return {
+				    false,
+				    "the supported retail build has no audited native "
+				    "human NPC spawn/animation/equipment/remove path yet"};
+			}
+
+			std::optional<npc::native_handle> spawn(
+			    const npc::spawn_request &,
+			    std::string &) override
+			{
+				return std::nullopt;
+			}
+
+			npc::status poll(npc::native_handle) override
+			{
+				return {
+				    npc::state::failed,
+				    npc::error_code::unavailable,
+				    get_capability().diagnostic};
+			}
+
+			bool set_transform(
+			    npc::native_handle,
+			    const npc::transform &) override
+			{
+				return false;
+			}
+
+			bool set_locomotion(
+			    npc::native_handle,
+			    npc::locomotion) override
+			{
+				return false;
+			}
+
+			bool set_appearance(
+			    npc::native_handle,
+			    const npc::appearance &) override
+			{
+				return false;
+			}
+
+			void remove(npc::native_handle) override
+			{
+			}
+		};
+
+		retail_npc_backend native_npc_backend;
+		npc::manager controlled_npcs{native_npc_backend};
+
+		std::uint64_t pack_npc_handle(npc::handle value)
+		{
+			return static_cast<std::uint64_t>(value.generation) << 32
+			    | value.slot;
+		}
+
+		npc::handle unpack_npc_handle(std::uint64_t value)
+		{
+			return {
+			    static_cast<std::uint32_t>(value),
+			    static_cast<std::uint32_t>(value >> 32)};
+		}
+
+		npc::transform npc_transform(
+		    const protocol::TransformState &value)
+		{
+			return {
+			    {value.position().x(),
+			     value.position().y(),
+			     value.position().z()},
+			    {value.rotation().x(),
+			     value.rotation().y(),
+			     value.rotation().z(),
+			     value.rotation().w()}};
+		}
+
+		npc::appearance npc_appearance(
+		    const protocol::AvatarDescriptor &value)
+		{
+			npc::appearance result;
+			result.items.reserve(value.equipment_size());
+			for (const auto &item : value.equipment())
+			{
+				result.items.push_back(
+				    {item.definition_id(), item.equipped_slot()});
+			}
+			result.pose = value.stance() == protocol::AVATAR_STANCE_READY
+			    ? npc::stance::ready
+			    : npc::stance::relaxed;
+			result.weapon = static_cast<npc::weapon_class>(
+			    static_cast<int>(value.weapon_class()));
+			result.weapon_drawn = value.weapon_drawn();
+			return result;
+		}
+
+		npc::locomotion npc_locomotion(
+		    protocol::MovementMode value)
+		{
+			switch (value)
+			{
+			case protocol::MOVEMENT_MODE_WALK:
+				return npc::locomotion::walk;
+			case protocol::MOVEMENT_MODE_RUN:
+				return npc::locomotion::run;
+			default:
+				return npc::locomotion::idle;
+			}
+		}
+
+		class retail_remote_avatar_backend final :
+		    public remote_avatar_backend
+		{
+		public:
+			bool available() const override
+			{
+				return controlled_npcs.get_capability().available;
+			}
+
+			std::string diagnostic() const override
+			{
+				return controlled_npcs.get_capability().diagnostic;
+			}
+
+			std::optional<remote_avatar_handle> spawn(
+			    const remote_avatar_snapshot &player) override
+			{
+				npc::spawn_request request;
+				request.archetype_id = player.avatar.archetype_id();
+				request.world_transform =
+				    npc_transform(player.transform);
+				request.movement =
+				    npc_locomotion(player.movement_mode);
+				request.visual = npc_appearance(player.avatar);
+				request.exempt_from_entity_control = true;
+				const auto spawned = controlled_npcs.spawn(
+				    std::move(request),
+				    player.id);
+				return spawned
+				    ? std::optional<remote_avatar_handle>{
+				          pack_npc_handle(spawned.npc)}
+				    : std::nullopt;
+			}
+
+			bool update(
+			    remote_avatar_handle avatar,
+			    const remote_avatar_snapshot &player,
+			    bool appearance_changed) override
+			{
+				const auto handle = unpack_npc_handle(avatar);
+				const auto status = controlled_npcs.get_status(handle);
+				if (status.value == npc::state::failed
+				    || status.value == npc::state::removed)
+				{
+					return false;
+				}
+				const bool dynamic_applied = controlled_npcs.set_transform(
+				           handle,
+				           npc_transform(player.transform))
+				    && controlled_npcs.set_locomotion(
+				        handle,
+				        npc_locomotion(player.movement_mode));
+				return dynamic_applied
+				    && (!appearance_changed
+				        || controlled_npcs.set_appearance(
+				            handle,
+				            npc_appearance(player.avatar)));
+			}
+
+			void remove(remote_avatar_handle avatar) override
+			{
+				(void)controlled_npcs.remove(
+				    unpack_npc_handle(avatar));
+			}
+		};
+
+		retail_remote_avatar_backend remote_avatar_backend;
+		remote_avatar_manager remote_avatars{remote_avatar_backend};
+
 		struct cvar_change
 		{
 			std::string_view name;
@@ -38,7 +258,6 @@ namespace kcd2mp::game
 			std::vector<cvar_change> cvar_changes;
 			clock::time_point deadline;
 			std::optional<clock::time_point> player_ready_since;
-			bool map_requested{};
 			bool player_observed{};
 		};
 
@@ -222,7 +441,7 @@ namespace kcd2mp::game
 		{
 			return {false, "Sandbox engine console is not initialized yet."};
 		}
-		for (const auto command : {"map", "unload"})
+		for (const auto command : {"unload"})
 		{
 			if (!big::engine_console_has_command(command))
 			{
@@ -259,13 +478,14 @@ namespace kcd2mp::game
 		}
 		return {
 		    true,
-		    "Retail sandbox wrappers are ready; joining will load a server-owned world."};
+		    "Retail sandbox wrappers are ready; joining will adopt a natively loaded save."};
 	}
 
-	bool is_frontend_without_player()
+	bool can_start_join()
 	{
-		return big::g_player_entity == nullptr
-		    && sandbox.phase == sandbox_phase::idle;
+		return sandbox.phase == sandbox_phase::idle
+		    && big::g_player_entity
+		    && !current_level_id().empty();
 	}
 
 	sandbox_start_result begin_sandbox(
@@ -280,11 +500,11 @@ namespace kcd2mp::game
 		{
 			return {false, "another sandbox transition is already active"};
 		}
-		if (big::g_player_entity)
+		if (!big::g_player_entity)
 		{
 			return {
 			    false,
-			    "sandbox bootstrap must start from the main menu without a loaded save"};
+			    "the native save was no longer loaded when the server bootstrap arrived"};
 		}
 		const auto map_name = map_name_for_level(bootstrap.level_id());
 		if (!map_name)
@@ -295,13 +515,28 @@ namespace kcd2mp::game
 			        "server requested unsupported retail level id '{}'",
 			        bootstrap.level_id())};
 		}
+		const auto loaded_level = current_level_id();
+		if (loaded_level.empty())
+		{
+			return {
+			    false,
+			    "the loaded save has no detectable retail level id"};
+		}
+		if (loaded_level != bootstrap.level_id())
+		{
+			return {
+			    false,
+			    std::format(
+			        "loaded save is on level id {}, but the server requires level id {}",
+			        loaded_level,
+			        bootstrap.level_id())};
+		}
 
 		sandbox.bootstrap = bootstrap;
 		sandbox.expected_level_id = bootstrap.level_id();
 		sandbox.map_name = *map_name;
 		sandbox.error.clear();
 		sandbox.initial_spawn.reset();
-		sandbox.map_requested = false;
 		sandbox.player_observed = false;
 		if (!apply_sandbox_cvars(sandbox.error))
 		{
@@ -310,16 +545,12 @@ namespace kcd2mp::game
 			return {false, error};
 		}
 
-		const auto command = std::format("map {}", sandbox.map_name);
-		if (!big::engine_console_execute(command, true))
-		{
-			restore_cvars();
-			const auto error =
-			    std::format("failed to queue retail command '{}'", command);
-			reset_sandbox_runtime();
-			return {false, error};
-		}
-		sandbox.map_requested = true;
+		sandbox.player_observed = true;
+		sandbox.player_ready_since = clock::now();
+		LOGF(
+		    INFO,
+		    "Sandbox bootstrap adopted the natively loaded save on server level {}; save/load is now locked.",
+		    sandbox.expected_level_id);
 		sandbox.phase = sandbox_phase::loading;
 		const auto timeout = std::max<std::uint32_t>(
 		    5,
@@ -327,11 +558,6 @@ namespace kcd2mp::game
 		        ? bootstrap.timeout_seconds() - 5
 		        : bootstrap.timeout_seconds());
 		sandbox.deadline = clock::now() + std::chrono::seconds(timeout);
-		LOGF(
-		    INFO,
-		    "Sandbox bootstrap queued map '{}' for server level {} with save/load locked.",
-		    sandbox.map_name,
-		    sandbox.expected_level_id);
 		return {true, {}};
 	}
 
@@ -463,7 +689,16 @@ namespace kcd2mp::game
 		}
 		sandbox.initial_spawn.reset();
 		sandbox.bootstrap.reset();
-		if (!sandbox.map_requested && !big::g_player_entity)
+		const auto removed_avatars = remote_avatars.clear();
+		if (removed_avatars != 0)
+		{
+			LOGF(
+			    INFO,
+			    "Removed {} remote multiplayer avatars.",
+			    removed_avatars);
+		}
+		(void)set_non_player_entities_disabled(false);
+		if (!big::g_player_entity)
 		{
 			restore_cvars();
 			reset_sandbox_runtime();
@@ -555,15 +790,140 @@ namespace kcd2mp::game
 		big::g_player_entity->SetWorldTM(matrix);
 	}
 
+	bool set_non_player_entities_disabled(bool disabled)
+	{
+		if (big::g_player_entity)
+		{
+			(void)entities.register_player(big::g_player_entity);
+		}
+		std::vector<controlled_entity> current;
+		current.reserve(big::g_entities.size());
+		for (auto *entity : big::g_entities)
+		{
+			current.push_back(entity);
+		}
+		const auto result = entities.set_disabled(disabled, current);
+		LOGF(
+		    result.failed == 0 ? INFO : ERROR,
+		    "Server entity control {}: affected={}, restored={}, failed={}.",
+		    disabled ? "disabled non-player entities"
+		             : "restored non-player entities",
+		    result.affected,
+		    result.restored,
+		    result.failed);
+		return result.failed == 0;
+	}
+
+	bool non_player_entities_disabled()
+	{
+		return entities.disabled();
+	}
+
+	void register_player_entity(void *entity)
+	{
+		const auto result = entities.register_player(entity);
+		if (result.failed != 0)
+		{
+			LOG(ERROR)
+			    << "Could not restore a newly registered multiplayer player entity.";
+			if (g_multiplayer_client)
+			{
+				g_multiplayer_client->fail(
+				    "could not exempt a multiplayer player entity "
+				    "from server entity control");
+			}
+		}
+	}
+
+	void unregister_player_entity(void *entity)
+	{
+		entities.unregister_player(entity);
+	}
+
+	void on_entity_created(void *entity)
+	{
+		const auto result = entities.entity_created(entity);
+		if (result.failed != 0)
+		{
+			LOG(ERROR)
+			    << "Could not apply server entity control to a newly created entity.";
+			if (g_multiplayer_client)
+			{
+				g_multiplayer_client->fail(
+				    "could not apply server entity control "
+				    "to a newly created entity");
+			}
+		}
+	}
+
+	void on_entity_destroyed(void *entity)
+	{
+		entities.entity_destroyed(entity);
+		controlled_npcs.native_destroyed(
+		    reinterpret_cast<npc::native_handle>(entity));
+	}
+
+	npc::manager &npc_manager()
+	{
+		return controlled_npcs;
+	}
+
 	void game_thread_tick()
 	{
+		static const bool catalog_loaded = []
+		{
+			std::string error;
+			if (!npc::initialize_runtime_catalog(error))
+			{
+				LOG(ERROR) << "NPC catalog initialization failed: " << error;
+				return false;
+			}
+			LOGF(
+			    INFO,
+			    "Loaded {} human Soul archetypes from local Tables.pak.",
+			    npc::runtime_catalog().size());
+			return true;
+		}();
+		(void)catalog_loaded;
 		if (!g_multiplayer_client)
 		{
 			return;
 		}
 		(void)poll_sandbox();
+		controlled_npcs.tick();
 		const auto level = current_level_id();
-		g_multiplayer_client->game_tick(local_transform(), level);
+		g_multiplayer_client->game_tick(
+		    local_transform(),
+		    std::nullopt,
+		    level);
+		const auto status = g_multiplayer_client->status();
+		if (status.state == client_state::connected
+		    || status.state == client_state::reconnecting)
+		{
+			std::vector<remote_avatar_snapshot> snapshots;
+			for (const auto &player :
+			     g_multiplayer_client->remote_players())
+			{
+				snapshots.push_back({
+				    player.id,
+				    player.display_name,
+				    player.connected,
+				    player.has_transform,
+				    player.transform,
+				    player.movement_mode,
+				    player.has_avatar,
+				    player.avatar});
+			}
+			const auto avatars = remote_avatars.sync(snapshots);
+			if (!avatars.success)
+			{
+				g_multiplayer_client->fail(avatars.error);
+			}
+		}
+		else if (remote_avatars.size() != 0)
+		{
+			(void)remote_avatars.clear();
+		}
 		if (const auto correction = g_multiplayer_client->take_local_correction())
 		{
 			apply_local_correction(*correction);

@@ -4,7 +4,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(KCD2MP VERSION 0.2.0 LANGUAGES CXX C ASM ASM_MASM)
+project(KCD2MP VERSION 0.3.0 LANGUAGES CXX C ASM ASM_MASM)
 
 set(SRC_DIR "${PROJECT_SOURCE_DIR}/src")
 set(KCD2MP_WHGAME_PATH "" CACHE FILEPATH "Path to WHGame.dll for the offline signature audit")
@@ -47,6 +47,7 @@ list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]signatures[/\\\\]signature_core\\.cpp
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]multiplayer[/\\\\]protocol\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]multiplayer[/\\\\]networking\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]server[/\\\\].*")
+list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]npc[/\\\\]catalog\\.cpp$")
 
 if (NOT TARGET Zydis)
     message(FATAL_ERROR
@@ -75,6 +76,27 @@ add_compile_options("$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/utf-8>")
 if (FINAL)
     add_compile_definitions(FINAL)
 endif()
+
+add_library(KCD2MPNpcCatalog STATIC
+    "${SRC_DIR}/npc/catalog.cpp"
+    "${SRC_DIR}/npc/catalog.hpp"
+)
+set_property(TARGET KCD2MPNpcCatalog PROPERTY CXX_STANDARD 23)
+target_include_directories(KCD2MPNpcCatalog PUBLIC
+    "${SRC_DIR}"
+    "${zip_SOURCE_DIR}"
+)
+target_link_libraries(KCD2MPNpcCatalog PUBLIC
+    pugixml::pugixml
+    nlohmann_json::nlohmann_json
+    zip
+)
+target_compile_definitions(KCD2MPNpcCatalog PRIVATE
+    "_CRT_SECURE_NO_WARNINGS"
+    "NOMINMAX"
+    "WIN32_LEAN_AND_MEAN"
+)
+set_property(TARGET KCD2MPNpcCatalog PROPERTY COMPILE_WARNING_AS_ERROR ON)
 
 add_library(KCD2MPProtocol STATIC
     "${SRC_DIR}/multiplayer/protocol.cpp"
@@ -153,6 +175,9 @@ add_custom_command(TARGET KCD2MPServer POST_BUILD
     COMMAND "${CMAKE_COMMAND}" -E copy_if_different
         "${PROJECT_SOURCE_DIR}/server.toml.example"
         "$<TARGET_FILE_DIR:KCD2MPServer>/server.toml.example"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${PROJECT_SOURCE_DIR}/data/npc_archetypes.json"
+        "$<TARGET_FILE_DIR:KCD2MPServer>/npc_archetypes.json"
 )
 
 add_library(KCD2MP MODULE "${SRC_MAIN}" "${GENERATED_VERSION_SOURCE}")
@@ -176,6 +201,7 @@ target_link_libraries(KCD2MP PRIVATE
     KCD2MPProtocol
     KCD2MPNetworking
     KCD2MPSignatureCore
+    KCD2MPNpcCatalog
     Zydis
     zip
     imguizmo
@@ -284,6 +310,59 @@ if (BUILD_TESTING)
     set_property(TARGET KCD2MPGameCommandQueueTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPGameCommandQueueTests COMMAND KCD2MPGameCommandQueueTests)
 
+    add_executable(KCD2MPEntityControlTests
+        "${PROJECT_SOURCE_DIR}/tests/entity_control_tests.cpp"
+    )
+    set_property(TARGET KCD2MPEntityControlTests PROPERTY CXX_STANDARD 23)
+    target_include_directories(KCD2MPEntityControlTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPEntityControlTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPEntityControlTests COMMAND KCD2MPEntityControlTests)
+
+    add_executable(KCD2MPRemoteAvatarTests
+        "${PROJECT_SOURCE_DIR}/tests/remote_avatar_tests.cpp"
+    )
+    set_property(TARGET KCD2MPRemoteAvatarTests PROPERTY CXX_STANDARD 23)
+    target_link_libraries(KCD2MPRemoteAvatarTests PRIVATE KCD2MPProtocol)
+    target_include_directories(KCD2MPRemoteAvatarTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPRemoteAvatarTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPRemoteAvatarTests COMMAND KCD2MPRemoteAvatarTests)
+
+    add_executable(KCD2MPNpcTests
+        "${PROJECT_SOURCE_DIR}/tests/npc_tests.cpp"
+    )
+    set_property(TARGET KCD2MPNpcTests PROPERTY CXX_STANDARD 23)
+    target_include_directories(KCD2MPNpcTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPNpcTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPNpcTests COMMAND KCD2MPNpcTests)
+
+    add_executable(KCD2MPNpcCatalogTests
+        "${PROJECT_SOURCE_DIR}/tests/npc_catalog_tests.cpp"
+    )
+    set_property(TARGET KCD2MPNpcCatalogTests PROPERTY CXX_STANDARD 23)
+    target_link_libraries(KCD2MPNpcCatalogTests PRIVATE KCD2MPNpcCatalog)
+    target_compile_definitions(KCD2MPNpcCatalogTests PRIVATE
+        "KCD2MP_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\""
+    )
+    set_property(TARGET KCD2MPNpcCatalogTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPNpcCatalogTests COMMAND KCD2MPNpcCatalogTests)
+
+    add_executable(KCD2MPAvatarVisualTests
+        "${PROJECT_SOURCE_DIR}/tests/avatar_visual_tests.cpp"
+    )
+    set_property(TARGET KCD2MPAvatarVisualTests PROPERTY CXX_STANDARD 23)
+    target_link_libraries(KCD2MPAvatarVisualTests PRIVATE KCD2MPProtocol)
+    target_include_directories(KCD2MPAvatarVisualTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPAvatarVisualTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPAvatarVisualTests COMMAND KCD2MPAvatarVisualTests)
+
+    add_executable(KCD2MPEngineConsoleQueueTests
+        "${PROJECT_SOURCE_DIR}/tests/engine_console_queue_tests.cpp"
+    )
+    set_property(TARGET KCD2MPEngineConsoleQueueTests PROPERTY CXX_STANDARD 23)
+    target_include_directories(KCD2MPEngineConsoleQueueTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPEngineConsoleQueueTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPEngineConsoleQueueTests COMMAND KCD2MPEngineConsoleQueueTests)
+
     add_executable(KCD2MPNetworkingTests
         "${PROJECT_SOURCE_DIR}/tests/networking_tests.cpp"
     )
@@ -307,6 +386,23 @@ if (BUILD_TESTING)
     target_link_libraries(KCD2MPIdentityStoreTests PRIVATE crypt32)
     set_property(TARGET KCD2MPIdentityStoreTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPIdentityStoreTests COMMAND KCD2MPIdentityStoreTests)
+
+    add_custom_target(KCD2MPTests
+        DEPENDS
+            KCD2MPSignatureCoreTests
+            KCD2MPEnginePathTests
+            KCD2MPProtocolTests
+            KCD2MPServerCoreTests
+            KCD2MPGameCommandQueueTests
+            KCD2MPEntityControlTests
+            KCD2MPRemoteAvatarTests
+            KCD2MPNpcTests
+            KCD2MPNpcCatalogTests
+            KCD2MPAvatarVisualTests
+            KCD2MPEngineConsoleQueueTests
+            KCD2MPNetworkingTests
+            KCD2MPIdentityStoreTests
+    )
 endif()
 
 if (KCD2MP_WHGAME_PATH)

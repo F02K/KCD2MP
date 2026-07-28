@@ -1,4 +1,5 @@
 #include "multiplayer/client.hpp"
+#include "multiplayer/avatar_visual.hpp"
 #include "multiplayer/game_bridge.hpp"
 
 #include <algorithm>
@@ -34,6 +35,7 @@ namespace kcd2mp
 			    + std::pow(left.y() - right.y(), 2.0F)
 			    + std::pow(left.z() - right.z(), 2.0F));
 		}
+
 	}
 
 	multiplayer_client::multiplayer_client() :
@@ -63,12 +65,12 @@ namespace kcd2mp
 			return false;
 		}
 		const auto sandbox = game::sandbox_capability();
-		if (!sandbox.available || !game::is_frontend_without_player())
+		if (!sandbox.available || !game::can_start_join())
 		{
 			std::scoped_lock lock(m_state_mutex);
 			m_status.error = !sandbox.available
 			    ? sandbox.diagnostic
-			    : "Sandbox join is only available in the main menu without a player entity.";
+			    : "Join requires a fully loaded native save.";
 			return false;
 		}
 		{
@@ -83,8 +85,14 @@ namespace kcd2mp
 			m_chat.clear();
 			m_local_correction.reset();
 			m_profile.reset();
+			m_local_avatar.reset();
+			m_pending_avatar.reset();
+			m_desired_avatar.reset();
+			m_desired_archetype.reset();
 			m_pending_bootstrap.reset();
 			m_profile_update_pending = false;
+			m_avatar_update_pending = false;
+			m_last_avatar_sent = {};
 			m_profile_snapshot_interval_seconds = 15;
 			m_resume_token.clear();
 		}
@@ -109,6 +117,21 @@ namespace kcd2mp
 		queue_network(disconnect_command{});
 	}
 
+	void multiplayer_client::fail(std::string error)
+	{
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state == client_state::disconnected
+			    || m_status.state == client_state::closing)
+			{
+				return;
+			}
+			m_status.state = client_state::closing;
+			m_status.error = std::move(error);
+		}
+		queue_network(disconnect_command{});
+	}
+
 	bool multiplayer_client::send_chat(std::string text)
 	{
 		if (!is_valid_chat(text))
@@ -126,8 +149,25 @@ namespace kcd2mp
 		return true;
 	}
 
+	bool multiplayer_client::select_avatar(std::string archetype_id)
+	{
+		std::scoped_lock lock(m_state_mutex);
+		if (m_status.state != client_state::connected
+		    || !m_local_avatar
+		    || std::ranges::find(
+		           m_status.avatar_policy.allowed_archetype_ids(),
+		           archetype_id)
+		        == m_status.avatar_policy.allowed_archetype_ids().end())
+		{
+			return false;
+		}
+		m_desired_archetype = std::move(archetype_id);
+		return true;
+	}
+
 	void multiplayer_client::game_tick(
 	    std::optional<protocol::TransformState> local_transform,
+	    std::optional<protocol::AvatarDescriptor> local_avatar_visual,
 	    std::string_view current_level,
 	    std::chrono::steady_clock::time_point now)
 	{
@@ -139,6 +179,7 @@ namespace kcd2mp
 
 		bool connected = false;
 		bool profile_due = false;
+		std::optional<protocol::ClientAvatarUpdate> avatar_update;
 		std::string expected_level;
 		{
 			std::scoped_lock lock(m_state_mutex);
@@ -151,7 +192,35 @@ namespace kcd2mp
 			            >= std::chrono::seconds(
 			                m_profile_snapshot_interval_seconds));
 			m_status.game_queue_size = m_game_commands.size();
+			if (connected && m_local_avatar)
+			{
+				auto desired = merge_avatar_visual(
+				    *m_local_avatar,
+				    local_avatar_visual,
+				    m_desired_archetype);
+				m_desired_avatar = desired;
+				const bool rate_due =
+				    m_last_avatar_sent
+				            == std::chrono::steady_clock::time_point{}
+				    || now - m_last_avatar_sent
+				        >= std::chrono::milliseconds(250);
+				if (!m_avatar_update_pending && rate_due
+				    && !same_avatar_visual(desired, *m_local_avatar))
+				{
+					protocol::ClientAvatarUpdate update;
+					update.set_base_revision(m_local_avatar->revision());
+					*update.mutable_avatar() = desired;
+					update.mutable_avatar()->set_revision(
+					    update.base_revision());
+					m_pending_avatar = update.avatar();
+					m_avatar_update_pending = true;
+					m_last_avatar_sent = now;
+					avatar_update = std::move(update);
+				}
+			}
 		}
+		if (avatar_update)
+			queue_network(avatar_command{std::move(*avatar_update)});
 		if (connected && current_level != expected_level)
 		{
 			set_state(
@@ -488,6 +557,16 @@ namespace kcd2mp
 							        envelope,
 							        reliability::reliable);
 						    }
+						    else if constexpr (
+						        std::is_same_v<type, avatar_command>)
+						    {
+							    protocol::Envelope envelope;
+							    *envelope.mutable_client_avatar_update() =
+							        std::move(typed.message);
+							    (void)send_envelope(
+							        envelope,
+							        reliability::reliable);
+						    }
 					    },
 					    command);
 				}
@@ -600,6 +679,8 @@ namespace kcd2mp
 		std::unique_lock lock(m_state_mutex);
 		if (envelope.has_server_accepted())
 		{
+			m_status.avatar_policy =
+			    envelope.server_accepted().avatar_policy();
 			for (const auto &player : envelope.server_accepted().players())
 			{
 				accept_snapshot_player(player, now);
@@ -692,6 +773,58 @@ namespace kcd2mp
 			m_status.error = envelope.profile_rejected().reason();
 			queue_network(disconnect_command{});
 		}
+		else if (envelope.has_avatar_accepted())
+		{
+			if (!m_local_avatar || !m_pending_avatar
+			    || !m_avatar_update_pending
+			    || envelope.avatar_accepted().revision()
+			        != m_local_avatar->revision() + 1)
+			{
+				m_status.state = client_state::closing;
+				m_status.error =
+				    "server returned an invalid avatar revision";
+				queue_network(disconnect_command{});
+				return;
+			}
+			m_pending_avatar->set_revision(
+			    envelope.avatar_accepted().revision());
+			m_local_avatar = *m_pending_avatar;
+			m_status.avatar_archetype_id =
+			    m_local_avatar->archetype_id();
+			m_pending_avatar.reset();
+			m_desired_archetype.reset();
+			if (m_profile)
+			{
+				*m_profile->mutable_avatar() = *m_local_avatar;
+			}
+			m_avatar_update_pending = false;
+		}
+		else if (envelope.has_avatar_rejected())
+		{
+			m_local_avatar =
+			    envelope.avatar_rejected().authoritative_avatar();
+			m_status.avatar_archetype_id =
+			    m_local_avatar->archetype_id();
+			m_pending_avatar.reset();
+			m_desired_archetype.reset();
+			if (m_profile)
+			{
+				*m_profile->mutable_avatar() = *m_local_avatar;
+			}
+			m_avatar_update_pending = false;
+			m_status.error = envelope.avatar_rejected().reason();
+		}
+		else if (envelope.has_player_avatar_updated())
+		{
+			const auto &message = envelope.player_avatar_updated();
+			if (message.player_id() != m_status.local_player_id)
+			{
+				auto &remote = m_remote_players[message.player_id()];
+				remote.rendered.id = message.player_id();
+				remote.rendered.avatar = message.avatar();
+				remote.rendered.has_avatar = true;
+			}
+		}
 		else if (envelope.has_chat_broadcast())
 		{
 			const auto &message = envelope.chat_broadcast();
@@ -703,6 +836,23 @@ namespace kcd2mp
 			while (m_chat.size() > 200)
 			{
 				m_chat.pop_front();
+			}
+		}
+		else if (envelope.has_server_entity_control())
+		{
+			const bool disabled =
+			    envelope.server_entity_control()
+			        .non_player_entities_disabled();
+			lock.unlock();
+			const bool applied =
+			    game::set_non_player_entities_disabled(disabled);
+			lock.lock();
+			if (!applied)
+			{
+				m_status.state = client_state::closing;
+				m_status.error =
+				    "could not apply the server's entity-control state";
+				queue_network(disconnect_command{});
 			}
 		}
 		else if (envelope.has_server_shutdown())
@@ -765,6 +915,16 @@ namespace kcd2mp
 		{
 			*ready.mutable_initial_spawn() = *progress.initial_spawn;
 		}
+		if (!bootstrap->profile().has_avatar())
+		{
+			protocol::ClientWorldFailed failed;
+			failed.set_session_id(bootstrap->session_id());
+			failed.set_reason(
+			    "server profile has no avatar descriptor");
+			queue_network(world_failed_command{std::move(failed)});
+			return;
+		}
+		*ready.mutable_avatar() = bootstrap->profile().avatar();
 		{
 			std::scoped_lock lock(m_state_mutex);
 			if (!m_pending_bootstrap
@@ -776,7 +936,14 @@ namespace kcd2mp
 			m_pending_bootstrap.reset();
 			m_status.state = client_state::applying_profile;
 			m_profile = bootstrap->profile();
+			m_local_avatar = bootstrap->profile().avatar();
+			m_status.avatar_archetype_id =
+			    m_local_avatar->archetype_id();
+			m_pending_avatar.reset();
+			m_desired_avatar.reset();
+			m_desired_archetype.reset();
 			m_profile_update_pending = false;
+			m_avatar_update_pending = false;
 		}
 		queue_network(world_ready_command{std::move(ready)});
 	}
@@ -861,6 +1028,11 @@ namespace kcd2mp
 		player.rendered.id = snapshot.player_id();
 		player.rendered.display_name = snapshot.display_name();
 		player.rendered.connected = snapshot.connected();
+		if (snapshot.has_avatar())
+		{
+			player.rendered.avatar = snapshot.avatar();
+			player.rendered.has_avatar = true;
+		}
 		if (!snapshot.transform_valid() || !snapshot.has_transform())
 		{
 			return;

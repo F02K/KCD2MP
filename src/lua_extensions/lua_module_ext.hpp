@@ -1,6 +1,7 @@
 #pragma once
 
 #include "lua/lua_module.hpp"
+#include "multiplayer/game_bridge.hpp"
 
 namespace big
 {
@@ -39,6 +40,8 @@ namespace big
 
 		inline void cleanup() override
 		{
+			kcd2mp::game::npc_manager().clear_owner(
+			    reinterpret_cast<kcd2mp::npc::owner_id>(this));
 			lua_module::cleanup();
 
 			m_data_ext = {};

@@ -8,6 +8,20 @@ enum MovementMode {
   MOVEMENT_MODE_RUN = 2;
 }
 
+enum AvatarStance {
+  AVATAR_STANCE_RELAXED = 0;
+  AVATAR_STANCE_READY = 1;
+}
+
+enum AvatarWeaponClass {
+  AVATAR_WEAPON_CLASS_NONE = 0;
+  AVATAR_WEAPON_CLASS_ONE_HANDED = 1;
+  AVATAR_WEAPON_CLASS_TWO_HANDED = 2;
+  AVATAR_WEAPON_CLASS_POLEARM = 3;
+  AVATAR_WEAPON_CLASS_BOW = 4;
+  AVATAR_WEAPON_CLASS_CROSSBOW = 5;
+}
+
 enum RejectReason {
   REJECT_REASON_UNSPECIFIED = 0;
   REJECT_REASON_PROTOCOL_MISMATCH = 1;
@@ -52,6 +66,25 @@ message TransformState {
   uint64 client_time_ms = 5;
 }
 
+message AvatarEquipment {
+  string definition_id = 1;
+  string equipped_slot = 2;
+}
+
+message AvatarDescriptor {
+  string archetype_id = 1;
+  uint64 revision = 2;
+  repeated AvatarEquipment equipment = 3;
+  AvatarStance stance = 4;
+  AvatarWeaponClass weapon_class = 5;
+  bool weapon_drawn = 6;
+}
+
+message AvatarPolicy {
+  string default_archetype_id = 1;
+  repeated string allowed_archetype_ids = 2;
+}
+
 message PlayerSnapshot {
   uint64 player_id = 1;
   string display_name = 2;
@@ -59,6 +92,7 @@ message PlayerSnapshot {
   MovementMode movement_mode = 4;
   bool transform_valid = 5;
   bool connected = 6;
+  AvatarDescriptor avatar = 7;
 }
 
 message ClientHello {
@@ -110,6 +144,7 @@ message PlayerProfile {
   repeated RpgValue stats = 8;
   repeated RpgValue skills = 9;
   repeated InventoryItem inventory = 10;
+  AvatarDescriptor avatar = 11;
 }
 
 message ServerBootstrap {
@@ -132,6 +167,7 @@ message ClientWorldReady {
   string level_id = 3;
   TransformState initial_spawn = 4;
   bool initialized_session = 5;
+  AvatarDescriptor avatar = 6;
 }
 
 message ClientWorldFailed {
@@ -168,6 +204,7 @@ message ServerAccepted {
   string level_id = 7;
   repeated PlayerSnapshot players = 8;
   uint32 profile_snapshot_interval_seconds = 9;
+  AvatarPolicy avatar_policy = 10;
 }
 
 message ServerRejected {
@@ -225,6 +262,29 @@ message ServerShutdown {
   string reason = 1;
 }
 
+message ServerEntityControl {
+  bool non_player_entities_disabled = 1;
+}
+
+message ClientAvatarUpdate {
+  uint64 base_revision = 1;
+  AvatarDescriptor avatar = 2;
+}
+
+message AvatarAccepted {
+  uint64 revision = 1;
+}
+
+message AvatarRejected {
+  AvatarDescriptor authoritative_avatar = 1;
+  string reason = 2;
+}
+
+message PlayerAvatarUpdated {
+  uint64 player_id = 1;
+  AvatarDescriptor avatar = 2;
+}
+
 message Envelope {
   oneof payload {
     ClientHello client_hello = 1;
@@ -248,5 +308,10 @@ message Envelope {
     ClientProfileUpdate client_profile_update = 19;
     ProfileAccepted profile_accepted = 20;
     ProfileRejected profile_rejected = 21;
+    ServerEntityControl server_entity_control = 22;
+    ClientAvatarUpdate client_avatar_update = 23;
+    AvatarAccepted avatar_accepted = 24;
+    AvatarRejected avatar_rejected = 25;
+    PlayerAvatarUpdated player_avatar_updated = 26;
   }
 }

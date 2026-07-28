@@ -42,6 +42,7 @@ namespace kcd2mp::server
 		bool has_transform{};
 		std::uint64_t last_sequence{};
 		protocol::MovementMode movement_mode{protocol::MOVEMENT_MODE_IDLE};
+		bool dummy{};
 	};
 
 	class server_core
@@ -65,7 +66,13 @@ namespace kcd2mp::server
 		    time_point now);
 		void tick(time_point now);
 		void kick(player_id id, std::string reason, time_point now);
+		[[nodiscard]] std::optional<player_id> spawn_dummy(
+		    std::string display_name,
+		    std::string *error = nullptr);
+		[[nodiscard]] bool remove_dummy(player_id id, time_point now);
 		void server_say(std::string text, time_point now);
+		[[nodiscard]] bool set_non_player_entities_disabled(bool disabled);
+		[[nodiscard]] bool non_player_entities_disabled() const;
 		void shutdown(std::string reason);
 		[[nodiscard]] std::optional<std::string> create_profile_claim(
 		    player_id id,
@@ -106,6 +113,7 @@ namespace kcd2mp::server
 			std::string resume_token;
 			token_hash identity_hash{};
 			std::optional<connection_id> connection;
+			bool dummy{};
 			bool has_transform{};
 			protocol::TransformState transform;
 			protocol::MovementMode movement_mode{protocol::MOVEMENT_MODE_IDLE};
@@ -114,6 +122,8 @@ namespace kcd2mp::server
 			time_point last_transform_at;
 			time_point reconnect_deadline;
 			std::deque<time_point> chat_times;
+			std::deque<time_point> avatar_update_times;
+			protocol::AvatarDescriptor avatar;
 			protocol::PlayerProfile profile;
 			time_point last_persisted_at;
 		};
@@ -148,6 +158,10 @@ namespace kcd2mp::server
 		    player_session &player,
 		    const protocol::ClientTransform &message,
 		    time_point now);
+		void handle_avatar_update(
+		    player_session &player,
+		    const protocol::ClientAvatarUpdate &message,
+		    time_point now);
 		void handle_chat(
 		    player_session &player,
 		    const protocol::ChatSend &message,
@@ -166,6 +180,11 @@ namespace kcd2mp::server
 		    close_kind close,
 		    time_point now);
 		void send_accepted(player_session &player);
+		void send_entity_control(connection_id connection);
+		void apply_default_avatar(protocol::PlayerProfile &profile);
+		[[nodiscard]] bool avatar_allowed(
+		    const protocol::AvatarDescriptor &avatar) const;
+		[[nodiscard]] protocol::AvatarPolicy avatar_policy() const;
 		void send_challenge(connection_id connection);
 		void send_bootstrap(connection_id connection, protocol::BootstrapMode mode);
 		void release_initializer(connection_id connection);
@@ -186,7 +205,8 @@ namespace kcd2mp::server
 		[[nodiscard]] static std::string lower_ascii(std::string_view value);
 		[[nodiscard]] static std::uint64_t milliseconds(time_point value);
 		[[nodiscard]] static protocol::PlayerSnapshot snapshot_of(
-		    const player_session &player);
+		    const player_session &player,
+		    bool include_avatar);
 
 		server_config m_config;
 		token_generator m_generate_token;
@@ -197,6 +217,8 @@ namespace kcd2mp::server
 		std::unordered_map<player_id, player_session> m_players;
 		std::unordered_map<player_id, profile_claim> m_claims;
 		std::optional<connection_id> m_initializer;
+		std::uint64_t m_next_dummy_index{1};
+		bool m_non_player_entities_disabled{};
 		std::vector<outbound_message> m_outbound;
 	};
 }

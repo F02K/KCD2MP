@@ -1,10 +1,16 @@
 #include "server/server_config.hpp"
 
+#include "multiplayer/protocol.hpp"
+
 #include <toml++/toml.hpp>
 
 #include <cmath>
+#include <fstream>
+#include <iterator>
 #include <limits>
+#include <regex>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace kcd2mp::server
 {
@@ -29,6 +35,34 @@ namespace kcd2mp::server
 				    + std::string(key));
 			}
 			return static_cast<Target>(*raw);
+		}
+
+		void load_catalog_ids(
+		    const std::filesystem::path &path,
+		    std::unordered_set<std::string> &output)
+		{
+			std::ifstream input(path, std::ios::binary);
+			if (!input)
+				return;
+			const std::string text{
+			    std::istreambuf_iterator<char>(input),
+			    std::istreambuf_iterator<char>()};
+			if (!text.contains(
+			        "\"retail_build\": \"1308617_856\"")
+			    || !text.contains(
+			        "\"catalog_fingerprint\": \"22f4d6dc5438ecab\""))
+			{
+				return;
+			}
+			const std::regex soul_id(
+			    R"catalog("soul_id"\s*:\s*"([0-9a-fA-F-]{36})")catalog");
+			for (auto iterator =
+			         std::sregex_iterator(text.begin(), text.end(), soul_id);
+			     iterator != std::sregex_iterator();
+			     ++iterator)
+			{
+				output.insert((*iterator)[1].str());
+			}
 		}
 	}
 
@@ -73,6 +107,31 @@ namespace kcd2mp::server
 		    *server,
 		    "profile_snapshot_interval_seconds",
 		    config.profile_snapshot_interval_seconds);
+		config.disable_non_player_entities =
+		    (*server)["disable_non_player_entities"].value_or(
+		        config.disable_non_player_entities);
+		config.default_avatar_archetype =
+		    (*server)["default_avatar_archetype"].value_or(
+		        config.default_avatar_archetype);
+		if (const auto *allowed =
+		        (*server)["allowed_avatar_archetypes"].as_array())
+		{
+			config.allowed_avatar_archetypes.clear();
+			for (const auto &entry : *allowed)
+			{
+				const auto value = entry.value<std::string>();
+				if (!value)
+				{
+					throw std::runtime_error(
+					    "allowed_avatar_archetypes must contain only strings");
+				}
+				config.allowed_avatar_archetypes.push_back(*value);
+			}
+		}
+		load_catalog_ids(
+		    std::filesystem::absolute(path).parent_path()
+		        / "npc_archetypes.json",
+		    config.known_avatar_archetypes);
 		config.max_player_speed_mps =
 		    (*server)["max_player_speed_mps"].value_or(config.max_player_speed_mps);
 		config.movement_tolerance_m =
@@ -108,8 +167,36 @@ namespace kcd2mp::server
 			    static_cast<float>(*qz),
 			    static_cast<float>(*qw)};
 		}
+		normalize_avatar_config(config);
 		validate_server_config(config);
 		return config;
+	}
+
+	void normalize_avatar_config(server_config &config)
+	{
+		config.known_avatar_archetypes.insert(
+		    std::string(npc::default_soul_id));
+		if (!config.known_avatar_archetypes.contains(
+		        config.default_avatar_archetype))
+		{
+			config.default_avatar_archetype =
+			    std::string(npc::default_soul_id);
+		}
+
+		std::vector<std::string> normalized;
+		normalized.reserve(config.allowed_avatar_archetypes.size() + 1);
+		std::unordered_set<std::string> seen;
+		for (const auto &archetype : config.allowed_avatar_archetypes)
+		{
+			const auto value = config.known_avatar_archetypes.contains(archetype)
+			    ? archetype
+			    : config.default_avatar_archetype;
+			if (seen.insert(value).second)
+				normalized.push_back(value);
+		}
+		if (seen.insert(config.default_avatar_archetype).second)
+			normalized.push_back(config.default_avatar_archetype);
+		config.allowed_avatar_archetypes = std::move(normalized);
 	}
 
 	void validate_server_config(const server_config &config)
@@ -163,6 +250,19 @@ namespace kcd2mp::server
 		if (config.world_directory.empty())
 		{
 			throw std::runtime_error("world_directory must not be empty");
+		}
+		protocol::AvatarPolicy avatar_policy;
+		avatar_policy.set_default_archetype_id(
+		    config.default_avatar_archetype);
+		for (const auto &archetype : config.allowed_avatar_archetypes)
+		{
+			avatar_policy.add_allowed_archetype_ids(archetype);
+		}
+		if (!is_valid_avatar_policy(avatar_policy))
+		{
+			throw std::runtime_error(
+			    "avatar archetype policy is empty, duplicated, invalid, "
+			    "or does not include default_avatar_archetype");
 		}
 		if (config.initial_spawn)
 		{

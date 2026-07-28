@@ -1,5 +1,7 @@
 #pragma once
 
+#include "engine_console_queue.hpp"
+
 #include <config/config.hpp>
 #include <ImGuizmo.h>
 #include <input/hotkey.hpp>
@@ -69,6 +71,10 @@ namespace big
 	[[nodiscard]] bool engine_console_execute(
 	    std::string_view command,
 	    bool defer_execution = true);
+	[[nodiscard]] engine_console_submit_status queue_engine_console_command(
+	    std::string command);
+	[[nodiscard]] bool retail_new_game_start_available();
+	[[nodiscard]] bool retail_new_game_start();
 
 	inline std::vector<vanilla_mod_system_info> g_vanilla_mods;
 
@@ -793,7 +799,7 @@ namespace big
 		virtual void Pad49()                    = 0;
 		virtual void Pad50()                    = 0;
 		virtual void Pad51()                    = 0;
-		virtual void Activate()                 = 0;
+		virtual void Activate(bool active)      = 0;
 		virtual bool IsActive()                 = 0; // offset 424
 		virtual void Pad54()                    = 0;
 		virtual void Pad55()                    = 0;
@@ -804,7 +810,7 @@ namespace big
 		virtual void Pad60()                    = 0;
 		virtual void Pad61()                    = 0;
 		virtual void Pad62()                    = 0;
-		virtual void Hide()                     = 0;
+		virtual void Hide(bool hide)            = 0;
 		virtual bool IsHidden()                 = 0; // offset 512 - Pad64
 		virtual void Invisible()                = 0;
 		virtual void IsInvisible()              = 0;
@@ -934,14 +940,16 @@ namespace big
 		virtual void Pad9()                                 = 0;
 		virtual void Pad10()                                = 0;
 		virtual void Pad11()                                = 0;
-		virtual void Pad12()                                = 0;
+		// The parameter block remains opaque until the KCD2-specific
+		// SEntitySpawnParams layout has been audited.
+		virtual CEntity *SpawnEntity(void *params, bool auto_init) = 0;
 		virtual void Pad13()                                = 0;
 		virtual void Pad14()                                = 0;
 		virtual void Pad15()                                = 0;
 		virtual void Pad16()                                = 0;
 		virtual void Pad17()                                = 0;
 		virtual void Pad18()                                = 0;
-		virtual void Pad19()                                = 0;
+		virtual void RemoveEntity(uint32_t entity_id, bool force_remove_now) = 0;
 		virtual void Pad20()                                = 0;
 		virtual __int64 GetEntityIterator()                 = 0;
 		virtual void Pad22()                                = 0;

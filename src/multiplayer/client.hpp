@@ -56,6 +56,8 @@ namespace kcd2mp
 		bool has_transform{};
 		protocol::TransformState transform;
 		protocol::MovementMode movement_mode{protocol::MOVEMENT_MODE_IDLE};
+		protocol::AvatarDescriptor avatar;
+		bool has_avatar{};
 	};
 
 	struct client_status
@@ -70,6 +72,8 @@ namespace kcd2mp
 		int ping_ms{-1};
 		float packet_loss_percent{};
 		std::size_t game_queue_size{};
+		protocol::AvatarPolicy avatar_policy;
+		std::string avatar_archetype_id;
 	};
 
 	class multiplayer_client
@@ -82,9 +86,12 @@ namespace kcd2mp
 
 		[[nodiscard]] bool connect(client_options options);
 		void disconnect();
+		void fail(std::string error);
 		[[nodiscard]] bool send_chat(std::string text);
+		[[nodiscard]] bool select_avatar(std::string archetype_id);
 		void game_tick(
 		    std::optional<protocol::TransformState> local_transform,
+		    std::optional<protocol::AvatarDescriptor> local_avatar_visual,
 		    std::string_view current_level,
 		    std::chrono::steady_clock::time_point now =
 		        std::chrono::steady_clock::now());
@@ -122,6 +129,10 @@ namespace kcd2mp
 		{
 			protocol::ClientProfileUpdate message;
 		};
+		struct avatar_command
+		{
+			protocol::ClientAvatarUpdate message;
+		};
 		using network_command = std::variant<
 		    connect_command,
 		    disconnect_command,
@@ -129,7 +140,8 @@ namespace kcd2mp
 		    chat_command,
 		    world_ready_command,
 		    world_failed_command,
-		    profile_command>;
+		    profile_command,
+		    avatar_command>;
 
 		struct timed_transform
 		{
@@ -175,6 +187,11 @@ namespace kcd2mp
 		std::deque<chat_entry> m_chat;
 		std::optional<protocol::TransformState> m_local_correction;
 		std::optional<protocol::PlayerProfile> m_profile;
+		std::optional<protocol::AvatarDescriptor> m_local_avatar;
+		std::optional<protocol::AvatarDescriptor> m_pending_avatar;
+		std::optional<protocol::AvatarDescriptor> m_desired_avatar;
+		std::optional<std::string> m_desired_archetype;
+		bool m_avatar_update_pending{};
 		std::optional<protocol::ServerBootstrap> m_pending_bootstrap;
 		bool m_profile_update_pending{};
 		std::uint32_t m_profile_snapshot_interval_seconds{15};
@@ -185,6 +202,7 @@ namespace kcd2mp
 		std::jthread m_network_thread;
 		std::chrono::steady_clock::time_point m_last_transform_sent{};
 		std::chrono::steady_clock::time_point m_last_profile_sent{};
+		std::chrono::steady_clock::time_point m_last_avatar_sent{};
 	};
 
 	inline multiplayer_client *g_multiplayer_client{};

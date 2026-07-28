@@ -8,6 +8,7 @@
 #include "lua_extensions/lua_module_ext.hpp"
 #include "multiplayer/client.hpp"
 #include "multiplayer/game_bridge.hpp"
+#include "npc/catalog.hpp"
 
 #include <gui/widgets/imgui_extensions.hpp>
 #include <gui/widgets/imgui_hotkey.hpp>
@@ -25,6 +26,192 @@ namespace big
 	namespace
 	{
 		bool g_show_multiplayer = true;
+		bool g_show_developer_console = false;
+
+		struct developer_console_entry
+		{
+			std::string command;
+			engine_console_submit_status status{
+			    engine_console_submit_status::queued};
+		};
+
+		struct developer_console_state
+		{
+			std::string input;
+			std::vector<std::string> command_history;
+			std::deque<developer_console_entry> entries;
+			int history_position{-1};
+			bool scroll_to_bottom{};
+		};
+
+		const char *console_status_text(engine_console_submit_status status)
+		{
+			switch (status)
+			{
+			case engine_console_submit_status::queued:
+				return "queued";
+			case engine_console_submit_status::unavailable:
+				return "rejected: retail console unavailable";
+			case engine_console_submit_status::empty:
+				return "rejected: command is empty";
+			case engine_console_submit_status::too_long:
+				return "rejected: command exceeds 1024 characters";
+			case engine_console_submit_status::full:
+				return "rejected: command queue is full";
+			}
+			return "rejected";
+		}
+
+		int DeveloperConsoleHistoryCallback(
+		    ImGuiInputTextCallbackData *data)
+		{
+			auto &state =
+			    *static_cast<developer_console_state *>(data->UserData);
+			if (data->EventFlag != ImGuiInputTextFlags_CallbackHistory
+			    || state.command_history.empty())
+			{
+				return 0;
+			}
+
+			if (data->EventKey == ImGuiKey_UpArrow)
+			{
+				if (state.history_position < 0)
+				{
+					state.history_position =
+					    static_cast<int>(state.command_history.size()) - 1;
+				}
+				else if (state.history_position > 0)
+				{
+					--state.history_position;
+				}
+			}
+			else if (data->EventKey == ImGuiKey_DownArrow
+			         && state.history_position >= 0)
+			{
+				++state.history_position;
+				if (state.history_position
+				    >= static_cast<int>(state.command_history.size()))
+				{
+					state.history_position = -1;
+				}
+			}
+
+			const auto command = state.history_position >= 0
+			    ? state.command_history[static_cast<std::size_t>(
+			          state.history_position)]
+			    : std::string{};
+			data->DeleteChars(0, data->BufTextLen);
+			data->InsertChars(0, command.c_str());
+			return 0;
+		}
+
+		void RenderDeveloperConsole()
+		{
+			if (!g_show_developer_console)
+			{
+				return;
+			}
+
+			static developer_console_state state;
+			ImGui::SetNextWindowSize({700.0F, 360.0F}, ImGuiCond_FirstUseEver);
+			if (!ImGui::Begin(
+			        "KCD2MP Developer Console",
+			        &g_show_developer_console))
+			{
+				ImGui::End();
+				return;
+			}
+
+			ImGui::TextColored(
+			    ImVec4(1.0F, 0.72F, 0.2F, 1.0F),
+			    "Local developer access: commands may alter or unload the active game.");
+			ImGui::TextWrapped(
+			    "Commands are queued locally and executed on the game thread. "
+			    "They are never sent by or exposed to the multiplayer server.");
+
+			const bool console_available = engine_console_available();
+			ImGui::Text(
+			    "Retail console: %s",
+			    console_available ? "available" : "unavailable");
+			ImGui::SameLine();
+			if (ImGui::Button("Clear"))
+			{
+				state.entries.clear();
+				state.command_history.clear();
+				state.history_position = -1;
+			}
+
+			if (ImGui::BeginChild(
+			        "DeveloperConsoleHistory",
+			        {0.0F, -ImGui::GetFrameHeightWithSpacing() * 2.0F},
+			        true))
+			{
+				for (const auto &entry : state.entries)
+				{
+					ImGui::TextUnformatted(("> " + entry.command).c_str());
+					const auto color =
+					    entry.status == engine_console_submit_status::queued
+					    ? ImVec4(0.45F, 0.85F, 0.45F, 1.0F)
+					    : ImVec4(1.0F, 0.35F, 0.25F, 1.0F);
+					ImGui::TextColored(
+					    color,
+					    "  %s",
+					    console_status_text(entry.status));
+				}
+				if (state.scroll_to_bottom)
+				{
+					ImGui::SetScrollHereY(1.0F);
+					state.scroll_to_bottom = false;
+				}
+			}
+			ImGui::EndChild();
+
+			ImGui::BeginDisabled(!console_available);
+			ImGui::SetNextItemWidth(-90.0F);
+			const auto input_flags =
+			    ImGuiInputTextFlags_EnterReturnsTrue
+			    | ImGuiInputTextFlags_CallbackHistory;
+			const bool submitted_with_enter = ImGui::InputText(
+			    "##DeveloperConsoleInput",
+			    &state.input,
+			    input_flags,
+			    DeveloperConsoleHistoryCallback,
+			    &state);
+			ImGui::SameLine();
+			const bool submitted_with_button = ImGui::Button("Execute");
+			ImGui::EndDisabled();
+
+			if (submitted_with_enter || submitted_with_button)
+			{
+				const auto command = state.input;
+				const auto status =
+				    queue_engine_console_command(command);
+				state.entries.push_back({
+				    command.empty() ? "<empty>" : command,
+				    status});
+				while (state.entries.size() > 100)
+				{
+					state.entries.pop_front();
+				}
+				if (status == engine_console_submit_status::queued)
+				{
+					state.command_history.push_back(command);
+					while (state.command_history.size() > 100)
+					{
+						state.command_history.erase(
+						    state.command_history.begin());
+					}
+					state.input.clear();
+				}
+				state.history_position = -1;
+				state.scroll_to_bottom = true;
+			}
+
+			ImGui::TextDisabled(
+			    "%zu / 1024 characters | Up/Down: command history",
+			    state.input.size());
+			ImGui::End();
+		}
 
 		void RenderMultiplayer()
 		{
@@ -48,6 +235,7 @@ namespace big
 			static std::string password;
 			static std::string claim_code;
 			static std::string chat_text;
+			static std::string npc_catalog_filter;
 
 			ImGui::SetNextWindowSize({520.0F, 560.0F}, ImGuiCond_FirstUseEver);
 			if (!ImGui::Begin("KCD2MP Multiplayer", &g_show_multiplayer))
@@ -64,13 +252,27 @@ namespace big
 				ImGui::TextDisabled("(%s)", status.server_name.c_str());
 			}
 			const auto sandbox = kcd2mp::game::sandbox_capability();
-			const auto frontend = kcd2mp::game::is_frontend_without_player();
+			const auto joinable = kcd2mp::game::can_start_join();
 			ImGui::Text(
 			    "Sandbox gate: %s",
 			    sandbox.available ? "ready" : "blocked");
 			if (!sandbox.available)
 			{
 				ImGui::TextWrapped("%s", sandbox.diagnostic.c_str());
+			}
+			if (big::g_player_entity)
+			{
+				const auto loaded_level = kcd2mp::game::current_level_id();
+				ImGui::Text(
+				    "Join source: loaded native save (level %s)",
+				    loaded_level.empty() ? "unknown" : loaded_level.c_str());
+				ImGui::TextWrapped(
+				    "The save must be on the server's level. Save and autosave are locked once the server bootstrap is accepted.");
+			}
+			else
+			{
+				ImGui::TextUnformatted(
+				    "Join source: load a native save before connecting");
 			}
 			if (status.ping_ms >= 0)
 			{
@@ -107,7 +309,7 @@ namespace big
 			ImGui::EndDisabled();
 
 			ImGui::BeginDisabled(
-			    !disconnected || !sandbox.available || !frontend);
+			    !disconnected || !sandbox.available || !joinable);
 			if (ImGui::Button("Connect"))
 			{
 				kcd2mp::client_options options;
@@ -138,6 +340,120 @@ namespace big
 			    "You: %llu | Remote players: %zu",
 			    static_cast<unsigned long long>(status.local_player_id),
 			    players.size());
+			if (status.state == kcd2mp::client_state::connected
+			    && status.avatar_policy.allowed_archetype_ids_size() != 0)
+			{
+				const char* selected_id = status.avatar_archetype_id.empty()
+				    ? status.avatar_policy.default_archetype_id().c_str()
+				    : status.avatar_archetype_id.c_str();
+				const auto *selected_entry =
+				    kcd2mp::npc::runtime_catalog().find(selected_id);
+				const auto selected_label = selected_entry
+				    ? std::format(
+				          "{} ({})",
+				          selected_entry->soul_name,
+				          selected_entry->character_id)
+				    : std::string(selected_id);
+				if (ImGui::BeginCombo(
+				        "Player NPC model",
+				        selected_label.c_str()))
+				{
+					for (const auto& archetype :
+					     status.avatar_policy.allowed_archetype_ids())
+					{
+						const bool active =
+						    archetype == status.avatar_archetype_id;
+						const auto *entry =
+						    kcd2mp::npc::runtime_catalog().find(archetype);
+						const auto label = entry
+						    ? std::format(
+						          "{} ({})##{}",
+						          entry->soul_name,
+						          entry->character_id,
+						          archetype)
+						    : archetype;
+						if (ImGui::Selectable(label.c_str(), active))
+						{
+							(void)kcd2mp::g_multiplayer_client
+							    ->select_avatar(archetype);
+						}
+						if (ImGui::IsItemHovered())
+						{
+							ImGui::SetTooltip("%s", archetype.c_str());
+						}
+						if (active)
+						{
+							ImGui::SetItemDefaultFocus();
+						}
+					}
+					ImGui::EndCombo();
+				}
+				ImGui::TextDisabled("Soul UUID: %s", selected_id);
+				ImGui::SameLine();
+				if (ImGui::SmallButton("Copy##SelectedSoul"))
+					ImGui::SetClipboardText(selected_id);
+			}
+			if (ImGui::CollapsingHeader("NPC catalog"))
+			{
+				const auto &catalog = kcd2mp::npc::runtime_catalog();
+				ImGui::InputTextWithHint(
+				    "##NpcCatalogFilter",
+				    "Search name, Character-ID or Soul UUID",
+				    &npc_catalog_filter);
+				ImGui::TextDisabled(
+				    "%zu human Souls from local Tables.pak",
+				    catalog.size());
+				if (ImGui::BeginChild(
+				        "NpcCatalogResults",
+				        {0.0F, 180.0F},
+				        true))
+				{
+					std::string filter = npc_catalog_filter;
+					std::ranges::transform(
+					    filter,
+					    filter.begin(),
+					    [](unsigned char value)
+					    {
+						    return static_cast<char>(std::tolower(value));
+					    });
+					std::size_t shown{};
+					for (const auto &entry : catalog.entries())
+					{
+						auto searchable = std::format(
+						    "{} {} {}",
+						    entry.soul_name,
+						    entry.character_id,
+						    entry.soul_id);
+						std::ranges::transform(
+						    searchable,
+						    searchable.begin(),
+						    [](unsigned char value)
+						    {
+							    return static_cast<char>(std::tolower(value));
+						    });
+						if (!filter.empty()
+						    && !searchable.contains(filter))
+							continue;
+						ImGui::PushID(entry.soul_id.c_str());
+						ImGui::TextUnformatted(entry.soul_name.c_str());
+						ImGui::TextDisabled(
+						    "%s | %s",
+						    entry.character_id.c_str(),
+						    entry.soul_id.c_str());
+						ImGui::SameLine();
+						if (ImGui::SmallButton("Copy"))
+							ImGui::SetClipboardText(entry.soul_id.c_str());
+						ImGui::PopID();
+						if (++shown >= 200)
+						{
+							ImGui::TextDisabled(
+							    "Showing first 200 matches; refine the search.");
+							break;
+						}
+					}
+				}
+				ImGui::EndChild();
+			}
 			if (ImGui::BeginTable(
 			        "MultiplayerPlayers",
 			        4,
@@ -1158,6 +1474,34 @@ namespace big
 
 		g_lua_manager->always_draw_independent_gui();
 
+		// The multiplayer window is used to start the connection, so the mod GUI
+		// is normally still consuming input when the server accepts the player.
+		// Close the GUI once on that transition to return mouse and keyboard
+		// control to the game, unless the local developer console is deliberately
+		// open. Closing that console while connected completes the deferred GUI
+		// close. Keep g_show_multiplayer unchanged so reopening the GUI with its
+		// hotkey shows the active session again.
+		static auto previous_multiplayer_state =
+		    kcd2mp::client_state::disconnected;
+		static bool developer_console_was_open{};
+		const auto multiplayer_state = kcd2mp::g_multiplayer_client
+		    ? kcd2mp::g_multiplayer_client->status().state
+		    : kcd2mp::client_state::disconnected;
+		const bool developer_console_just_closed =
+		    developer_console_was_open && !g_show_developer_console;
+		if (m_is_open
+		    && multiplayer_state == kcd2mp::client_state::connected
+		    && ((previous_multiplayer_state
+		             != kcd2mp::client_state::connected
+		         && !g_show_developer_console)
+		        || developer_console_just_closed))
+		{
+			toggle(false);
+			LOG(INFO) << "Multiplayer accepted; closed the mod GUI and restored game input.";
+		}
+		previous_multiplayer_state = multiplayer_state;
+		developer_console_was_open = g_show_developer_console;
+
 		if (!m_onboarded->ref<bool>())
 		{
 			static bool onboarding_open = false;
@@ -1411,6 +1755,10 @@ namespace big
 					}
 
 					ImGui::Checkbox("Let Game Input Go Through GUI Layer", &let_game_input_go_through_gui_layer);
+					ImGui::MenuItem(
+					    "Developer Console",
+					    nullptr,
+					    &g_show_developer_console);
 
 					ImGui::EndMenu();
 				}
@@ -1626,6 +1974,7 @@ namespace big
 			ImGui::SetMouseCursor(g_gui->m_mouse_cursor);
 
 			g_lua_manager->draw_independent_gui();
+			RenderDeveloperConsole();
 			RenderMultiplayer();
 
 			/*if (ImGui::Button("Crash it"))

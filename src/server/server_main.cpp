@@ -26,7 +26,9 @@ namespace
 	{
 		std::cout
 		    << "Commands: status, players, kick <player_id> [reason], "
-		       "say <text>, profile claim <player_id>, stop, help\n";
+		       "say <text>, profile claim <player_id>, "
+		       "dummy spawn [name], dummy remove <player_id>, "
+		       "entities <disable|enable|status>, stop, help\n";
 	}
 
 	int close_reason(kcd2mp::server::close_kind kind)
@@ -150,7 +152,12 @@ int main(int argc, char **argv)
 					std::cout << "players=" << core.players().size()
 					          << '/' << config.max_players
 					          << " pending=" << core.pending_connection_count()
-					          << " tick=" << core.server_tick() << '\n';
+					          << " tick=" << core.server_tick()
+					          << " non_player_entities="
+					          << (core.non_player_entities_disabled()
+					                  ? "disabled"
+					                  : "enabled")
+					          << '\n';
 				}
 				else if (command == "players")
 				{
@@ -158,7 +165,11 @@ int main(int argc, char **argv)
 					{
 						std::cout << player.id << "  " << player.display_name
 						          << "  "
-						          << (player.connected ? "connected" : "reconnecting")
+						          << (player.dummy
+						                  ? "dummy"
+						                  : (player.connected
+						                         ? "connected"
+						                         : "reconnecting"))
 						          << '\n';
 					}
 				}
@@ -179,6 +190,47 @@ int main(int argc, char **argv)
 					std::getline(input >> std::ws, text);
 					core.server_say(std::move(text), now());
 				}
+				else if (command == "dummy")
+				{
+					std::string action;
+					input >> action;
+					if (action == "spawn")
+					{
+						std::string name;
+						std::getline(input >> std::ws, name);
+						std::string error;
+						if (const auto id =
+						        core.spawn_dummy(std::move(name), &error))
+						{
+							std::cout << "spawned dummy player " << *id
+							          << '\n';
+						}
+						else
+						{
+							std::cout << "could not spawn dummy: " << error
+							          << '\n';
+						}
+					}
+					else if (action == "remove")
+					{
+						kcd2mp::player_id id{};
+						input >> id;
+						if (id == 0 || !core.remove_dummy(id, now()))
+						{
+							std::cout << "unknown dummy player\n";
+						}
+						else
+						{
+							std::cout << "removed dummy player " << id
+							          << '\n';
+						}
+					}
+					else
+					{
+						std::cout
+						    << "usage: dummy <spawn [name]|remove <player_id>>\n";
+					}
+				}
 				else if (command == "profile")
 				{
 					std::string action;
@@ -197,6 +249,33 @@ int main(int argc, char **argv)
 					else
 					{
 						std::cout << "unknown player profile\n";
+					}
+				}
+				else if (command == "entities")
+				{
+					std::string action;
+					input >> action;
+					if (action == "disable" || action == "enable")
+					{
+						const bool disabled = action == "disable";
+						const bool changed =
+						    core.set_non_player_entities_disabled(disabled);
+						std::cout << "non-player entities "
+						          << (disabled ? "disabled" : "enabled")
+						          << (changed ? "" : " (unchanged)") << '\n';
+					}
+					else if (action == "status")
+					{
+						std::cout << "non-player entities are "
+						          << (core.non_player_entities_disabled()
+						                  ? "disabled"
+						                  : "enabled")
+						          << '\n';
+					}
+					else
+					{
+						std::cout
+						    << "usage: entities <disable|enable|status>\n";
 					}
 				}
 				else if (command == "stop")

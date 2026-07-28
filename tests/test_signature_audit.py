@@ -9,15 +9,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SignatureArchitectureTests(unittest.TestCase):
-    def test_registry_is_the_single_source_for_65_signatures(self) -> None:
+    def test_registry_is_the_single_source_for_67_signatures(self) -> None:
         core = (
             PROJECT_ROOT / "src" / "signatures" / "signature_core.cpp"
         ).read_text(encoding="utf-8")
         init = (PROJECT_ROOT / "src" / "kcd2_init.cpp").read_text(encoding="utf-8")
         entries = re.findall(r'signature_spec\{"([^"]+)",\s*"([^"]+)"', core)
 
-        self.assertEqual(len(entries), 65)
-        self.assertEqual(len({name for name, _ in entries}), 65)
+        self.assertEqual(len(entries), 67)
+        self.assertEqual(len({name for name, _ in entries}), 67)
         self.assertIn("static_assert(signature_registry.size()", core)
         self.assertNotIn("kcd2_address::scan(", init)
         self.assertNotIn(".get_call()", init)
@@ -26,6 +26,23 @@ class SignatureArchitectureTests(unittest.TestCase):
             'validate_named_vtable("CXConsole vtable", "CXConsole vtable[35]"',
             core,
         )
+        self.assertIn(
+            'validate_named_vtable("CEntity vtable", "CEntity::Activate", 52',
+            core,
+        )
+        self.assertIn(
+            'validate_named_vtable("CEntity vtable", "CEntity::SetFlags", 5',
+            core,
+        )
+        self.assertIn(
+            'validate_named_vtable("CEntity vtable", "CEntity::Hide", 63',
+            core,
+        )
+        self.assertIn('"CEntitySystem vtable"', core)
+        self.assertIn('"CEntitySystem::SpawnEntity"', core)
+        self.assertIn('"CEntitySystem::RemoveEntity"', core)
+        self.assertIn('"CEntitySystem::GetEntityIterator"', core)
+        self.assertIn('"CEntitySystem::GetEntityLayerData"', core)
         self.assertIn('"gEnv pConsole pointer"', core)
         self.assertIn('resolved("gEnv pConsole pointer")', init)
         self.assertIn("attach_existing_engine_console()", init)

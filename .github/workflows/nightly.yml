@@ -42,7 +42,7 @@ jobs:
       - name: Build and test
         shell: pwsh
         run: |
-          cmake --build build-${{ matrix.config }} --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPSignatureCoreTests KCD2MPEnginePathTests KCD2MPProtocolTests KCD2MPServerCoreTests KCD2MPGameCommandQueueTests KCD2MPNetworkingTests KCD2MPIdentityStoreTests
+          cmake --build build-${{ matrix.config }} --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPTests
           ctest --test-dir build-${{ matrix.config }} -C ${{ matrix.config }} -R "^KCD2MP" --output-on-failure
 
   build_nightly:
@@ -94,7 +94,7 @@ jobs:
 
       - name: Build 64bit release DLL
         run: |
-          cmake --build ./build --config RelWithDebInfo --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPSignatureCoreTests KCD2MPEnginePathTests KCD2MPProtocolTests KCD2MPServerCoreTests KCD2MPGameCommandQueueTests KCD2MPNetworkingTests KCD2MPIdentityStoreTests --
+          cmake --build ./build --config RelWithDebInfo --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPTests --
           ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MP" --output-on-failure
           #cmake --build ./build --config Debug --target KCD2MP --
           mv ./build/d3d12_.dll ./build/d3d12.dll

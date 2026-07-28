@@ -43,6 +43,7 @@ namespace kcd2mp::server
 
 		server_config validated_config(server_config config)
 		{
+			normalize_avatar_config(config);
 			validate_server_config(config);
 			return config;
 		}
@@ -54,7 +55,9 @@ namespace kcd2mp::server
 	    m_config(validated_config(std::move(config))),
 	    m_generate_token(generate_token ? std::move(generate_token) : []
 	        { return random_hex(32); }),
-	    m_store(m_config)
+	    m_store(m_config),
+	    m_non_player_entities_disabled(
+	        m_config.disable_non_player_entities)
 	{
 	}
 
@@ -124,6 +127,12 @@ namespace kcd2mp::server
 				handle_profile_update(
 				    *player,
 				    envelope.client_profile_update(),
+				    now);
+				break;
+			case protocol::Envelope::kClientAvatarUpdate:
+				handle_avatar_update(
+				    *player,
+				    envelope.client_avatar_update(),
 				    now);
 				break;
 			case protocol::Envelope::kPing:
@@ -239,6 +248,10 @@ namespace kcd2mp::server
 		std::vector<player_id> expired_players;
 		for (auto &[id, player] : m_players)
 		{
+			if (player.dummy)
+			{
+				continue;
+			}
 			if (player.has_transform
 			    && (player.last_persisted_at == time_point{}
 			        || now - player.last_persisted_at >= std::chrono::seconds(5)))
@@ -283,6 +296,150 @@ namespace kcd2mp::server
 		remove_player(id, std::move(reason), close_kind::kick, now);
 	}
 
+	std::optional<player_id> server_core::spawn_dummy(
+	    std::string display_name,
+	    std::string *error)
+	{
+		if (error)
+		{
+			error->clear();
+		}
+		const auto set_error = [&](std::string message)
+		{
+			if (error)
+			{
+				*error = std::move(message);
+			}
+		};
+		const auto reserved_slots =
+		    m_players.size()
+		    + static_cast<std::size_t>(std::ranges::count_if(
+		        m_pending,
+		        [](const auto &entry)
+		        {
+			        return entry.second.persisted.has_value();
+		        }));
+		if (reserved_slots >= m_config.max_players)
+		{
+			set_error("server is full");
+			return std::nullopt;
+		}
+
+		const auto name_in_use = [&](std::string_view candidate)
+		{
+			return std::ranges::any_of(
+			           m_players,
+			           [&](const auto &entry)
+			           {
+				           return lower_ascii(entry.second.display_name)
+				               == lower_ascii(candidate);
+			           })
+			    || std::ranges::any_of(
+			        m_pending,
+			        [&](const auto &entry)
+			        {
+				        return lower_ascii(entry.second.display_name)
+				            == lower_ascii(candidate);
+			        });
+		};
+		if (display_name.empty())
+		{
+			do
+			{
+				display_name =
+				    "Dummy " + std::to_string(m_next_dummy_index++);
+			} while (name_in_use(display_name));
+		}
+		if (!is_valid_display_name(display_name))
+		{
+			set_error(
+			    "display name must contain 3 to 32 UTF-8 characters");
+			return std::nullopt;
+		}
+		if (name_in_use(display_name))
+		{
+			set_error("display name is already in use");
+			return std::nullopt;
+		}
+
+		const player_session *anchor = nullptr;
+		for (const auto &[id, player] : m_players)
+		{
+			if (player.dummy || !player.connection
+			    || !player.has_transform)
+			{
+				continue;
+			}
+			if (!anchor || id < anchor->id)
+			{
+				anchor = &player;
+			}
+		}
+		protocol::TransformState transform;
+		if (anchor)
+		{
+			transform = anchor->transform;
+		}
+		else if (m_store.manifest().spawn_valid)
+		{
+			transform = m_store.manifest().spawn;
+		}
+		else
+		{
+			set_error(
+			    "no player transform or configured world spawn is available");
+			return std::nullopt;
+		}
+		const auto dummy_count = std::ranges::count_if(
+		    m_players,
+		    [](const auto &entry)
+		    {
+			    return entry.second.dummy;
+		    });
+		transform.mutable_position()->set_x(
+		    transform.position().x()
+		    + 2.0F * static_cast<float>(dummy_count + 1));
+		transform.mutable_velocity()->Clear();
+		transform.set_sequence(1);
+		transform.set_client_time_ms(0);
+
+		player_session dummy;
+		dummy.id = m_store.allocate_player_id();
+		dummy.display_name = std::move(display_name);
+		dummy.dummy = true;
+		dummy.has_transform = true;
+		dummy.transform = std::move(transform);
+		dummy.last_sequence = 1;
+		dummy.movement_mode = protocol::MOVEMENT_MODE_IDLE;
+		dummy.avatar.set_archetype_id(
+		    m_config.default_avatar_archetype);
+		dummy.avatar.set_revision(1);
+		dummy.avatar.set_stance(protocol::AVATAR_STANCE_RELAXED);
+		dummy.avatar.set_weapon_class(
+		    protocol::AVATAR_WEAPON_CLASS_NONE);
+
+		const auto id = dummy.id;
+		auto [iterator, inserted] =
+		    m_players.emplace(id, std::move(dummy));
+		(void)inserted;
+		protocol::Envelope joined;
+		*joined.mutable_player_joined()->mutable_player() =
+		    snapshot_of(iterator->second, true);
+		broadcast(std::move(joined), reliability::reliable);
+		return id;
+	}
+
+	bool server_core::remove_dummy(player_id id, time_point now)
+	{
+		const auto iterator = m_players.find(id);
+		if (iterator == m_players.end() || !iterator->second.dummy)
+		{
+			return false;
+		}
+		remove_player(id, "dummy removed", close_kind::none, now);
+		return true;
+	}
+
 	void server_core::server_say(std::string text, time_point now)
 	{
 		if (!is_valid_chat(text))
@@ -298,13 +455,35 @@ namespace kcd2mp::server
 		broadcast(std::move(envelope), reliability::reliable);
 	}
 
+	bool server_core::set_non_player_entities_disabled(bool disabled)
+	{
+		if (m_non_player_entities_disabled == disabled)
+		{
+			return false;
+		}
+		m_non_player_entities_disabled = disabled;
+		protocol::Envelope envelope;
+		envelope.mutable_server_entity_control()
+		    ->set_non_player_entities_disabled(disabled);
+		broadcast(std::move(envelope), reliability::reliable);
+		return true;
+	}
+
+	bool server_core::non_player_entities_disabled() const
+	{
+		return m_non_player_entities_disabled;
+	}
+
 	void server_core::shutdown(std::string reason)
 	{
 		const auto now = clock::now();
 		for (auto &[id, player] : m_players)
 		{
 			(void)id;
-			persist_player(player, now);
+			if (!player.dummy)
+			{
+				persist_player(player, now);
+			}
 			if (!player.connection)
 			{
 				continue;
@@ -351,10 +530,11 @@ namespace kcd2mp::server
 			result.push_back({
 			    id,
 			    player.display_name,
-			    player.connection.has_value(),
+			    player.dummy || player.connection.has_value(),
 			    player.has_transform,
 			    player.last_sequence,
-			    player.movement_mode});
+			    player.movement_mode,
+			    player.dummy});
 		}
 		std::ranges::sort(result, {}, &player_view::id);
 		return result;
@@ -517,6 +697,7 @@ namespace kcd2mp::server
 			created.set_revision(1);
 			created.set_display_name(pending.display_name);
 			created.set_level_id(m_store.manifest().level_id);
+			apply_default_avatar(created);
 			if (m_store.manifest().spawn_valid)
 			{
 				created.set_transform_valid(true);
@@ -535,6 +716,18 @@ namespace kcd2mp::server
 			    protocol::REJECT_REASON_IDENTITY_REQUIRED,
 			    "identity credentials are required");
 			return;
+		}
+		if (!profile->profile.has_avatar()
+		    || !is_valid_avatar_descriptor(profile->profile.avatar()))
+		{
+			apply_default_avatar(profile->profile);
+			m_store.save_profile(profile->identity_hash, profile->profile);
+		}
+		else if (!avatar_allowed(profile->profile.avatar()))
+		{
+			profile->profile.mutable_avatar()->set_archetype_id(
+			    m_config.default_avatar_archetype);
+			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
 		if (!profile_name_matches(profile->profile, pending.display_name))
 		{
@@ -618,6 +811,15 @@ namespace kcd2mp::server
 			    "client loaded a stale or different sandbox session");
 			return;
 		}
+		if (!message.has_avatar()
+		    || !is_valid_avatar_descriptor(message.avatar()))
+		{
+			reject(
+			    connection,
+			    protocol::REJECT_REASON_CONTENT_MISMATCH,
+			    "client supplied an invalid or disallowed avatar");
+			return;
+		}
 		if (pending.initializer)
 		{
 			if (!message.initialized_session() || !message.has_initial_spawn())
@@ -657,6 +859,15 @@ namespace kcd2mp::server
 		session.identity_hash = persisted.identity_hash;
 		session.connection = connection;
 		session.profile = std::move(persisted.profile);
+		session.avatar = message.avatar();
+		if (!avatar_allowed(session.avatar))
+			session.avatar.set_archetype_id(
+			    m_config.default_avatar_archetype);
+		session.avatar.set_revision(
+		    std::max<std::uint64_t>(
+		        1,
+		        session.profile.avatar().revision()));
+		*session.profile.mutable_avatar() = session.avatar;
 		session.last_message_at = now;
 		session.last_transform_at = now;
 		session.last_persisted_at = now;
@@ -674,7 +885,7 @@ namespace kcd2mp::server
 		send_accepted(iterator->second);
 		protocol::Envelope joined;
 		*joined.mutable_player_joined()->mutable_player() =
-		    snapshot_of(iterator->second);
+		    snapshot_of(iterator->second, true);
 		broadcast(std::move(joined), reliability::reliable, connection);
 		wake_bootstrap_waiters();
 	}
@@ -716,6 +927,12 @@ namespace kcd2mp::server
 		accepted.set_display_name(player.display_name);
 		accepted.set_level_id(m_store.manifest().level_id);
 		accepted.set_revision(player.profile.revision() + 1);
+		if (accepted.has_avatar()
+		    && !avatar_allowed(accepted.avatar()))
+		{
+			accepted.mutable_avatar()->set_archetype_id(
+			    m_config.default_avatar_archetype);
+		}
 		accepted.set_transform_valid(player.has_transform);
 		if (player.has_transform)
 		{
@@ -790,6 +1007,82 @@ namespace kcd2mp::server
 		player.last_transform_at = now;
 		player.has_transform = true;
 		player.movement_mode = movement_mode_for(player.transform);
+	}
+
+	void server_core::handle_avatar_update(
+	    player_session &player,
+	    const protocol::ClientAvatarUpdate &message,
+	    time_point now)
+	{
+		const auto cutoff = now - std::chrono::seconds(1);
+		while (!player.avatar_update_times.empty()
+		    && player.avatar_update_times.front() < cutoff)
+		{
+			player.avatar_update_times.pop_front();
+		}
+		if (player.avatar_update_times.size() >= 4)
+		{
+			return;
+		}
+		player.avatar_update_times.push_back(now);
+
+		if (!message.has_avatar()
+		    || !is_valid_avatar_descriptor(message.avatar()))
+		{
+			reject(
+			    *player.connection,
+			    protocol::REJECT_REASON_CONTENT_MISMATCH,
+			    "avatar descriptor is invalid or disallowed");
+			return;
+		}
+		if (message.base_revision() != player.avatar.revision())
+		{
+			protocol::Envelope rejected;
+			auto *response = rejected.mutable_avatar_rejected();
+			*response->mutable_authoritative_avatar() = player.avatar;
+			response->set_reason("avatar revision conflict");
+			queue(
+			    *player.connection,
+			    std::move(rejected),
+			    reliability::reliable);
+			return;
+		}
+
+		player.avatar = message.avatar();
+		const bool normalized_archetype = !avatar_allowed(player.avatar);
+		if (normalized_archetype)
+			player.avatar.set_archetype_id(
+			    m_config.default_avatar_archetype);
+		player.avatar.set_revision(player.avatar.revision() + 1);
+		*player.profile.mutable_avatar() = player.avatar;
+		persist_player(player, now);
+
+		protocol::Envelope accepted;
+		if (normalized_archetype)
+		{
+			auto *fallback = accepted.mutable_avatar_rejected();
+			*fallback->mutable_authoritative_avatar() = player.avatar;
+			fallback->set_reason(
+			    "unknown avatar Soul ID was replaced with the server default");
+		}
+		else
+		{
+			accepted.mutable_avatar_accepted()->set_revision(
+			    player.avatar.revision());
+		}
+		queue(
+		    *player.connection,
+		    std::move(accepted),
+		    reliability::reliable);
+
+		protocol::Envelope updated;
+		auto *broadcast_update = updated.mutable_player_avatar_updated();
+		broadcast_update->set_player_id(player.id);
+		*broadcast_update->mutable_avatar() = player.avatar;
+		broadcast(
+		    std::move(updated),
+		    reliability::reliable,
+		    player.connection);
 	}
 
 	void server_core::handle_chat(
@@ -893,12 +1186,58 @@ namespace kcd2mp::server
 		accepted->set_level_id(m_store.manifest().level_id);
 		accepted->set_profile_snapshot_interval_seconds(
 		    m_config.profile_snapshot_interval_seconds);
+		*accepted->mutable_avatar_policy() = avatar_policy();
 		for (const auto &[id, session] : m_players)
 		{
 			(void)id;
-			*accepted->add_players() = snapshot_of(session);
+			*accepted->add_players() = snapshot_of(session, true);
 		}
 		queue(*player.connection, std::move(envelope), reliability::reliable);
+		send_entity_control(*player.connection);
+	}
+
+	void server_core::send_entity_control(connection_id connection)
+	{
+		protocol::Envelope envelope;
+		envelope.mutable_server_entity_control()
+		    ->set_non_player_entities_disabled(
+		        m_non_player_entities_disabled);
+		queue(connection, std::move(envelope), reliability::reliable);
+	}
+
+	void server_core::apply_default_avatar(
+	    protocol::PlayerProfile &profile)
+	{
+		auto *avatar = profile.mutable_avatar();
+		avatar->Clear();
+		avatar->set_archetype_id(m_config.default_avatar_archetype);
+		avatar->set_revision(1);
+		avatar->set_stance(protocol::AVATAR_STANCE_RELAXED);
+		avatar->set_weapon_class(protocol::AVATAR_WEAPON_CLASS_NONE);
+		avatar->set_weapon_drawn(false);
+	}
+
+	bool server_core::avatar_allowed(
+	    const protocol::AvatarDescriptor &avatar) const
+	{
+		return is_valid_avatar_descriptor(avatar)
+		    && std::ranges::find(
+		           m_config.allowed_avatar_archetypes,
+		           avatar.archetype_id())
+		        != m_config.allowed_avatar_archetypes.end();
+	}
+
+	protocol::AvatarPolicy server_core::avatar_policy() const
+	{
+		protocol::AvatarPolicy result;
+		result.set_default_archetype_id(
+		    m_config.default_avatar_archetype);
+		for (const auto &archetype :
+		     m_config.allowed_avatar_archetypes)
+		{
+			result.add_allowed_archetype_ids(archetype);
+		}
+		return result;
 	}
 
 	void server_core::send_challenge(connection_id connection)
@@ -983,6 +1322,10 @@ namespace kcd2mp::server
 
 	void server_core::persist_player(player_session &player, time_point now)
 	{
+		if (player.dummy)
+		{
+			return;
+		}
 		player.profile.set_player_id(player.id);
 		player.profile.set_display_name(player.display_name);
 		player.profile.set_level_id(m_store.manifest().level_id);
@@ -991,6 +1334,7 @@ namespace kcd2mp::server
 		{
 			*player.profile.mutable_last_transform() = player.transform;
 		}
+		*player.profile.mutable_avatar() = player.avatar;
 		m_store.save_profile(player.identity_hash, player.profile);
 		player.last_persisted_at = now;
 	}
@@ -1034,7 +1378,7 @@ namespace kcd2mp::server
 		for (const auto &[id, player] : m_players)
 		{
 			(void)id;
-			*snapshot->add_players() = snapshot_of(player);
+			*snapshot->add_players() = snapshot_of(player, false);
 		}
 		broadcast(std::move(envelope), reliability::unreliable);
 	}
@@ -1081,17 +1425,23 @@ namespace kcd2mp::server
 	}
 
 	protocol::PlayerSnapshot server_core::snapshot_of(
-	    const player_session &player)
+	    const player_session &player,
+	    bool include_avatar)
 	{
 		protocol::PlayerSnapshot snapshot;
 		snapshot.set_player_id(player.id);
 		snapshot.set_display_name(player.display_name);
 		snapshot.set_transform_valid(player.has_transform);
-		snapshot.set_connected(player.connection.has_value());
+		snapshot.set_connected(
+		    player.dummy || player.connection.has_value());
 		snapshot.set_movement_mode(player.movement_mode);
 		if (player.has_transform)
 		{
 			*snapshot.mutable_transform() = player.transform;
+		}
+		if (include_avatar)
+		{
+			*snapshot.mutable_avatar() = player.avatar;
 		}
 		return snapshot;
 	}

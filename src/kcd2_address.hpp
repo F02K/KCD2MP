@@ -19,7 +19,7 @@
  *
  * Required WHGame addresses are preflighted through signature_core before
  * kcd2_init creates any hook objects. scan()/get_call() remain only for the
- * two optional Lua-extension patterns that are outside the 65-entry registry.
+ * two optional Lua-extension patterns that are outside the 67-entry registry.
  */
 struct kcd2_address
 {

@@ -22,13 +22,19 @@ namespace kcd2mp
 			return std::isfinite(value);
 		}
 
-		bool valid_player_snapshot(const protocol::PlayerSnapshot &player)
+		bool valid_player_snapshot(
+		    const protocol::PlayerSnapshot &player,
+		    bool require_avatar)
 		{
 			return is_valid_display_name(player.display_name())
+			    && player.player_id() != 0
 			    && protocol::MovementMode_IsValid(
 			        static_cast<int>(player.movement_mode()))
 			    && (!player.transform_valid()
-			        || is_finite_transform(player.transform()));
+			        || is_finite_transform(player.transform()))
+			    && (!require_avatar || player.has_avatar())
+			    && (!player.has_avatar()
+			        || is_valid_avatar_descriptor(player.avatar()));
 		}
 
 		bool valid_identifier(std::string_view value, std::size_t maximum = 128)
@@ -83,6 +89,8 @@ namespace kcd2mp
 				return valid_identifier(message.session_id())
 				    && valid_identifier(message.level_id())
 				    && message.manifest_revision() > 0
+				    && message.has_avatar()
+				    && is_valid_avatar_descriptor(message.avatar())
 				    && (!message.initialized_session()
 				        || (message.has_initial_spawn()
 				            && is_finite_transform(message.initial_spawn())));
@@ -111,18 +119,46 @@ namespace kcd2mp
 				    && valid_utf8_with_codepoint_count(
 				        envelope.profile_rejected().reason(), 1, 512);
 			}
+			if (envelope.has_client_avatar_update())
+			{
+				const auto &message = envelope.client_avatar_update();
+				return message.base_revision() > 0 && message.has_avatar()
+				    && is_valid_avatar_descriptor(message.avatar())
+				    && message.avatar().revision() == message.base_revision();
+			}
+			if (envelope.has_avatar_accepted())
+			{
+				return envelope.avatar_accepted().revision() > 0;
+			}
+			if (envelope.has_avatar_rejected())
+			{
+				const auto &message = envelope.avatar_rejected();
+				return message.has_authoritative_avatar()
+				    && is_valid_avatar_descriptor(
+				        message.authoritative_avatar())
+				    && valid_utf8_with_codepoint_count(
+				        message.reason(), 1, 512);
+			}
+			if (envelope.has_player_avatar_updated())
+			{
+				const auto &message = envelope.player_avatar_updated();
+				return message.player_id() != 0 && message.has_avatar()
+				    && is_valid_avatar_descriptor(message.avatar());
+			}
 			if (envelope.has_server_accepted())
 			{
 				const auto &message = envelope.server_accepted();
 				if (message.players_size() > static_cast<int>(max_players)
 				    || message.profile_snapshot_interval_seconds() < 5
-				    || message.profile_snapshot_interval_seconds() > 60)
+				    || message.profile_snapshot_interval_seconds() > 60
+				    || !message.has_avatar_policy()
+				    || !is_valid_avatar_policy(message.avatar_policy()))
 				{
 					return false;
 				}
 				for (const auto &player : message.players())
 				{
-					if (!valid_player_snapshot(player))
+					if (!valid_player_snapshot(player, true))
 					{
 						return false;
 					}
@@ -136,7 +172,8 @@ namespace kcd2mp
 			else if (envelope.has_player_joined())
 			{
 				return valid_player_snapshot(
-				    envelope.player_joined().player());
+				    envelope.player_joined().player(),
+				    true);
 			}
 			else if (envelope.has_client_transform())
 			{
@@ -153,7 +190,8 @@ namespace kcd2mp
 				}
 				for (const auto &player : message.players())
 				{
-					if (!valid_player_snapshot(player))
+					if (!valid_player_snapshot(player, false)
+					    || player.has_avatar())
 					{
 						return false;
 					}
@@ -326,6 +364,58 @@ namespace kcd2mp
 		return valid_utf8_with_codepoint_count(value, 1, max_chat_codepoints);
 	}
 
+	bool is_valid_avatar_descriptor(
+	    const protocol::AvatarDescriptor &avatar)
+	{
+		if (!valid_identifier(avatar.archetype_id())
+		    || avatar.revision() == 0
+		    || avatar.equipment_size()
+		        > static_cast<int>(max_avatar_equipment_items)
+		    || !protocol::AvatarStance_IsValid(
+		        static_cast<int>(avatar.stance()))
+		    || !protocol::AvatarWeaponClass_IsValid(
+		        static_cast<int>(avatar.weapon_class()))
+		    || (avatar.weapon_drawn()
+		        && avatar.weapon_class()
+		            == protocol::AVATAR_WEAPON_CLASS_NONE))
+		{
+			return false;
+		}
+		std::unordered_set<std::string> slots;
+		return std::ranges::all_of(
+		    avatar.equipment(),
+		    [&](const protocol::AvatarEquipment &item)
+		    {
+			    return valid_identifier(item.definition_id())
+			        && valid_identifier(item.equipped_slot(), 64)
+			        && slots.insert(item.equipped_slot()).second;
+		    });
+	}
+
+	bool is_valid_avatar_policy(const protocol::AvatarPolicy &policy)
+	{
+		if (!valid_identifier(policy.default_archetype_id())
+		    || policy.allowed_archetype_ids_size() == 0
+		    || policy.allowed_archetype_ids_size()
+		        > static_cast<int>(max_avatar_archetypes))
+		{
+			return false;
+		}
+		bool contains_default = false;
+		std::unordered_set<std::string> archetypes;
+		for (const auto &archetype : policy.allowed_archetype_ids())
+		{
+			if (!valid_identifier(archetype)
+			    || !archetypes.insert(archetype).second)
+			{
+				return false;
+			}
+			contains_default =
+			    contains_default || archetype == policy.default_archetype_id();
+		}
+		return contains_default;
+	}
+
 	bool is_valid_profile(const protocol::PlayerProfile &profile)
 	{
 		if (profile.player_id() == 0 || profile.revision() == 0
@@ -338,7 +428,9 @@ namespace kcd2mp
 		        > static_cast<int>(max_profile_inventory_items)
 		    || (profile.transform_valid()
 		        && (!profile.has_last_transform()
-		            || !is_finite_transform(profile.last_transform()))))
+		            || !is_finite_transform(profile.last_transform())))
+		    || (profile.has_avatar()
+		        && !is_valid_avatar_descriptor(profile.avatar())))
 		{
 			return false;
 		}
