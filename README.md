@@ -4,8 +4,9 @@ KCD2MP is a work-in-progress multiplayer framework for Kingdom Come: Deliverance
 
 The project is forked from [KCD2ModLoader](https://github.com/xiaoxiao921/KCD2ModLoader) and uses
 [ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase) as its modding foundation.
-The repository also vendors the project fork
-[F02K/libKCD2](https://github.com/F02K/libKCD2), including its KCSE runtime.
+The repository includes the project fork
+[F02K/libKCD2](https://github.com/F02K/libKCD2) as a pinned Git submodule,
+including its nested KCSE runtime.
 KCD2MP keeps the two loaders separate: `d3d12.dll` hosts KCD2MP and
 `dinput8.dll` hosts KCSE plugins.
 
@@ -22,6 +23,10 @@ Requirements:
 - Python 3.9 or newer
 - CMake
 - Visual Studio with the MSVC x64 C++ workload
+
+After cloning, initialize the pinned vendor repositories with
+`powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1`. See
+[libKCD2 vendor integration](docs/libkcd2-vendor.md) for the update workflow.
 
 Run `build.bat` from the repository root. On first launch it creates an isolated `.venv-build`
 environment, installs the pinned Textual dependency, and opens the build TUI.

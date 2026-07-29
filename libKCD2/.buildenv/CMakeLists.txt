@@ -1,10 +1,11 @@
 cmake_minimum_required(VERSION 3.15)
+set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE STRING "")
+set(VCPKG_TARGET_TRIPLET "x64-windows-static-md" CACHE STRING "")
 
 project(KCD2_RE LANGUAGES CXX)
 
-option(LIBKCD2_BUILD_BUNDLED_PROJECTS
-    "Build every plugin stored under libKCD2/Projects"
-    ON)
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Paths shared with subprojects
 set(RE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/..")
@@ -23,8 +24,6 @@ file(GLOB_RECURSE RE_SOURCES "${RE_ROOT}/src/*.cpp")
 # the vendored CryCommon headers reference; CRT/Win32-backed (no address library).
 add_library(kcd_re STATIC check_sizes.cpp CrySDKStubs.cpp ${RE_SOURCES} ${RE_HEADERS})
 
-set_property(TARGET kcd_re PROPERTY CXX_STANDARD 17)
-set_property(TARGET kcd_re PROPERTY CXX_STANDARD_REQUIRED ON)
 target_precompile_headers(kcd_re PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/PCH.h")
 
 target_compile_definitions(kcd_re PRIVATE
@@ -32,22 +31,20 @@ target_compile_definitions(kcd_re PRIVATE
 
 target_compile_options(kcd_re PRIVATE /utf-8 /W4 /wd4819 /wd4100)
 
-target_include_directories(kcd_re PUBLIC
+target_include_directories(kcd_re PRIVATE
     ${RE_ROOT}/include ${RE_ROOT}/include/CryEngine/CryCommon)
 
 target_link_libraries(kcd_re PUBLIC Boost::container)
 
 # ---- Auto-discover subprojects under Projects/*/.buildenv ----
-if(LIBKCD2_BUILD_BUNDLED_PROJECTS)
-    file(GLOB PLUGIN_DIRS "${RE_ROOT}/Projects/*")
-    foreach(PLUGIN_DIR ${PLUGIN_DIRS})
-        if(EXISTS "${PLUGIN_DIR}/.buildenv/CMakeLists.txt")
-            get_filename_component(PLUGIN_NAME ${PLUGIN_DIR} NAME)
-            message(STATUS "Subproject: ${PLUGIN_NAME}")
-            add_subdirectory("${PLUGIN_DIR}/.buildenv" "${CMAKE_BINARY_DIR}/${PLUGIN_NAME}")
-        endif()
-    endforeach()
-endif()
+file(GLOB PLUGIN_DIRS "${RE_ROOT}/Projects/*")
+foreach(PLUGIN_DIR ${PLUGIN_DIRS})
+    if(EXISTS "${PLUGIN_DIR}/.buildenv/CMakeLists.txt")
+        get_filename_component(PLUGIN_NAME ${PLUGIN_DIR} NAME)
+        message(STATUS "Subproject: ${PLUGIN_NAME}")
+        add_subdirectory("${PLUGIN_DIR}/.buildenv" "${CMAKE_BINARY_DIR}/${PLUGIN_NAME}")
+    endif()
+endforeach()
 
 # ---- Class layout dump ----
 if(DEFINED CLASS_LAYOUT)

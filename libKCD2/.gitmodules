@@ -1,0 +1,3 @@
+[submodule "Projects/KCSE"]
+	path = Projects/KCSE
+	url = git@github.com:JerryYOJ/KCSE-for-kcd2.git

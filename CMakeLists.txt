@@ -25,6 +25,21 @@ if(KCD2MP_BUILD_KCSE)
     find_package(spdlog CONFIG REQUIRED)
     find_package(boost_container CONFIG REQUIRED)
 
+    set(KCD2MP_LIBKCD2_ROOT "${PROJECT_SOURCE_DIR}/libKCD2")
+    set(KCD2MP_KCSE_ROOT "${KCD2MP_LIBKCD2_ROOT}/Projects/KCSE")
+    if(NOT EXISTS "${KCD2MP_LIBKCD2_ROOT}/.buildenv/PCH.h")
+        message(FATAL_ERROR
+            "libKCD2 is not initialized. Run "
+            "`powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1` "
+            "from the repository root.")
+    endif()
+    if(NOT EXISTS "${KCD2MP_KCSE_ROOT}/src/dllmain.cpp")
+        message(FATAL_ERROR
+            "libKCD2's nested KCSE submodule is not initialized. Run "
+            "`powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1` "
+            "from the repository root.")
+    endif()
+
     get_target_property(
         KCD2MP_SPDLOG_INCLUDE_DIRECTORIES
         spdlog::spdlog_header_only
@@ -39,18 +54,63 @@ if(KCD2MP_BUILD_KCSE)
         "SPDLOG_FMT_EXTERNAL"
         "SPDLOG_HEADER_ONLY"
     )
-    set(LIBKCD2_SPDLOG_TARGET KCD2MPSpdlogHeaderOnly)
 
-    set(LIBKCD2_BUILD_BUNDLED_PROJECTS OFF CACHE BOOL "" FORCE)
-    add_subdirectory(
-        "${PROJECT_SOURCE_DIR}/libKCD2/.buildenv"
-        "${CMAKE_CURRENT_BINARY_DIR}/libKCD2"
+    file(GLOB_RECURSE KCD2MP_LIBKCD2_HEADERS CONFIGURE_DEPENDS
+        "${KCD2MP_LIBKCD2_ROOT}/include/*.h"
     )
-    add_subdirectory(
-        "${PROJECT_SOURCE_DIR}/libKCD2/Projects/KCSE/.buildenv"
-        "${CMAKE_CURRENT_BINARY_DIR}/KCSE"
+    file(GLOB_RECURSE KCD2MP_LIBKCD2_SOURCES CONFIGURE_DEPENDS
+        "${KCD2MP_LIBKCD2_ROOT}/src/*.cpp"
+    )
+    add_library(kcd_re STATIC
+        "${KCD2MP_LIBKCD2_ROOT}/.buildenv/check_sizes.cpp"
+        "${KCD2MP_LIBKCD2_ROOT}/.buildenv/CrySDKStubs.cpp"
+        ${KCD2MP_LIBKCD2_SOURCES}
+        ${KCD2MP_LIBKCD2_HEADERS}
+    )
+    set_property(TARGET kcd_re PROPERTY CXX_STANDARD 17)
+    set_property(TARGET kcd_re PROPERTY CXX_STANDARD_REQUIRED ON)
+    target_precompile_headers(kcd_re PRIVATE
+        "${KCD2MP_LIBKCD2_ROOT}/.buildenv/PCH.h"
+    )
+    target_compile_definitions(kcd_re PRIVATE
+        "_ITERATOR_DEBUG_LEVEL=0"
+        "NOMINMAX"
+        "WIN32_LEAN_AND_MEAN"
+    )
+    target_compile_options(kcd_re PRIVATE /utf-8 /W4 /wd4100 /wd4819)
+    target_include_directories(kcd_re PUBLIC
+        "${KCD2MP_LIBKCD2_ROOT}/include"
+        "${KCD2MP_LIBKCD2_ROOT}/include/CryEngine/CryCommon"
+    )
+    target_link_libraries(kcd_re PUBLIC Boost::container)
+
+    file(GLOB_RECURSE KCD2MP_KCSE_SOURCES CONFIGURE_DEPENDS
+        "${KCD2MP_KCSE_ROOT}/src/*.cpp"
+    )
+    add_library(KCSE SHARED ${KCD2MP_KCSE_SOURCES})
+    set_property(TARGET KCSE PROPERTY CXX_STANDARD 17)
+    set_property(TARGET KCSE PROPERTY CXX_STANDARD_REQUIRED ON)
+    target_precompile_headers(KCSE PRIVATE
+        "${KCD2MP_LIBKCD2_ROOT}/.buildenv/PCH.h"
+    )
+    target_compile_definitions(KCSE PRIVATE
+        "_ITERATOR_DEBUG_LEVEL=0"
+        "NOMINMAX"
+        "WIN32_LEAN_AND_MEAN"
+    )
+    target_compile_options(KCSE PRIVATE /utf-8 /W4 /wd4100 /wd4819)
+    target_include_directories(KCSE PRIVATE
+        "${KCD2MP_LIBKCD2_ROOT}/include"
+        "${KCD2MP_LIBKCD2_ROOT}/include/CryEngine/CryCommon"
+        "${KCD2MP_KCSE_ROOT}/src"
+    )
+    target_link_libraries(KCSE PRIVATE
+        kcd_re
+        KCD2MPSpdlogHeaderOnly
+        version.lib
     )
     set_target_properties(KCSE PROPERTIES
+        OUTPUT_NAME "dinput8"
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
         PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
     )
