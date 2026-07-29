@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="us-ascii"?>
+<database xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="barbora" xsi:noNamespaceSchemaLocation="../database.xsd">
+	<perks version="1">
+		<perk autolearnable="false" icon_id="perk_lab_dweller" level="12" perk_id="7c31a9d4-52e8-4b06-9f41-2a8e05c1d377" perk_name="Autobrew - Routine" perk_ui_desc="perk_autobrew_routine_desc" perk_ui_lore_desc="perk_autobrew_routine_lore_desc" perk_ui_name="perk_autobrew_routine_name" skill_selector="6" visibility="2" />
+	</perks>
+</database>

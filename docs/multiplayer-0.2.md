@@ -115,8 +115,8 @@ or transform is unavailable. The supported public world IDs are `2` (`trosecko`)
 development.
 
 The remaining native gaps are automatic creation/loading of an isolated multiplayer save copy,
-RPG/inventory capture and application, stronger quest/dialog scheduler isolation, and fixed
-remote-human avatar creation, animation, and removal.
+full RPG/profile capture and application, stronger quest/dialog scheduler isolation, and the
+complete two-client retail acceptance matrix.
 
 ## Server entity isolation and remote avatars
 
@@ -124,20 +124,45 @@ remote-human avatar creation, animation, and removal.
 `ServerEntityControl` state. `disable_non_player_entities` selects the state after server start.
 Accepted clients and late joiners receive the same value.
 
-On the game thread the client preserves every normal `CEntity`'s active and hidden state before
-calling the audited `Activate(false)` and `Hide(true)` VTable entries. The local `Dude`, registered
-remote-player entities, and their later replacements are excluded. Newly created normal entities
-inherit the disabled state, destroyed entities are forgotten, and enable/disconnect restores the
-per-entity values.
+On the game thread the client limits isolation to `CEntity` instances carrying CryEngine's
+`ENTITY_FLAG_HAS_AI`. It preserves their active and hidden state before calling the audited
+`Activate(false)` and `Hide(true)` VTable entries. The local `Dude`, registered remote-player
+entities, UI/Flash helpers, cameras, particles, equipment, and all other non-AI entities are
+excluded. Newly created AI entities inherit the disabled state, destroyed entities are forgotten,
+and enable/disconnect restores the per-entity values.
 
 The remote-avatar manager consumes the existing interpolated remote-player views and implements
 the complete spawn/update/remove lifecycle behind a native backend contract. Reconnecting players
-remain at their last transform and `PlayerLeft` removes their avatar. The backend deliberately
-remains unavailable for the supported retail image: no fixed human template or audited native
-Actor/Soul initialization, AI/collision/damage isolation, Idle/Walk/Run, and equipment path
-exists in the repository. The base EntitySystem spawn/removal entries themselves are audited.
-When a remote transform first requires an avatar, the client disconnects with a diagnostic rather
-than silently rendering an invisible player or falling back to console commands, Lua, or cloning.
+remain at their last transform and `PlayerLeft` removes their avatar.
+
+The retail backend prefers `XGenAIModule.SpawnEntity` and falls back to
+`System.SpawnEntity` when the retail Lua VM does not export the XGen spawn
+binding. Both are called through protected typed calls in the existing
+Game Lua VM, then polls `System.GetEntity` until Entity, Soul, Actor, Human, and Inventory are
+available. Spawn parameters select the authoritative Soul and disable AI and perception. The
+native entity is registered as a player exception, physics is disabled, and interpolated position
+and rotation are applied through `CEntity::SetWorldTM`. When a game build exports the legacy
+`Actor.SetMovementTarget` binding it also receives the network velocity for Idle/Walk/Run
+animation. Current retail builds that removed this binding use transform-only movement instead;
+the missing optional animation path does not fail the remote-avatar lifecycle.
+
+Local visible equipment is sampled from the live Inventory at no more than 4 Hz. Item,
+equipment-slot, armor, and weapon metadata are combined with active mod table paks in load order;
+KCD2 resolves the resulting Character/STORM visuals from its already active database. Only
+definition UUID and canonical slot are transmitted. Receivers create local item instances, equip
+in layer order through the retail `Inventory.CreateItem`/`Inventory.FindItem` path, and apply
+weapon set and Draw/Holster state. A fatal transaction restores the last confirmed equipment;
+individual definitions absent from the receiving client's active database are skipped with a
+transition diagnostic. Receiver-local items are cleaned up with `Inventory.DeleteItem`; active
+weapon sampling uses the retail `Human.GetItemInHand` binding rather than the removed legacy
+`Inventory.GetCurrentItemId` method.
+
+Failed desired Souls or replacements retain a visible built-in fallback and retry after
+1/2/4/8/16/30 seconds. A replacement becomes active only after it is fully ready. Avatar-local
+errors do not close the connection; only an unavailable complete fallback lifecycle is fatal.
+Removal first unregisters the player exception and then uses `System.RemoveEntity`, including on
+disconnect, level change, and external entity destruction. No Workshop runtime dependency,
+generated Lua, console, raw EntitySystem spawn, or cloning fallback is used.
 
 ## Local developer console
 
@@ -168,19 +193,22 @@ Automated tests cover:
   profile revisions, initializer/waiter behavior, lease release, and bootstrap timeout;
 - DPAPI encrypted round trip and rejection of a corrupted identity file;
 - bounded game/network/local-console queues and reliable/unreliable loopback networking;
-- server entity-control broadcasts, reversible entity-state bookkeeping, and remote-avatar
-  lifecycle behavior through fake native backends;
+- server entity-control broadcasts, reversible entity-state bookkeeping, remote-avatar primary/
+  fallback/retry/cleanup behavior, and controlled-NPC external-destruction handling;
+- equipment catalog slot filtering, layer order, weapon classification, and active mod-pak
+  overlays; avatar UUID/slot/revision validation and non-disconnecting rejection;
 - the existing PE fingerprint and native signature registry, including the audited console
   execution VTable target.
 
 DPAPI isolation across two different Windows user accounts, native save-directory byte/timestamp
-comparison, 30-minute in-game play, two real clients, and clean exit after final disconnect remain
-manual acceptance tests. In particular, native remote-character creation must be confirmed
-in-game before Version 0.3 can be called release-ready.
+comparison, 30-minute in-game play, the full two-client Soul/equipment/weapon/locomotion matrix,
+fault injection, and clean exit after final disconnect remain manual acceptance tests. Native
+remote-character isolation and cleanup must still be confirmed in-game before Version 0.3 can be
+called release-ready.
 
 World deltas for containers, doors, NPCs, weather, time, and quests remain outside version 0.3.
 
 Version 0.3 additionally defines revisioned remote-avatar descriptors, server-side archetype
 allowlists, visible equipment/stance replication, and an engine-neutral controlled-NPC/Lua API.
-The native retail character backend remains behind the same fail-closed safety gate until the
-complete Actor/Soul initialization, isolation, animation, and equipment lifecycle is audited.
+The retail character backend remains behind a complete pre-`WorldReady` capability probe so a
+partial Actor/Soul/Inventory lifecycle cannot enter multiplayer.

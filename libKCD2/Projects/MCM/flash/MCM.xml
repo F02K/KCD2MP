@@ -1,0 +1,92 @@
+<UIElements name="Menus">
+
+  <UIElement name="MCM" mouseevents="1" cursor="1" keyevents="1" controller_input="1" events_exclusive="1">
+
+    <GFx file="mcm.gfx" layer="46">
+      <Constraints>
+        <Align mode="fullscreen" scale="1" />
+      </Constraints>
+    </GFx>
+
+    <!-- Contract: the plugin pushes EVERY mod's settings once per open
+         (granular typed calls); flash caches them and handles mod switching,
+         panel building, keybinds (X reset / Esc back via Key.addListener;
+         keyevents="1" delivers raw keys) and per-setting resets locally. -->
+
+    <functions>
+
+      <function name="BeginMods" funcname="fc_beginMods" desc="first call of every open: wipes the cache, mod list and panel" />
+
+      <function name="AddMod" funcname="fc_addMod" desc="one per installed mod, in display order">
+        <param name="modId" desc="key used by the row calls and echoed in events" type="string" />
+        <param name="uiName" desc="display name" type="string" />
+      </function>
+
+      <function name="AddCategory" funcname="fc_addCategory" desc="centered section header row">
+        <param name="modId" desc="" type="string" />
+        <param name="label" desc="" type="string" />
+        <param name="tooltip" desc="hover tooltip text" type="string" />
+      </function>
+
+      <function name="AddToggle" funcname="fc_addToggle" desc="checkbox row">
+        <param name="modId" desc="" type="string" />
+        <param name="settingId" desc="echoed in OnValueChanged" type="string" />
+        <param name="label" desc="" type="string" />
+        <param name="tooltip" desc="hover tooltip text" type="string" />
+        <param name="value" desc="" type="bool" />
+        <param name="default" desc="used by the flash-local X reset" type="bool" />
+      </function>
+
+      <function name="AddDropdown" funcname="fc_addDropdown" desc="choice row">
+        <param name="modId" desc="" type="string" />
+        <param name="settingId" desc="echoed in OnValueChanged" type="string" />
+        <param name="label" desc="" type="string" />
+        <param name="tooltip" desc="hover tooltip text" type="string" />
+        <param name="options" desc="pipe-separated option labels, e.g. Easy|Normal|Hard" type="string" />
+        <param name="selectedIndex" desc="0-based" type="int" />
+        <param name="defaultIndex" desc="used by the flash-local X reset" type="int" />
+      </function>
+
+      <function name="AddSlider" funcname="fc_addSlider" desc="slider row; value snaps to step, max 3 decimals">
+        <param name="modId" desc="" type="string" />
+        <param name="settingId" desc="echoed in OnValueChanged" type="string" />
+        <param name="label" desc="" type="string" />
+        <param name="tooltip" desc="hover tooltip text" type="string" />
+        <param name="min" desc="" type="float" />
+        <param name="max" desc="" type="float" />
+        <param name="step" desc="" type="float" />
+        <param name="value" desc="" type="float" />
+        <param name="default" desc="used by the flash-local X reset" type="float" />
+        <param name="suffix" desc="appended verbatim to the shown value; empty for none" type="string" />
+      </function>
+
+      <function name="ShowMods" funcname="fc_showMods" desc="last call of the push: builds the list and shows the first mod; zero mods = flash's own empty state" />
+
+      <function name="SetInput" funcname="fc_setInput" desc="keybind feed from the plugin's native input listener (the engine only delivers Esc to the movie as a GFx key event): 'reset' = reset the setting under the cursor, 'back' = leave the search box (menu close is decided plugin-side via _root.searchFocused)">
+        <param name="action" desc="reset | back" type="string" />
+      </function>
+
+    </functions>
+
+    <events>
+
+      <event name="OnValueChanged" fscommand="onValueChanged" desc="user edit OR an X reset (value = the default then); fires live during slider drags. Indices mirror the plugin's push order.">
+        <param name="modIndex" desc="index in AddMod push order" type="int" />
+        <param name="itemIndex" desc="index in the mod's Add* push order (categories count)" type="int" />
+        <param name="value" desc="toggle: 0/1, dropdown: option index, slider: snapped number" type="float" />
+      </event>
+
+      <event name="OnBack" fscommand="onBack" desc="Esc (forwarded via SetInput) while the search box is not focused; no-arg event, immune to the transport's arg loss" />
+
+
+    </events>
+
+    <arrays>
+    </arrays>
+
+    <MovieClips>
+    </MovieClips>
+
+  </UIElement>
+
+</UIElements>

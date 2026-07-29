@@ -1,0 +1,258 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Interfaces">
+      <UniqueIdentifier>{cc981242-eead-45cc-8032-77f735010f6b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Vehicle Files">
+      <UniqueIdentifier>{8edc9028-80c0-42c8-8a34-89b66d3751f2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Test System files">
+      <UniqueIdentifier>{1e98709c-c57d-45bb-945e-a85aa49f819b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="AI Files">
+      <UniqueIdentifier>{77e2ecb7-23f2-4a00-b1eb-f7ecb0e71543}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Helpers">
+      <UniqueIdentifier>{1176f56a-6417-4de5-9903-46ae5521acce}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Voice">
+      <UniqueIdentifier>{25951092-6190-4983-a749-6c2c8b6d3563}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="LivePreview">
+      <UniqueIdentifier>{9eaf22c7-e2ba-4c7c-b7bb-5b29732ba820}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Action Files">
+      <UniqueIdentifier>{e9f95be7-7e61-4b26-8078-8c3a49057f31}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Item Files">
+      <UniqueIdentifier>{52c895ca-8394-4454-b6f9-e3898c53054b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="DebugHelpers">
+      <UniqueIdentifier>{ad3b0eb7-3249-4fd3-9e95-33360ea71f8f}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="UIDraw">
+      <UniqueIdentifier>{ce002c80-2be5-4b79-9695-5e7961196045}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Animation">
+      <UniqueIdentifier>{643c2afe-89ff-4060-8a84-4f25a0229ef2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Animation\PoseModifier">
+      <UniqueIdentifier>{efb8dc37-a2e0-42cd-b7b5-1937449ff6d9}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="SharedParams">
+      <UniqueIdentifier>{6f0c5da9-b871-4300-9355-c8ea8e4bf14b}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Network Files">
+      <UniqueIdentifier>{261983fd-e4f5-42ff-86f8-27621447d8af}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="CooperativeAnimationManager">
+      <UniqueIdentifier>{ea94339c-8fef-44df-98a1-0416a2f48480}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="PlayerProfiles">
+      <UniqueIdentifier>{8d9c42c7-b565-4efd-ad31-0182636b75ca}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="IActionMapManager.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IActorSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IAnimatedCharacter.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IAnimationGraph.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IAnimationGraph_info.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IAnimationStateNode.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ICheckPointSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ICooperativeAnimationManager.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IEffectSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IForceFeedbackSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IGameObject.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IGameObjectSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IGameplayRecorder.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IGameRulesSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IInteractor.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IItem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IItemSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ILevelSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ILoadGame.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IMetadataRecorder.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IMovementController.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IPlayerProfiles.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IRangeSignaling.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ISaveGame.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ISharedParamsManager.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ISubtitleManager.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IUIDraw.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IVehicleSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IViewSystem.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IWeapon.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="IWorldQuery.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="VehicleSystem\VehicleModificationParams.h">
+      <Filter>Vehicle Files</Filter>
+    </ClInclude>
+    <ClInclude Include="VehicleSystem\VehicleParams.h">
+      <Filter>Vehicle Files</Filter>
+    </ClInclude>
+    <ClInclude Include="TestSystem\IGameStateRecorder.h">
+      <Filter>Test System files</Filter>
+    </ClInclude>
+    <ClInclude Include="ICachedAIValues.h">
+      <Filter>AI Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ReadabilitySound.h">
+      <Filter>AI Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Network\NetActionSync.h">
+      <Filter>Helpers</Filter>
+    </ClInclude>
+    <ClInclude Include="Network\VoiceListener.h">
+      <Filter>Voice</Filter>
+    </ClInclude>
+    <ClInclude Include="LivePreview\RealtimeRemoteUpdate.h">
+      <Filter>LivePreview</Filter>
+    </ClInclude>
+    <ClInclude Include="ActionMapManager.h">
+      <Filter>Action Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Inventory.h">
+      <Filter>Item Files</Filter>
+    </ClInclude>
+    <ClInclude Include="ItemParams.h">
+      <Filter>Item Files</Filter>
+    </ClInclude>
+    <ClInclude Include="PersistantDebug.h">
+      <Filter>DebugHelpers</Filter>
+    </ClInclude>
+    <ClInclude Include="UIDraw\UIDraw.h">
+      <Filter>UIDraw</Filter>
+    </ClInclude>
+    <ClInclude Include="Animation\PoseModifier\ILeanPoseModifier.h">
+      <Filter>Animation\PoseModifier</Filter>
+    </ClInclude>
+    <ClInclude Include="Animation\PoseModifier\LookAtSimple.h">
+      <Filter>Animation\PoseModifier</Filter>
+    </ClInclude>
+    <ClInclude Include="SharedParams\ISharedParams.h">
+      <Filter>SharedParams</Filter>
+    </ClInclude>
+    <ClInclude Include="SharedParams\SharedParamsManager.h">
+      <Filter>SharedParams</Filter>
+    </ClInclude>
+    <ClInclude Include="SharedParams\SharedParamsTypeInfo.h">
+      <Filter>SharedParams</Filter>
+    </ClInclude>
+    <ClInclude Include="Network\SerializeBits.h">
+      <Filter>Network Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Network\SerializeDirHelper.h">
+      <Filter>Network Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CooperativeAnimationManager\CooperativeAnimation.h">
+      <Filter>CooperativeAnimationManager</Filter>
+    </ClInclude>
+    <ClInclude Include="CooperativeAnimationManager\CooperativeAnimationManager.h">
+      <Filter>CooperativeAnimationManager</Filter>
+    </ClInclude>
+    <ClInclude Include="CryAction.h" />
+    <ClInclude Include="GameObjects\GameObject.h" />
+    <ClInclude Include="IGameSessionHandler.h" />
+    <ClInclude Include="PlayerProfiles\PlayerProfile.h">
+      <Filter>PlayerProfiles</Filter>
+    </ClInclude>
+    <ClInclude Include="PlayerProfiles\PlayerProfileManager.h">
+      <Filter>PlayerProfiles</Filter>
+    </ClInclude>
+    <ClInclude Include="ICryMannequin.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ICryMannequinDefs.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ICryMannequinEditor.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ICryMannequinUserParams.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="Animation\PoseModifier\IKTorsoAim.h">
+      <Filter>Animation\PoseModifier</Filter>
+    </ClInclude>
+    <ClInclude Include="IGamePhysicsSettings.h">
+      <Filter>Interfaces</Filter>
+    </ClInclude>
+    <ClInclude Include="ItemSystem.h">
+      <Filter>Item Files</Filter>
+    </ClInclude>
+    <ClInclude Include="VehicleSystem\VehicleNoiseGenerator.h">
+      <Filter>Vehicle Files</Filter>
+    </ClInclude>
+    <ClInclude Include="GameXmlParamReader.h" />
+    <ClInclude Include="AnimationGraph\AnimationGraphCVars.h">
+      <Filter>Animation</Filter>
+    </ClInclude>
+    <ClInclude Include="EquipmentManager.h">
+      <Filter>Item Files</Filter>
+    </ClInclude>
+    <ClInclude Include="CryActionPhysicQueues.h" />
+  </ItemGroup>
+</Project>

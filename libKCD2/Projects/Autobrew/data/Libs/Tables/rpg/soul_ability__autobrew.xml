@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="us-ascii"?>
+<database xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" name="barbora" xsi:noNamespaceSchemaLocation="../database.xsd">
+	<soul_abilitys version="1">
+		<soul_ability soul_ability_id="200" soul_ability_name="AutobrewRoutine" />
+	</soul_abilitys>
+</database>

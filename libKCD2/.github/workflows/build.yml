@@ -1,0 +1,98 @@
+name: Build
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    outputs:
+      packages: ${{ steps.collect.outputs.packages }}
+
+    env:
+      BUILD_DIR: .buildenv/build
+      VCPKG_DEFAULT_TRIPLET: x64-windows-static-md
+      VCPKG_BINARY_SOURCES: clear
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: 'recursive'
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: amd64
+
+      - name: Setup vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgDirectory: ${{ runner.temp }}/vcpkg
+          vcpkgGitCommitId: 'a0b1c8d3a477c1cb4813d8e127a56961707ca42b'
+
+      - name: Configure
+        run: >
+          cmake -S .buildenv -B ${{ env.BUILD_DIR }}
+          -G Ninja
+          -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DCMAKE_TOOLCHAIN_FILE=${{ runner.temp }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+
+      - name: Build
+        run: cmake --build ${{ env.BUILD_DIR }}
+
+      - name: Collect + layout
+        id: collect
+        shell: bash
+        run: |
+          # dinput8 loader -> dist/KCSE/
+          mkdir -p dist/KCSE
+          find "$BUILD_DIR" \( -name 'dinput8.dll' -o -name 'dinput8.pdb' \) \
+            ! -path '*/vcpkg*' ! -path '*/CMakeFiles/*' -exec cp {} dist/KCSE/ \;
+
+          # Every other built DLL is a plugin -> dist/<name>/KCSE/Plugins/
+          while IFS= read -r dll; do
+            base=$(basename "$dll" .dll)
+            [ "$base" = "dinput8" ] && continue
+            mkdir -p "dist/$base/KCSE/Plugins"
+            cp "$dll" "dist/$base/KCSE/Plugins/"
+            pdb="${dll%.dll}.pdb"
+            [ -f "$pdb" ] && cp "$pdb" "dist/$base/KCSE/Plugins/"
+          done < <(find "$BUILD_DIR" -name '*.dll' ! -path '*/vcpkg*' ! -path '*/CMakeFiles/*')
+
+          echo "=== Artifact layout ==="
+          find dist -type f
+
+          # Emit discovered package dirs as a JSON array for the matrix
+          packages=$(printf '%s\n' dist/*/ | sed 's#dist/##; s#/##' | jq -R . | jq -sc .)
+          echo "packages=$packages" >> "$GITHUB_OUTPUT"
+          echo "Discovered packages: $packages"
+
+      - name: Upload combined (intermediate)
+        uses: actions/upload-artifact@v4
+        with:
+          name: __dist
+          path: dist/
+          retention-days: 1
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        name: ${{ fromJSON(needs.build.outputs.packages) }}
+
+    steps:
+      - name: Download combined
+        uses: actions/download-artifact@v4
+        with:
+          name: __dist
+          path: dist
+
+      - name: Upload ${{ matrix.name }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: dist/${{ matrix.name }}/
+          retention-days: 30

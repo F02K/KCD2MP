@@ -1,0 +1,740 @@
+////////////////////////////////////////////////////////////////////////////
+//
+//  Crytek Engine Source File.
+//  Copyright (C), Crytek Studios, 2001-2004.
+// -------------------------------------------------------------------------
+//  File name:   IEntitySystem.h
+//  Version:     v1.00
+//  Created:     17/6/2004 by Timur.
+//  Compilers:   Visual Studio.NET 2003
+//  Description: 
+// -------------------------------------------------------------------------
+//  History:
+//
+////////////////////////////////////////////////////////////////////////////
+#include DEVIRTUALIZE_HEADER_FIX(IEntitySystem.h)
+
+#pragma once
+
+#ifndef __IEntitySystem_h__
+#define __IEntitySystem_h__
+
+// The following ifdef block is the standard way of creating macros which make exporting 
+// from a DLL simpler. All files within this DLL are compiled with the CRYENTITYDLL_EXPORTS
+// symbol defined on the command line. this symbol should not be defined on any project
+// that uses this DLL. This way any other project whose source files include this file see 
+// CRYENTITYDLL_API functions as being imported from a DLL, wheras this DLL sees symbols
+// defined with this macro as being exported.
+#ifdef CRYENTITYDLL_EXPORTS
+	#define CRYENTITYDLL_API DLL_EXPORT
+#else
+	#define CRYENTITYDLL_API DLL_IMPORT
+#endif
+
+#define _DISABLE_AREASOLID_
+
+#include <IComponent.h>
+#if !defined(_RELEASE) && (defined(WIN32) || defined(WIN64))
+#define ENABLE_ENTITYEVENT_DEBUGGING 1
+#else
+#define ENABLE_ENTITYEVENT_DEBUGGING 0
+#endif
+
+
+// entity event listener debug output macro
+#if ENABLE_ENTITYEVENT_DEBUGGING
+#define ENTITY_EVENT_LISTENER_DEBUG \
+{ \
+	if ( gEnv && gEnv->pConsole ) \
+	{ \
+		ICVar * pCvar = gEnv->pConsole->GetCVar("es_debugEntityListeners"); \
+		if ( pCvar && pCvar->GetIVal() ) \
+			CryLog("Entity Event listener %s '%p'", __FUNCTION__, this); \
+	} \
+} 
+
+#define ENTITY_EVENT_ENTITY_DEBUG(pEntity) \
+{ \
+	if ( gEnv && gEnv->pConsole ) \
+	{ \
+		ICVar * pCvar = gEnv->pConsole->GetCVar("es_debugEntityListeners"); \
+		if ( pCvar && pCvar->GetIVal() ) \
+			CryLog("Event for entity '%s' pointer '%p'", pEntity->GetName(), pEntity); \
+	} \
+}
+
+#define ENTITY_EVENT_ENTITY_LISTENER(pListener) \
+{ \
+	if ( gEnv && gEnv->pConsole ) \
+	{ \
+		ICVar * pCvar = gEnv->pConsole->GetCVar("es_debugEntityListeners"); \
+		if ( pCvar && pCvar->GetIVal() ) \
+			CryLog("Event listener '%p'", pListener); \
+	} \
+}
+
+#define ENTITY_EVENT_LISTENER_ADDED(pEntity, pListener) \
+{ \
+	if ( gEnv && gEnv->pConsole ) \
+	{ \
+		ICVar * pCvar = gEnv->pConsole->GetCVar("es_debugEntityListeners"); \
+		if ( pCvar && pCvar->GetIVal() ) \
+			CryLog("Adding Entity Event listener for entity '%s' pointer '%p' for listener '%p'", pEntity->GetName(), pEntity, pListener); \
+	} \
+}
+
+#define ENTITY_EVENT_LISTENER_REMOVED(nEntity,pListener) \
+{ \
+	if ( gEnv && gEnv->pConsole ) \
+	{ \
+		ICVar * pCvar = gEnv->pConsole->GetCVar("es_debugEntityListeners"); \
+		if ( pCvar && pCvar->GetIVal() ) \
+		{ \
+			CEntity *pCEntity = (CEntity*)GetEntity( nEntity ); \
+			CryLog("Removing Entity Event listener for entity '%s' for listener '%p'", pCEntity ? pCEntity->GetName() : "null", pListener); \
+		} \
+	} \
+}
+
+#else
+#define ENTITY_EVENT_LISTENER_DEBUG
+#define ENTITY_EVENT_ENTITY_DEBUG(pEntity)
+#define ENTITY_EVENT_ENTITY_LISTENER(pListener)
+#define ENTITY_EVENT_LISTENER_ADDED(pEntity, pListener)
+#define ENTITY_EVENT_LISTENER_REMOVED(nEntity,pListener)
+#endif
+
+
+#include <IEntity.h>
+#include <IEntityClass.h>
+#include <smartptr.h>
+#include <Cry_Geo.h>
+#include <IXml.h>
+
+// Forward declarations.
+struct ISystem;
+struct IEntitySystem;
+class  ICrySizer;
+struct IEntity;
+struct SpawnParams;
+struct IPhysicalEntity;
+struct IBreakEventListener;
+struct SRenderNodeCloneLookup;
+struct EventPhysRemoveEntityParts ;
+struct IBreakableManager;
+struct SComponentRegisteredEvents;
+class CEntity;
+class CEntityLayer;
+
+struct IEntityPoolManager;
+
+
+//  Summary:
+//    SpecType for entity layers.
+//    Add new bits to update. Do not just rename, cause values are used for saving levels.
+enum ESpecType
+{
+	eSpecType_PC = BIT(0),
+	eSpecType_Xbox360  = BIT(1),
+	eSpecType_PS3	= BIT(2),
+	eSpecType_All	= -1
+};
+
+// Summary:
+//	 Area Manager Interface.
+UNIQUE_IFACE struct IArea
+{
+	// <interfuscator:shuffle>
+	virtual ~IArea(){}
+	virtual size_t GetEntityAmount() const = 0;
+	virtual const EntityId GetEntityByIdx(int index) const = 0;
+	virtual void GetMinMax(Vec3 **min, Vec3 **max) const = 0;
+	virtual int GetPriority() const = 0;
+	virtual int GetID() const = 0;
+	// </interfuscator:shuffle>
+};
+
+// Summary:
+//	 EventListener interface for the AreaManager.
+UNIQUE_IFACE struct IAreaManagerEventListener
+{
+	// <interfuscator:shuffle>
+	virtual ~IAreaManagerEventListener(){}
+	// Summary:
+	//	 Callback event.
+	virtual void OnAreaManagerEvent( EEntityEvent event, EntityId TriggerEntityID, IArea *pArea ) = 0;
+	// </interfuscator:shuffle>
+};
+
+// Summary:
+//	 Structure for additional AreaManager queries.
+struct SAreaManagerResult
+{
+public: 
+	SAreaManagerResult()
+	{
+		pArea = NULL;
+		fDistanceSq = 0.0f;
+		vPosOnHull	= Vec3(0);
+		bInside	= false;
+		bNear	= false;
+	}
+
+	IArea* pArea;
+	float fDistanceSq;
+	Vec3 vPosOnHull;
+	bool bInside;
+	bool bNear;
+};
+
+
+UNIQUE_IFACE struct IAreaManager
+{
+	// <interfuscator:shuffle>
+	virtual ~IAreaManager(){}
+	virtual size_t							GetAreaAmount() const = 0;
+	virtual IArea const* const	GetArea(size_t const nAreaIndex) const = 0;
+
+	// Description:
+	//	 Additional Query based on position. Needs preallocated space to write nMaxResults to pResults.
+	// Return Value:
+	//	 True on success or false on error or if provided structure was too small.
+	virtual bool QueryAreas(EntityId const nEntityID, Vec3 const& vPos, SAreaManagerResult *pResults, int nMaxResults) = 0;
+
+	// Description:
+	//	Query areas linked to other entities (these links are shape links)
+	//	fills out a list of entities and sets outAndMaxResults to the size of results
+	// Return Value:
+	//	Returns true if the array was large enough, or false if there was more then outAndMaxResults attached to the entity
+	virtual bool GetLinkedAreas(EntityId linkedId, EntityId* pOutArray, int &outAndMaxResults) const = 0;
+
+	virtual void DrawLinkedAreas(EntityId linkedId) const = 0;
+
+	// Summary:
+	//	 Registers EventListener to the AreaManager.
+	virtual void AddEventListener( IAreaManagerEventListener *pListener ) = 0;
+	virtual void RemoveEventListener( IAreaManagerEventListener *pListener ) = 0;
+
+	// Description:
+	// Invokes a re-compilation of the entire area grid
+	virtual void SetAreasDirty() = 0;
+	
+	// Description:
+	// Invokes a partial recomp of the grid (faster)
+	virtual void SetAreaDirty(IArea* pArea) = 0;
+
+  // Description:
+  //	Passed in entity exits all areas. Meant for when players are killed. 
+  virtual void ExitAllAreas(IEntity const* const pEntity) = 0;
+
+  // Description:
+  // Puts the passed entity ID into the update list for the next update.
+  virtual void MarkEntityForUpdate(EntityId const nEntityID) = 0;
+  // </interfuscator:shuffle>
+};
+
+// Description:
+//	 Entity iterator interface. This interface is used to traverse trough all the entities in an entity system. In a way, 
+//	 this iterator works a lot like a stl iterator.
+
+UNIQUE_IFACE struct IEntityIt
+{
+	// <interfuscator:shuffle>
+	virtual ~IEntityIt(){}
+
+	virtual void AddRef() = 0;
+
+	// Summary:
+	//	 Deletes this iterator and frees any memory it might have allocated.
+	virtual void Release() = 0;
+
+	// Summary:
+	//	 Checks whether current iterator position is the end position.
+	// Return Value:
+	//	 True if iterator at end position.
+	virtual bool IsEnd() = 0;
+
+	// Summary:
+	//	 Retrieves next entity.
+	// Return Value:
+	//	 A pointer to the entity that the iterator points to before it goes to the next.
+	virtual IEntity * Next() = 0;
+
+	// Summary:
+	//	 Retrieves current entity.
+	// Return Value:
+	//	 The entity that the iterator points to.
+	virtual IEntity * This() = 0;
+
+	// Summary:
+	//	 Positions the iterator at the beginning of the entity list.
+	virtual void MoveFirst() = 0;
+	// </interfuscator:shuffle>
+};
+
+typedef _smart_ptr<IEntityIt> IEntityItPtr;
+
+// Description:
+//	 A callback interface for a class that wants to be aware when new entities are being spawned or removed. A class that implements
+//	 this interface will be called every time a new entity is spawned, removed, or when an entity container is to be spawned.
+struct IEntitySystemSink
+{
+	// <interfuscator:shuffle>
+	virtual ~IEntitySystemSink(){}
+	// Description:
+	//	 This callback is called before this entity is spawned. The entity will be created and added to the list of entities,
+	//	 if this function returns true. Returning false will abort the spawning process.
+	// Arguments:
+	//	 params - The parameters that will be used to spawn the entity.
+	virtual bool OnBeforeSpawn( SEntitySpawnParams &params ) = 0;
+	
+	// Description:
+	//	 This callback is called when this entity has finished spawning. The entity has been created and added to the list of entities, 
+	//	 but has not been initialized yet.
+	// Arguments:
+	//	 pEntity - The entity that was just spawned
+	//	 params	 -
+	virtual void OnSpawn( IEntity *pEntity,SEntitySpawnParams &params ) = 0;
+
+	// Description:
+	//	 Called when an entity is being removed.
+	// Arguments:
+	//	 pEntity - The entity that is being removed. This entity is still fully valid.
+	// Return Value:
+	//	 True to allow removal, false to deny.
+	virtual bool OnRemove( IEntity *pEntity ) = 0;
+
+	// Description:
+	//	 Called when an entity has been reused. You should clean up when this is called.
+	// Arguments:
+	//	 pEntity - The entity that is being reused. This entity is still fully valid and with its new EntityId.
+	//   params - The new params this entity is using.
+	virtual void OnReused( IEntity *pEntity, SEntitySpawnParams &params ) = 0;
+
+	// Description:
+	//	 Called in response to an entity event.
+	// Arguments:
+	//	 pEntity - The entity that is being removed. This entity is still fully valid.
+	//	 event	 -
+	virtual void OnEvent( IEntity *pEntity, SEntityEvent &event ) = 0;
+
+	// Description:
+	//	 Collect memory informations
+	// Arguments:
+	//	 pSizer - The Sizer class used to collect the memory informations
+	virtual void GetMemoryUsage(class ICrySizer *pSizer) const{};
+	// </interfuscator:shuffle>
+};
+
+// Summary:
+//	 Interface to the entity archetype.
+UNIQUE_IFACE struct IEntityArchetype
+{
+	// <interfuscator:shuffle>
+	virtual ~IEntityArchetype(){}
+	// Retrieve entity class of the archetype.
+	virtual IEntityClass* GetClass() const = 0;
+	virtual const char* GetName() const = 0;
+	virtual IScriptTable* GetProperties() = 0;
+	virtual XmlNodeRef GetObjectVars() = 0;
+	virtual void LoadFromXML( XmlNodeRef &propertiesNode, XmlNodeRef &objectVarsNode ) = 0;
+	// </interfuscator:shuffle>
+};
+
+//////////////////////////////////////////////////////////////////////////
+struct IEntityEventListener
+{
+	// <interfuscator:shuffle>
+	virtual ~IEntityEventListener(){}
+	virtual void OnEntityEvent( IEntity *pEntity,SEntityEvent &event ) = 0;
+	// </interfuscator:shuffle>
+};
+
+
+// Summary:
+//	 Structure used by proximity query in entity system.
+struct SEntityProximityQuery
+{
+	AABB box; // Report entities within this bounding box.
+	IEntityClass *pEntityClass;
+	uint32 nEntityFlags;
+
+	// Output.
+	IEntity** pEntities;
+	int nCount;
+
+	SEntityProximityQuery()
+	{
+		nCount = 0;
+		pEntities = 0;
+		pEntityClass = 0;
+		nEntityFlags = 0;
+	}
+};
+
+// removed unused ifdef for devirtualization
+// #ifndef _NO_IENTITY
+// UNIQUE_IFACE struct IEntitySystem
+// #else
+// struct IEntitySystemBase
+// #endif
+
+// Description:
+//	 Interface to the system that manages the entities in the game, their creation, deletion and upkeep. The entities are kept in a map
+//	 indexed by their unique entity ID. The entity system updates only unbound entities every frame (bound entities are updated by their
+//	 parent entities), and deletes the entities marked as garbage every frame before the update. The entity system also keeps track of entities
+//	 that have to be drawn last and with more zbuffer resolution.
+// Summary:
+//	 Interface to the system that manages the entities in the game.
+UNIQUE_IFACE struct IEntitySystem
+{
+	enum SinkEventSubscriptions
+	{
+		OnBeforeSpawn = BIT(0),
+		OnSpawn				= BIT(1),
+		OnRemove			= BIT(2),
+		OnReused			= BIT(3),
+		OnEvent				= BIT(4),
+
+		AllSinkEvents	= ~0u,
+	};
+
+	enum
+	{
+		SinkMaxEventSubscriptionCount = 5,
+	};
+
+	// <interfuscator:shuffle>
+	virtual ~IEntitySystem(){}
+
+	// Summary:
+	//	 Releases entity system.
+	virtual void Release() = 0;
+
+	// Description:
+	//   Updates entity system and all entities before physics is called. (or as early as possible after input in the multithreaded physics case)
+	//	 This function executes once per frame.
+	virtual void PrePhysicsUpdate() = 0;
+
+	// Summary:
+	//	 Updates entity system and all entities. This function executes once a frame.
+	virtual	void	Update() = 0;
+
+	// Summary:
+	//	 Resets whole entity system, and destroy all entities.
+	virtual void	Reset() = 0;
+
+	// Summary:
+	//	 Unloads whole entity system - should be called when level is unloaded.
+	virtual void Unload() = 0;
+	virtual void PurgeHeaps() =0;
+
+	// Description:
+	//     Deletes any pending entities (which got marked for deletion).
+	virtual void  DeletePendingEntities() = 0;
+
+
+	// Description:
+	//     Retrieves the entity class registry interface.
+	// Return:
+	//     Pointer to the valid entity class registry interface.
+	virtual IEntityClassRegistry* GetClassRegistry() = 0;
+
+	// Summary:
+	//	 Spawns a new entity according to the data in the Entity Descriptor.
+	// Arguments:
+	//	 params		- Entity descriptor structure that describes what kind of entity needs to be spawned
+	//	 bAutoInit	- If true automatically initialize entity.
+	// Return Value:
+	//	 The spawned entity if successful, NULL if not.
+	// See Also: 
+	//	 CEntityDesc
+	virtual IEntity* SpawnEntity( SEntitySpawnParams &params,bool bAutoInit=true ) = 0;
+
+	// Summary: 
+	//	 Initializes entity.
+	// Description:
+	//	 Initialize entity if entity was spawned not initialized (with bAutoInit false in SpawnEntity).
+	// Note:
+	//	 Used only by Editor, to setup properties & other things before initializing entity,
+	//	 do not use this directly.
+	// Arguments:	
+	//	 pEntity - Pointer to just spawned entity object.
+	//	 params	 - Entity descriptor structure that describes what kind of entity needs to be spawned.
+	// Return value:	
+	//	 True if successfully initialized entity.
+	virtual bool InitEntity( IEntity* pEntity,SEntitySpawnParams &params ) = 0;
+	
+	// Summary:
+	//	 Retrieves entity from its unique id.
+	// Arguments:
+	//	 id - The unique ID of the entity required.
+	// Return value:
+	//	 The entity if one with such an ID exists, and NULL if no entity could be matched with the id
+    virtual IEntity* GetEntity( EntityId id ) const = 0;
+
+	// Summary:
+	//	 Find first entity with given name.
+	// Arguments:
+	//	 sEntityName - The name to look for.
+	// Return value:
+	//	 The entity if found, 0 if failed.
+	virtual IEntity* FindEntityByName( const char *sEntityName ) const = 0;
+
+	// Note:
+	//	 Might be needed to call before loading of entities to be sure we get the requested IDs.
+	// Arguments:
+	//   id - must not be 0.
+	virtual void ReserveEntityId( const EntityId id ) = 0;
+
+	// Reserves a dynamic entity id
+	virtual EntityId ReserveUnknownEntityId() = 0;
+	
+	// Summary:
+	//	 Removes an entity by ID.
+	// Arguments:
+	//	 entity			 - The id of the entity to be removed.
+	//	 bForceRemoveNow - If true forces immediately delete of entity, overwise will delete entity on next update.
+	virtual void	RemoveEntity( EntityId entity,bool bForceRemoveNow=false ) = 0;
+
+	// Summary:
+	//	 Gets number of entities stored in entity system.
+	// Return value:
+	//	 The number of entities.
+	virtual uint32 GetNumEntities() const = 0;
+
+	// Summary:
+	//	 Gets a entity iterator. 
+	// Description: 
+	//	 Gets a entity iterator. This iterator interface can be used to traverse all the entities in this entity system.
+	// Return value:
+	//	 An entityIterator.
+	// See also:
+	//	 IEntityIt
+	virtual IEntityIt * GetEntityIterator() = 0;
+
+	// Description:
+	//    Sends the same event to all entities in Entity System.
+	// Arguments:
+	//    event - Event to send.
+	virtual void SendEventToAll( SEntityEvent &event ) = 0;
+
+	// Description:
+	//    Sends the same event to the entity in Entity System using the EntityEvent system
+	// Arguments:
+	//    event - Event to send.
+	virtual void SendEventViaEntityEvent( IEntity* piEntity, SEntityEvent &event ) = 0;
+
+	// Summary: 
+	//	 Get all entities within proximity of the specified bounding box.
+	// Note:
+	//	 Query is not exact, entities reported can be a few meters away from the bounding box.
+	virtual int QueryProximity( SEntityProximityQuery &query ) = 0;
+
+	// Summary:
+	//	 Resizes the proximity grid.
+	// Note: 
+	//	 Call this when you know dimensions of the level, before entities are created.
+	virtual void ResizeProximityGrid( int nWidth,int nHeight ) = 0;
+
+	
+	// Summary:
+	//	 Gets all entities in specified radius.
+	// Arguments:
+	//	 origin		-
+	//	 radius		-
+	//	 pList		-
+	//	 physFlags	- is one or more of PhysicalEntityFlag.
+	// See also:
+	//	 PhysicalEntityFlag
+	virtual int	GetPhysicalEntitiesInBox( const Vec3 &origin, float radius, IPhysicalEntity **&pList, int physFlags = (1<<1)|(1<<2)|(1<<3)|(1<<4) ) const = 0;
+
+	// Description:
+	//   Retrieves host entity from the physical entity.
+	virtual IEntity* GetEntityFromPhysics( IPhysicalEntity *pPhysEntity ) const = 0;
+
+	// Description:
+	//	 Adds the sink of the entity system. The sink is a class which implements IEntitySystemSink.
+	// Arguments:
+	//	 sink - Pointer to the sink, must not be 0.
+	//	 subscription - combination of SinkEventSubscriptions flags specifying which events to receive
+	// See also:
+	//	 IEntitySystemSink
+	virtual void AddSink( IEntitySystemSink *sink, uint32 subscriptions, uint64 onEventSubscriptions ) = 0;
+
+	// Description:
+	//	 Removes listening sink from the entity system. The sink is a class which implements IEntitySystemSink.
+	// Arguments:
+	//	 sink - Pointer to the sink, must not be 0.
+	// See also:
+	//	 IEntitySystemSink
+	virtual void RemoveSink( IEntitySystemSink *sink ) = 0;
+
+	// Description:
+	//    Pause all entity timers.
+	// Arguments:
+	//    bPause - true to pause timer, false to resume.
+	virtual void	PauseTimers( bool bPause,bool bResume=false ) = 0;
+
+	// Summary:
+	//	 Checks whether a given entity ID is already used.
+	virtual bool IsIDUsed( EntityId nID ) const = 0;
+
+	// Description:
+	//	 Puts the memory statistics of the entities into the given sizer object
+	//	 according to the specifications in interface ICrySizer.
+	virtual void GetMemoryStatistics(ICrySizer *pSizer) const = 0;
+
+	// Summary:
+	//	 Gets pointer to original ISystem.
+	virtual ISystem* GetSystem() const = 0;
+
+	// Description:
+	//    Loads entities exported from Editor.
+	//    bIsLoadingLevelFile indicates if the loaded entities come from the original level file
+	virtual void LoadEntities( XmlNodeRef &objectsNode, bool bIsLoadingLevelFile ) = 0;
+	virtual void LoadEntities( XmlNodeRef &objectsNode, bool bIsLoadingLevelFile, const Vec3 &segmentOffest, std::vector<IEntity *> *outGlobalEntityIds, std::vector<IEntity *> *outLocalEntityIds ) = 0;
+
+	// Summary:
+	//	  Registers Entity Event`s listeners.
+	virtual void AddEntityEventListener( EntityId nEntity,EEntityEvent event,IEntityEventListener *pListener ) = 0;
+	virtual void RemoveEntityEventListener( EntityId nEntity,EEntityEvent event,IEntityEventListener *pListener ) = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Entity GUIDs
+	//////////////////////////////////////////////////////////////////////////
+
+	// Summary:
+	//	 Finds entity by Entity GUID.
+	virtual EntityId FindEntityByGuid( const EntityGUID &guid ) const = 0;
+
+	// Summary:
+	//	 Generates new entity id based on Entity GUID.
+	virtual EntityId GenerateEntityIdFromGuid( const EntityGUID &guid ) = 0;
+
+	// Summary:
+	//	 Gets a pointer to access to area manager.
+	virtual IAreaManager* GetAreaManager() const = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//    Return the breakable manager interface.
+	virtual IBreakableManager* GetBreakableManager() const = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//	 Returns the entity pool manager interface.
+	virtual IEntityPoolManager* GetIEntityPoolManager() const = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Entity archetypes.
+	//////////////////////////////////////////////////////////////////////////
+	virtual IEntityArchetype* LoadEntityArchetype( XmlNodeRef oArchetype) = 0;
+	virtual IEntityArchetype* LoadEntityArchetype( const char *sArchetype ) = 0;
+	virtual IEntityArchetype* CreateEntityArchetype( IEntityClass *pClass,const char *sArchetype ) = 0;
+	//////////////////////////////////////////////////////////////////////////
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//     Serializes basic entity system members (timers etc. ) to/from a savegame;
+	virtual void Serialize(TSerialize ser) = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//     Makes sure the next SpawnEntity will use the id provided (if it's in use, the current entity is deleted).
+	virtual void SetNextSpawnId(EntityId id) = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//     Resets any area state for the specified entity.
+	virtual void ResetAreas() = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//     Unloads any area state for the specified entity.
+	virtual void UnloadAreas() = 0;
+
+  //////////////////////////////////////////////////////////////////////////
+  // Description:
+  //     Dumps entities in system.
+  virtual void DumpEntities() = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//     Do not spawn any entities unless forced to.
+	virtual void LockSpawning(bool lock) = 0;
+
+	//////////////////////////////////////////////////////////////////////////
+	// Description:
+	//     Handles entity-related loading of a level
+	virtual bool OnLoadLevel(const char* szLevelPath) = 0;
+
+	// Add entity layer
+	virtual CEntityLayer* AddLayer(const char* name, const char* parent, uint16 id, bool bHasPhysics, int specs, bool bDefaultLoaded) = 0;
+
+	// Load layer infos
+	virtual void LoadLayers(const char* dataFile) = 0;
+
+	// Add entity to entity layer
+	virtual void AddEntityToLayer(const char* layer, EntityId id) = 0;
+
+	// Remove entity from all layers
+	virtual void RemoveEntityFromLayers(EntityId id) = 0;
+
+	// Clear list of entity layers
+	virtual void ClearLayers() = 0;
+
+	// Enable all the default layers
+	virtual void EnableDefaultLayers(bool isSerialized = true) = 0;
+
+	// Enable entity layer
+	virtual void EnableLayer(const char* layer, bool isEnable, bool isSerialized = true) = 0;
+
+	// Is layer with given name enabled ?
+	virtual bool IsLayerEnabled(const char* layer, bool bMustBeLoaded) const = 0;
+
+	// Returns true if entity is not in a layer or the layer is enabled/serialized
+	virtual bool ShouldSerializedEntity(IEntity* pEntity) = 0;
+
+	// Register callbacks from Physics System
+	virtual void RegisterPhysicCallbacks() = 0;
+	virtual void UnregisterPhysicCallbacks() = 0;
+
+	virtual void PurgeDeferredCollisionEvents( bool bForce = false ) =0;
+
+	// Component APIs
+	virtual	void ComponentEnableEvent( const EntityId id, const int eventID, const bool enable ) = 0;
+
+	virtual bool EntitiesUseGUIDs() const = 0;
+	virtual void SetEntitiesUseGUIDs(const bool bEnable) = 0;
+
+	virtual void DebugDraw() = 0;
+
+	// Resets physical simulation suppressed by LiveCreate during "edit mode".
+	// Called by LiveCreate subsystem when user resumed normal game mode.
+	virtual void ResumePhysicsForSuppressedEntities(bool bWakeUp) = 0;
+
+	// Save/Load internal state (used mostly for LiveCreate)
+	virtual void SaveInternalState(struct IDataWriteStream& writer) const = 0;
+	virtual void LoadInternalState(struct IDataReadStream& reader) = 0;
+
+	// Get the layer index, -1 if not found
+	virtual int GetLayerId(const char* szLayerName) const = 0;
+
+	// Get mask for visible layers, returns layer count
+	virtual int GetVisibleLayerIDs(uint8* pLayerMask, const uint32 maxCount) const = 0;
+
+	// Toggle layer visibility (in-game only), used by LiveCreate, non recursive
+	virtual void ToggleLayerVisibility(const char* layer, bool isEnabled) = 0;
+
+	// </interfuscator:shuffle>
+};
+
+extern "C"
+{
+	CRYENTITYDLL_API struct IEntitySystem* CreateEntitySystem( ISystem *pISystem );
+}
+
+typedef struct IEntitySystem * (* PFNCREATEENTITYSYSTEM)( ISystem *pISystem );
+
+#endif // __IEntitySystem_h__

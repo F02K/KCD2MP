@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<swf _xmlExportMajor="2" _xmlExportMinor="2" type="SWF" charset="UTF-8" compression="ZLIB" encrypted="false" frameCount="1" frameRate="24.0" gfx="false" hasEndTag="true" version="8">
+  <displayRect type="RECT" Xmax="16000" Xmin="0" Ymax="9000" Ymin="0" nbits="14"/>
+  <tags>
+    <item type="FileAttributesTag" actionScript3="false" forceWriteAsLong="false" hasMetadata="false" noCrossDomainCache="false" reservedA="false" reservedB="0" swfRelativeUrls="false" useDirectBlit="false" useGPU="false" useNetwork="false"/>
+    <item type="ImportAssets2Tag" downloadNow="1" forceWriteAsLong="true" hasDigest="0" url="gfxfontlib.gfx">
+      <tags>
+        <item>100</item>
+      </tags>
+      <names>
+        <item>DefaultFontBold</item>
+      </names>
+    </item>
+    <item type="DefineEditTextTag" align="2" autoSize="false" border="false" characterID="101" fontHeight="400" fontId="100" forceWriteAsLong="true" hasFont="true" hasFontClass="false" hasLayout="true" hasMaxLength="false" hasText="true" hasTextColor="true" html="false" indent="0" initialText="0 m" leading="40" leftMargin="0" maxLength="0" multiline="false" noSelect="true" password="false" readOnly="true" rightMargin="0" useOutlines="true" variableName="" wasStatic="false" wordWrap="false">
+      <bounds type="RECT" Xmax="2760" Xmin="-40" Ymax="480" Ymin="-40" nbits="12"/>
+      <textColor type="RGBA" alpha="255" blue="255" green="255" red="255"/>
+    </item>
+    <item type="DefineSpriteTag" forceWriteAsLong="true" frameCount="1" hasEndTag="true" spriteId="102">
+      <subTags>
+        <item type="PlaceObject2Tag" characterId="101" clipDepth="0" depth="1" forceWriteAsLong="true" name="tField" placeFlagHasCharacter="true" placeFlagHasClipActions="false" placeFlagHasClipDepth="false" placeFlagHasColorTransform="false" placeFlagHasMatrix="true" placeFlagHasName="true" placeFlagHasRatio="false" placeFlagMove="false" ratio="0">
+          <matrix type="MATRIX" hasRotate="false" hasScale="false" nRotateBits="0" nScaleBits="0" nTranslateBits="1" rotateSkew0="0.0" rotateSkew1="0.0" scaleX="0.0" scaleY="0.0" translateX="0" translateY="0"/>
+        </item>
+        <item type="ShowFrameTag" forceWriteAsLong="false"/>
+      </subTags>
+    </item>
+    <item type="DefineEditTextTag" align="2" autoSize="false" border="false" characterID="103" fontHeight="400" fontId="100" forceWriteAsLong="true" hasFont="true" hasFontClass="false" hasLayout="true" hasMaxLength="false" hasText="true" hasTextColor="true" html="false" indent="0" initialText=" " leading="40" leftMargin="0" maxLength="0" multiline="false" noSelect="true" password="false" readOnly="true" rightMargin="0" useOutlines="true" variableName="" wasStatic="false" wordWrap="false">
+      <bounds type="RECT" Xmax="7160" Xmin="-40" Ymax="480" Ymin="-40" nbits="14"/>
+      <textColor type="RGBA" alpha="255" blue="255" green="255" red="255"/>
+    </item>
+    <item type="DefineSpriteTag" forceWriteAsLong="true" frameCount="1" hasEndTag="true" spriteId="104">
+      <subTags>
+        <item type="PlaceObject2Tag" characterId="103" clipDepth="0" depth="1" forceWriteAsLong="true" name="tField" placeFlagHasCharacter="true" placeFlagHasClipActions="false" placeFlagHasClipDepth="false" placeFlagHasColorTransform="false" placeFlagHasMatrix="true" placeFlagHasName="true" placeFlagHasRatio="false" placeFlagMove="false" ratio="0">
+          <matrix type="MATRIX" hasRotate="false" hasScale="false" nRotateBits="0" nScaleBits="0" nTranslateBits="1" rotateSkew0="0.0" rotateSkew1="0.0" scaleX="0.0" scaleY="0.0" translateX="0" translateY="0"/>
+        </item>
+        <item type="ShowFrameTag" forceWriteAsLong="false"/>
+      </subTags>
+    </item>
+    <item type="ExportAssetsTag" forceWriteAsLong="true">
+      <tags>
+        <item>102</item>
+        <item>104</item>
+      </tags>
+      <names>
+        <item>DistLabel</item>
+        <item>NameLabel</item>
+      </names>
+    </item>
+    <item type="SetBackgroundColorTag" forceWriteAsLong="false">
+      <backgroundColor type="RGB" blue="0" green="0" red="0"/>
+    </item>
+    <item type="DoActionTag" actionBytes="0700" forceWriteAsLong="false"/>
+    <item type="ShowFrameTag" forceWriteAsLong="false"/>
+    <item type="EndTag" forceWriteAsLong="false"/>
+  </tags>
+</swf>

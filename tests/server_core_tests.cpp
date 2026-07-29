@@ -542,8 +542,9 @@ int main()
 		    protocol::AVATAR_WEAPON_CLASS_ONE_HANDED);
 		avatar->set_weapon_drawn(true);
 		auto *item = avatar->add_equipment();
-		item->set_definition_id("item.sword");
-		item->set_equipped_slot("right_hand");
+		item->set_definition_id(
+		    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+		item->set_equipped_slot("PrimaryMainHand");
 		core.on_message(37, update, start + 1ms);
 		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
@@ -567,7 +568,8 @@ int main()
 
 		message->set_base_revision(2);
 		avatar->set_revision(2);
-		avatar->set_archetype_id("unknown.network.soul");
+		avatar->set_archetype_id(
+		    "99999999-9999-4999-8999-999999999999");
 		core.on_message(37, update, start + 3ms);
 		outbound = core.take_outbound();
 		assert(outbound.size() == 1);
@@ -582,6 +584,22 @@ int main()
 		           .authoritative_avatar()
 		           .archetype_id()
 		    == npc::default_soul_id);
+
+		message->set_base_revision(3);
+		avatar->set_revision(3);
+		avatar->mutable_equipment(0)->set_definition_id(
+		    "not-a-runtime-item-id");
+		core.on_message(37, update, start + 2s);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_avatar_rejected());
+		assert(outbound.front().close_after_send == close_kind::none);
+		assert(outbound.front()
+		           .envelope.avatar_rejected()
+		           .authoritative_avatar()
+		           .revision()
+		    == 3);
+		assert(core.players().size() == 1);
 	}
 
 	{
@@ -597,6 +615,18 @@ int main()
 		assert(
 		    config.allowed_avatar_archetypes.front()
 		    == npc::default_soul_id);
+
+		const std::string custom =
+		    "11111111-2222-4333-8444-555555555555";
+		config.known_avatar_archetypes.insert(custom);
+		config.default_avatar_archetype = custom;
+		config.allowed_avatar_archetypes = {custom};
+		normalize_avatar_config(config);
+		assert(config.allowed_avatar_archetypes.size() == 2);
+		assert(std::ranges::find(
+		           config.allowed_avatar_archetypes,
+		           npc::default_soul_id)
+		    != config.allowed_avatar_archetypes.end());
 	}
 
 	temporary_world lease_world;

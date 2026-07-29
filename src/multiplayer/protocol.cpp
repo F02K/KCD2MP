@@ -1,6 +1,8 @@
 #include "multiplayer/protocol.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <unordered_set>
@@ -123,7 +125,6 @@ namespace kcd2mp
 			{
 				const auto &message = envelope.client_avatar_update();
 				return message.base_revision() > 0 && message.has_avatar()
-				    && is_valid_avatar_descriptor(message.avatar())
 				    && message.avatar().revision() == message.base_revision();
 			}
 			if (envelope.has_avatar_accepted())
@@ -364,10 +365,64 @@ namespace kcd2mp
 		return valid_utf8_with_codepoint_count(value, 1, max_chat_codepoints);
 	}
 
+	bool is_uuid(std::string_view value)
+	{
+		if (value.size() != 36)
+			return false;
+		for (std::size_t index = 0; index < value.size(); ++index)
+		{
+			if (index == 8 || index == 13 || index == 18 || index == 23)
+			{
+				if (value[index] != '-')
+					return false;
+				continue;
+			}
+			const auto character =
+			    static_cast<unsigned char>(value[index]);
+			if (!std::isxdigit(character))
+				return false;
+		}
+		return true;
+	}
+
+	bool is_valid_avatar_equipment_slot(std::string_view value)
+	{
+		static constexpr std::array slots{
+		    std::string_view{"body_coat"},
+		    std::string_view{"gloves"},
+		    std::string_view{"ring"},
+		    std::string_view{"necklace"},
+		    std::string_view{"collar"},
+		    std::string_view{"head_hood"},
+		    std::string_view{"boot"},
+		    std::string_view{"head_coif"},
+		    std::string_view{"head_coif_padded"},
+		    std::string_view{"head_cap"},
+		    std::string_view{"head_helmet"},
+		    std::string_view{"body_cloth"},
+		    std::string_view{"body_cloth_padded"},
+		    std::string_view{"body_chainmail"},
+		    std::string_view{"body_plate"},
+		    std::string_view{"sleeves"},
+		    std::string_view{"leg_trousers"},
+		    std::string_view{"leg_trousers_padded"},
+		    std::string_view{"leg_armor"},
+		    std::string_view{"spur"},
+		    std::string_view{"belt"},
+		    std::string_view{"pouch"},
+		    std::string_view{"PrimaryMainHand"},
+		    std::string_view{"PrimaryOffHand"},
+		    std::string_view{"SecondaryMainHand"},
+		    std::string_view{"Dagger"},
+		    std::string_view{"Torch"},
+		    std::string_view{"Oversized"}};
+		return std::ranges::find(slots, value) != slots.end();
+	}
+
 	bool is_valid_avatar_descriptor(
 	    const protocol::AvatarDescriptor &avatar)
 	{
-		if (!valid_identifier(avatar.archetype_id())
+		if (!is_uuid(avatar.archetype_id())
 		    || avatar.revision() == 0
 		    || avatar.equipment_size()
 		        > static_cast<int>(max_avatar_equipment_items)
@@ -386,15 +441,16 @@ namespace kcd2mp
 		    avatar.equipment(),
 		    [&](const protocol::AvatarEquipment &item)
 		    {
-			    return valid_identifier(item.definition_id())
-			        && valid_identifier(item.equipped_slot(), 64)
+			    return is_uuid(item.definition_id())
+			        && is_valid_avatar_equipment_slot(
+			            item.equipped_slot())
 			        && slots.insert(item.equipped_slot()).second;
 		    });
 	}
 
 	bool is_valid_avatar_policy(const protocol::AvatarPolicy &policy)
 	{
-		if (!valid_identifier(policy.default_archetype_id())
+		if (!is_uuid(policy.default_archetype_id())
 		    || policy.allowed_archetype_ids_size() == 0
 		    || policy.allowed_archetype_ids_size()
 		        > static_cast<int>(max_avatar_archetypes))
@@ -405,7 +461,7 @@ namespace kcd2mp
 		std::unordered_set<std::string> archetypes;
 		for (const auto &archetype : policy.allowed_archetype_ids())
 		{
-			if (!valid_identifier(archetype)
+			if (!is_uuid(archetype)
 			    || !archetypes.insert(archetype).second)
 			{
 				return false;

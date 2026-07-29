@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <chrono>
@@ -80,6 +81,14 @@ namespace kcd2mp::npc
 		std::array<float, 4> rotation{0.0F, 0.0F, 0.0F, 1.0F};
 	};
 
+	struct motion
+	{
+		locomotion mode{locomotion::idle};
+		std::array<float, 3> velocity{};
+
+		friend bool operator==(const motion &, const motion &) = default;
+	};
+
 	struct equipment
 	{
 		std::string definition_id;
@@ -100,9 +109,11 @@ namespace kcd2mp::npc
 
 	struct spawn_request
 	{
+		std::string diagnostic_context;
 		std::string archetype_id;
 		transform world_transform;
 		locomotion movement{locomotion::idle};
+		std::array<float, 3> velocity{};
 		appearance visual;
 		bool exempt_from_entity_control{};
 	};
@@ -144,9 +155,9 @@ namespace kcd2mp::npc
 		[[nodiscard]] virtual bool set_transform(
 		    native_handle npc,
 		    const transform &value) = 0;
-		[[nodiscard]] virtual bool set_locomotion(
+		[[nodiscard]] virtual bool set_motion(
 		    native_handle npc,
-		    locomotion value) = 0;
+		    const motion &value) = 0;
 		[[nodiscard]] virtual bool set_appearance(
 		    native_handle npc,
 		    const appearance &value) = 0;
@@ -210,11 +221,13 @@ namespace kcd2mp::npc
 				slot.diagnostic.clear();
 				slot.request = std::move(request);
 				slot.desired_transform = slot.request.world_transform;
-				slot.desired_locomotion = slot.request.movement;
+				slot.desired_motion = {
+				    slot.request.movement,
+				    slot.request.velocity};
 				slot.desired_appearance = slot.request.visual;
-				slot.transform_dirty = false;
-				slot.locomotion_dirty = false;
-				slot.appearance_dirty = false;
+				slot.transform_dirty = true;
+				slot.motion_dirty = true;
+				slot.appearance_dirty = true;
 				slot.remove_requested = false;
 				slot.native = 0;
 				slot.deadline = now + m_spawn_timeout;
@@ -273,8 +286,24 @@ namespace kcd2mp::npc
 			auto *slot = find(npc);
 			if (!slot || slot->remove_requested)
 				return false;
-			slot->desired_locomotion = value;
-			slot->locomotion_dirty = true;
+			slot->desired_motion.mode = value;
+			slot->desired_motion.velocity = {};
+			slot->motion_dirty = true;
+			return true;
+		}
+
+		[[nodiscard]] bool set_motion(
+		    handle npc,
+		    motion value)
+		{
+			if (!valid_motion(value))
+				return false;
+			std::scoped_lock lock(m_mutex);
+			auto *slot = find(npc);
+			if (!slot || slot->remove_requested)
+				return false;
+			slot->desired_motion = value;
+			slot->motion_dirty = true;
 			return true;
 		}
 
@@ -443,11 +472,22 @@ namespace kcd2mp::npc
 			return true;
 		}
 
+		[[nodiscard]] static bool valid_motion(const motion &value)
+		{
+			return std::ranges::all_of(
+			    value.velocity,
+			    [](float component)
+			    {
+				    return std::isfinite(component);
+			    });
+		}
+
 		[[nodiscard]] static bool valid_request(
 		    const spawn_request &value)
 		{
 			return !value.archetype_id.empty()
 			    && valid_transform(value.world_transform)
+			    && valid_motion({value.movement, value.velocity})
 			    && valid_appearance(value.visual);
 		}
 
@@ -461,10 +501,10 @@ namespace kcd2mp::npc
 			std::string diagnostic;
 			spawn_request request;
 			transform desired_transform;
-			locomotion desired_locomotion{locomotion::idle};
+			motion desired_motion;
 			appearance desired_appearance;
 			bool transform_dirty{};
-			bool locomotion_dirty{};
+			bool motion_dirty{};
 			bool appearance_dirty{};
 			bool remove_requested{};
 			native_handle native{};
@@ -498,10 +538,10 @@ namespace kcd2mp::npc
 			        value.native,
 			        value.desired_transform))
 				return false;
-			if (value.locomotion_dirty
-			    && !m_backend.set_locomotion(
+			if (value.motion_dirty
+			    && !m_backend.set_motion(
 			        value.native,
-			        value.desired_locomotion))
+			        value.desired_motion))
 				return false;
 			if (value.appearance_dirty
 			    && !m_backend.set_appearance(
@@ -509,7 +549,7 @@ namespace kcd2mp::npc
 			        value.desired_appearance))
 				return false;
 			value.transform_dirty = false;
-			value.locomotion_dirty = false;
+			value.motion_dirty = false;
 			value.appearance_dirty = false;
 			return true;
 		}

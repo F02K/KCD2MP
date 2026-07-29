@@ -1029,10 +1029,15 @@ namespace kcd2mp::server
 		if (!message.has_avatar()
 		    || !is_valid_avatar_descriptor(message.avatar()))
 		{
-			reject(
-			    *player.connection,
-			    protocol::REJECT_REASON_CONTENT_MISMATCH,
+			protocol::Envelope rejected;
+			auto *response = rejected.mutable_avatar_rejected();
+			*response->mutable_authoritative_avatar() = player.avatar;
+			response->set_reason(
 			    "avatar descriptor is invalid or disallowed");
+			queue(
+			    *player.connection,
+			    std::move(rejected),
+			    reliability::reliable);
 			return;
 		}
 		if (message.base_revision() != player.avatar.revision())

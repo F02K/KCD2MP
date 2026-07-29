@@ -8,6 +8,7 @@ project(KCD2MP VERSION 0.3.0 LANGUAGES CXX C ASM ASM_MASM)
 
 set(SRC_DIR "${PROJECT_SOURCE_DIR}/src")
 set(KCD2MP_WHGAME_PATH "" CACHE FILEPATH "Path to WHGame.dll for the offline signature audit")
+option(KCD2MP_BUILD_KCSE "Build the bundled libKCD2 KCSE loader and KCD2MP bridge plugin" ON)
 
 # Fetch modules
 message("\nFetching modules")
@@ -19,6 +20,41 @@ include(cmake_scripts/zip.cmake)
 
 find_package(Protobuf CONFIG REQUIRED)
 find_package(GameNetworkingSockets CONFIG REQUIRED)
+
+if(KCD2MP_BUILD_KCSE)
+    find_package(spdlog CONFIG REQUIRED)
+    find_package(boost_container CONFIG REQUIRED)
+
+    get_target_property(
+        KCD2MP_SPDLOG_INCLUDE_DIRECTORIES
+        spdlog::spdlog_header_only
+        INTERFACE_INCLUDE_DIRECTORIES
+    )
+    add_library(KCD2MPSpdlogHeaderOnly INTERFACE)
+    target_include_directories(KCD2MPSpdlogHeaderOnly INTERFACE
+        ${KCD2MP_SPDLOG_INCLUDE_DIRECTORIES}
+    )
+    target_compile_definitions(KCD2MPSpdlogHeaderOnly INTERFACE
+        "FMT_HEADER_ONLY"
+        "SPDLOG_FMT_EXTERNAL"
+        "SPDLOG_HEADER_ONLY"
+    )
+    set(LIBKCD2_SPDLOG_TARGET KCD2MPSpdlogHeaderOnly)
+
+    set(LIBKCD2_BUILD_BUNDLED_PROJECTS OFF CACHE BOOL "" FORCE)
+    add_subdirectory(
+        "${PROJECT_SOURCE_DIR}/libKCD2/.buildenv"
+        "${CMAKE_CURRENT_BINARY_DIR}/libKCD2"
+    )
+    add_subdirectory(
+        "${PROJECT_SOURCE_DIR}/libKCD2/Projects/KCSE/.buildenv"
+        "${CMAKE_CURRENT_BINARY_DIR}/KCSE"
+    )
+    set_target_properties(KCSE PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+        PDB_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/$<CONFIG>"
+    )
+endif()
 
 if (TARGET GameNetworkingSockets::GameNetworkingSockets)
     set(KCD2MP_GNS_TARGET GameNetworkingSockets::GameNetworkingSockets)
@@ -48,6 +84,8 @@ list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]multiplayer[/\\\\]protocol\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]multiplayer[/\\\\]networking\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]server[/\\\\].*")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]npc[/\\\\]catalog\\.cpp$")
+list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]npc[/\\\\]equipment_catalog\\.cpp$")
+list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]kcse[/\\\\]plugin\\.cpp$")
 
 if (NOT TARGET Zydis)
     message(FATAL_ERROR
@@ -80,6 +118,8 @@ endif()
 add_library(KCD2MPNpcCatalog STATIC
     "${SRC_DIR}/npc/catalog.cpp"
     "${SRC_DIR}/npc/catalog.hpp"
+    "${SRC_DIR}/npc/equipment_catalog.cpp"
+    "${SRC_DIR}/npc/equipment_catalog.hpp"
 )
 set_property(TARGET KCD2MPNpcCatalog PROPERTY CXX_STANDARD 23)
 target_include_directories(KCD2MPNpcCatalog PUBLIC
@@ -209,6 +249,36 @@ target_link_libraries(KCD2MP PRIVATE
     crypt32
 )
 
+if(KCD2MP_BUILD_KCSE)
+    add_library(KCD2MPKCSEBridge SHARED
+        "${SRC_DIR}/kcse/plugin.cpp"
+        "${SRC_DIR}/kcse/bridge_api.hpp"
+    )
+    set_property(TARGET KCD2MPKCSEBridge PROPERTY CXX_STANDARD 17)
+    target_precompile_headers(KCD2MPKCSEBridge PRIVATE
+        "${PROJECT_SOURCE_DIR}/libKCD2/.buildenv/PCH.h"
+    )
+    target_include_directories(KCD2MPKCSEBridge PRIVATE
+        "${SRC_DIR}"
+        "${PROJECT_SOURCE_DIR}/libKCD2/include"
+        "${PROJECT_SOURCE_DIR}/libKCD2/include/CryEngine/CryCommon"
+    )
+    target_compile_definitions(KCD2MPKCSEBridge PRIVATE
+        "_ITERATOR_DEBUG_LEVEL=0"
+        "NOMINMAX"
+        "WIN32_LEAN_AND_MEAN"
+    )
+    target_compile_options(KCD2MPKCSEBridge PRIVATE /utf-8 /W4 /wd4100 /wd4819)
+    target_link_libraries(KCD2MPKCSEBridge PRIVATE kcd_re)
+    set_property(TARGET KCD2MPKCSEBridge PROPERTY COMPILE_WARNING_AS_ERROR ON)
+
+    add_custom_target(KCD2MPRuntime
+        DEPENDS KCD2MP KCSE KCD2MPKCSEBridge
+    )
+else()
+    add_custom_target(KCD2MPRuntime DEPENDS KCD2MP)
+endif()
+
 # Warnings as errors
 set_property(TARGET KCD2MP PROPERTY COMPILE_WARNING_AS_ERROR ON)
 
@@ -335,6 +405,14 @@ if (BUILD_TESTING)
     set_property(TARGET KCD2MPNpcTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPNpcTests COMMAND KCD2MPNpcTests)
 
+    add_executable(KCD2MPKCSEBridgeTests
+        "${PROJECT_SOURCE_DIR}/tests/kcse_bridge_tests.cpp"
+    )
+    set_property(TARGET KCD2MPKCSEBridgeTests PROPERTY CXX_STANDARD 23)
+    target_include_directories(KCD2MPKCSEBridgeTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPKCSEBridgeTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPKCSEBridgeTests COMMAND KCD2MPKCSEBridgeTests)
+
     add_executable(KCD2MPNpcCatalogTests
         "${PROJECT_SOURCE_DIR}/tests/npc_catalog_tests.cpp"
     )
@@ -345,6 +423,14 @@ if (BUILD_TESTING)
     )
     set_property(TARGET KCD2MPNpcCatalogTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPNpcCatalogTests COMMAND KCD2MPNpcCatalogTests)
+
+    add_executable(KCD2MPEquipmentCatalogTests
+        "${PROJECT_SOURCE_DIR}/tests/equipment_catalog_tests.cpp"
+    )
+    set_property(TARGET KCD2MPEquipmentCatalogTests PROPERTY CXX_STANDARD 23)
+    target_link_libraries(KCD2MPEquipmentCatalogTests PRIVATE KCD2MPNpcCatalog)
+    set_property(TARGET KCD2MPEquipmentCatalogTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPEquipmentCatalogTests COMMAND KCD2MPEquipmentCatalogTests)
 
     add_executable(KCD2MPAvatarVisualTests
         "${PROJECT_SOURCE_DIR}/tests/avatar_visual_tests.cpp"
@@ -397,7 +483,9 @@ if (BUILD_TESTING)
             KCD2MPEntityControlTests
             KCD2MPRemoteAvatarTests
             KCD2MPNpcTests
+            KCD2MPKCSEBridgeTests
             KCD2MPNpcCatalogTests
+            KCD2MPEquipmentCatalogTests
             KCD2MPAvatarVisualTests
             KCD2MPEngineConsoleQueueTests
             KCD2MPNetworkingTests

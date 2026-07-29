@@ -16,11 +16,11 @@ int main()
 	    protocol::AVATAR_WEAPON_CLASS_ONE_HANDED);
 	local.set_weapon_drawn(true);
 	auto *right = local.add_equipment();
-	right->set_definition_id("item.sword");
-	right->set_equipped_slot("right_hand");
+	right->set_definition_id("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+	right->set_equipped_slot("PrimaryMainHand");
 	auto *body = local.add_equipment();
-	body->set_definition_id("item.gambeson");
-	body->set_equipped_slot("body");
+	body->set_definition_id("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+	body->set_equipped_slot("body_cloth_padded");
 
 	const auto merged = merge_avatar_visual(
 	    authoritative,
@@ -28,8 +28,8 @@ int main()
 	    std::string{"11111111-2222-4333-8444-555555555555"});
 	assert(merged.revision() == 7);
 	assert(merged.equipment_size() == 2);
-	assert(merged.equipment(0).equipped_slot() == "body");
-	assert(merged.equipment(1).equipped_slot() == "right_hand");
+	assert(merged.equipment(0).equipped_slot() == "PrimaryMainHand");
+	assert(merged.equipment(1).equipped_slot() == "body_cloth_padded");
 	assert(merged.weapon_drawn());
 
 	auto reordered = merged;

@@ -27,6 +27,8 @@ namespace kcd2mp
 	{
 	public:
 		virtual ~entity_control_backend() = default;
+		[[nodiscard]] virtual bool should_disable(
+		    controlled_entity entity) const = 0;
 		[[nodiscard]] virtual bool is_active(controlled_entity entity) const = 0;
 		[[nodiscard]] virtual bool is_hidden(controlled_entity entity) const = 0;
 		[[nodiscard]] virtual bool set_active(
@@ -147,7 +149,8 @@ namespace kcd2mp
 		{
 			entity_control_result result;
 			if (!entity || is_player(entity)
-			    || m_original_states.contains(entity))
+			    || m_original_states.contains(entity)
+			    || !m_backend.should_disable(entity))
 			{
 				return result;
 			}

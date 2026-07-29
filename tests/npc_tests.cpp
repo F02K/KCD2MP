@@ -1,4 +1,5 @@
 #include "npc/npc.hpp"
+#include "npc/xgen_lifecycle.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -17,9 +18,7 @@ namespace
 			return {available, available ? "" : "unavailable"};
 		}
 
-		std::optional<native_handle> spawn(
-		    const spawn_request &request,
-		    std::string &error) override
+		std::optional<native_handle> spawn(const spawn_request &request, std::string &error) override
 		{
 			if (!spawn_succeeds)
 			{
@@ -43,9 +42,9 @@ namespace
 			return updates_succeed;
 		}
 
-		bool set_locomotion(native_handle, locomotion value) override
+		bool set_motion(native_handle, const motion &value) override
 		{
-			last_locomotion = value;
+			last_motion = value;
 			++locomotion_updates;
 			return updates_succeed;
 		}
@@ -73,7 +72,7 @@ namespace
 		std::size_t locomotion_updates{};
 		std::size_t appearance_updates{};
 		transform last_transform;
-		locomotion last_locomotion{locomotion::idle};
+		motion last_motion;
 		appearance last_appearance;
 		std::unordered_map<native_handle, spawn_request> entries;
 	};
@@ -84,7 +83,7 @@ namespace
 		value.archetype_id = "human";
 		return value;
 	}
-}
+} // namespace
 
 int main()
 {
@@ -111,6 +110,7 @@ int main()
 	assert(backend.transform_updates == 1);
 	assert(backend.last_transform.position[0] == 1.0F);
 	assert(backend.locomotion_updates == 1);
+	assert(backend.last_motion.mode == locomotion::run);
 
 	assert(npcs.remove(first.npc));
 	assert(npcs.remove(first.npc));
@@ -133,7 +133,7 @@ int main()
 	npcs.tick(start + 15s);
 	assert(npcs.get_status(reused.npc).value == state::removed);
 
-	backend.ready = true;
+	backend.ready             = true;
 	auto externally_destroyed = npcs.spawn(request(), 4, start + 16s);
 	assert(externally_destroyed);
 	npcs.tick(start + 16s);
@@ -141,22 +141,38 @@ int main()
 	const auto native = backend.entries.begin()->first;
 	backend.entries.erase(native);
 	npcs.native_destroyed(native);
-	assert(
-	    npcs.get_status(externally_destroyed.npc).error
-	    == error_code::externally_destroyed);
+	assert(npcs.get_status(externally_destroyed.npc).error == error_code::externally_destroyed);
 	assert(npcs.clear_owner(4) == 1);
 	npcs.tick(start + 17s);
 
 	appearance invalid;
 	invalid.items.push_back({"item.one", "right_hand"});
 	invalid.items.push_back({"item.two", "right_hand"});
-	auto invalid_request = request();
+	auto invalid_request   = request();
 	invalid_request.visual = invalid;
 	assert(!npcs.spawn(invalid_request, 5));
 
-	backend.available = false;
+	backend.available      = false;
 	const auto unavailable = npcs.spawn(request(), 3);
 	assert(!unavailable);
 	assert(unavailable.error == error_code::unavailable);
+
+	auto xgen_request                     = request();
+	xgen_request.archetype_id             = "763db0bb-4469-497d-bdc9-712b3df91b5a";
+	xgen_request.world_transform.position = {1.0F, 2.0F, 3.0F};
+	const auto parameters                 = make_xgen_spawn_parameters(xgen_request, 42);
+	assert(parameters.name == "KCD2MP_Remote_42");
+	assert(parameters.class_name == "NPC");
+	assert(parameters.shared_soul_guid == xgen_request.archetype_id);
+	assert(parameters.position == xgen_request.world_transform.position);
+	assert((parameters.rotation == std::array<float, 3>{}));
+	assert(parameters.no_ai);
+	assert(parameters.idle_until_first_patch);
+	assert(!parameters.perceptor_object_ai);
+	assert(!parameters.perceptible_object_ai);
+	assert(select_lua_spawn_binding(true, true) == lua_spawn_binding::xgen_ai_module);
+	assert(select_lua_spawn_binding(true, false) == lua_spawn_binding::xgen_ai_module);
+	assert(select_lua_spawn_binding(false, true) == lua_spawn_binding::system);
+	assert(select_lua_spawn_binding(false, false) == lua_spawn_binding::unavailable);
 	return 0;
 }

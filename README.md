@@ -4,10 +4,14 @@ KCD2MP is a work-in-progress multiplayer framework for Kingdom Come: Deliverance
 
 The project is forked from [KCD2ModLoader](https://github.com/xiaoxiao921/KCD2ModLoader) and uses
 [ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase) as its modding foundation.
+The repository also vendors the project fork
+[F02K/libKCD2](https://github.com/F02K/libKCD2), including its KCSE runtime.
+KCD2MP keeps the two loaders separate: `d3d12.dll` hosts KCD2MP and
+`dinput8.dll` hosts KCSE plugins.
 
 > Version 0.3 is not release-ready yet. The signature-gated retail bootstrap adopts a natively
-> loaded save on the server-selected level. RPG/inventory application, the audited native
-> remote-human backend, and full in-game acceptance testing remain incomplete. See
+> loaded save on the server-selected level. Full RPG/profile application and the complete
+> two-client in-game acceptance matrix remain incomplete. See
 > [Version 0.3 status](docs/multiplayer-0.2.md).
 
 ## Build tool
@@ -29,9 +33,10 @@ The TUI supports:
 - Automatic Kingdom Come: Deliverance II discovery through Steam
 - A persistent game-directory override
 - Native signature auditing with live output
-- A pinned vcpkg bootstrap for Protobuf and GameNetworkingSockets 1.5.1
-- Building and testing `d3d12.dll`, `KCD2MPServer.exe`, protocol, server core, and networking
-- Deploying `d3d12.dll` and `d3d12.pdb`
+- A pinned vcpkg bootstrap for Protobuf, GameNetworkingSockets 1.5.1, Boost.Container, and spdlog
+- Building and testing `d3d12.dll`, KCSE's `dinput8.dll`, `KCD2MPKCSEBridge.dll`,
+  `KCD2MPServer.exe`, protocol, server core, and networking
+- Deploying both loaders and the KCSE bridge plugin
 
 `Build & Deploy` runs the signature audit against the installed `WHGame.dll` before copying any
 files. The deploy action does not start or stop the game. Close the game before deploying so
@@ -59,8 +64,9 @@ console commands are `status`, `players`, `kick <player_id> [reason]`, `say <tex
 `entities <disable|enable|status>`, `stop`, and `help`. Dummy players use the server's
 default avatar, spawn two metres beside the first live player (or the configured world spawn),
 occupy a normal player slot, and are not persisted.
-`disable_non_player_entities = true` applies the disabled state to every accepted client and
-late joiner. Passwords, identity tokens, and resume tokens
+`disable_non_player_entities = true` applies the disabled state to AI-controlled world entities
+on every accepted client and late joiner. UI/Flash helpers, cameras, particles, equipment, and
+other non-AI entities remain active. Passwords, identity tokens, and resume tokens
 are never written to the log. Recovery claim codes are printed only when explicitly requested.
 
 ## Client
@@ -93,24 +99,36 @@ screen whose lifecycle was already missed. A pre-map invocation was also tested 
 complete the direct-map transition, so normal joins now require a natively loaded save.
 Engine output continues to appear in the diagnostic log.
 
-The server entity-control message runs on the game thread. It records each normal entity's
-active/hidden state, deactivates and hides it, applies the same rule to entities created later,
-and restores the original states on enable or disconnect. The local `Dude` entity and registered
-remote-player avatars are excluded. Activate/Hide VTable targets are included in the offline
-signature audit.
+The server entity-control message runs on the game thread. For entities carrying CryEngine's
+`ENTITY_FLAG_HAS_AI`, it records the active/hidden state, deactivates and hides the entity, applies
+the same rule to entities created later, and restores the original state on enable or disconnect.
+The local `Dude`, registered remote-player avatars, UI/Flash helpers, cameras, particles,
+equipment, and all other non-AI entities are excluded. Activate/Hide VTable targets are included
+in the offline signature audit.
 
-The remote-avatar lifecycle, interpolation adapter, and fail-closed backend contract are present.
-The supported retail image now has audited base EntitySystem spawn/removal entries, but still lacks
-the verified KCD2 Actor/Soul initialization, AI/collision isolation, Idle/Walk/Run, equipment paths,
-and a fixed human template required for the complete capability. If a second player needs an avatar,
-the client therefore disconnects with an explicit diagnostic instead of using console, Lua, clone,
-or invisible-player fallbacks.
+Remote avatars use KCD2's existing Game Lua VM and prefer the
+`XGenAIModule.SpawnEntity` lifecycle. Retail builds that do not export that
+binding use the equivalent `System.SpawnEntity` Actor/Soul fallback. Each client
+creates the other players locally with a real Entity, Soul, Actor, Human, Inventory, and STORM
+appearance while the dedicated server remains authoritative for Soul selection, avatar descriptors,
+and movement. AI, perception, physics, and collision are disabled; interpolated transforms are
+applied through the audited native `CEntity::SetWorldTM` wrapper and movement animation receives the
+real horizontal velocity.
+
+Visible local equipment is sampled at most four times per second. Definition UUIDs and canonical
+slots are replicated, while every rendering client creates its own runtime item instances from its
+active game database. The equipment catalog combines `Data/Tables.pak` with the active mod paks
+reported by `kcd.log` (and manual `mod_order.txt` as a startup fallback). Missing Souls or failed
+appearance lifecycles use the built-in fallback Soul and retry with bounded exponential backoff.
+Individual unavailable mod items are skipped locally and never disconnect the player.
 
 Protocol version 3 adds revisioned avatar descriptors, server archetype allowlists, visible
 equipment/stance fields, a reusable controlled-NPC core, a model selector, and the public Lua
-`npc` API. The protocol, server, and library portions are active; the retail character backend
-remains capability-gated until its native targets can be audited against the supported
-`WHGame.dll`. Archetypes are human Soul UUIDs read from the local `Tables.pak`; the searchable
+`npc` API. A versioned C ABI connects the separately loaded KCD2MP and KCSE DLLs. The retail
+character backend requires KCSE/libKCD2 to resolve every native Entity/Actor/Soul tuple, while the
+audited Game-Lua lifecycle still performs XGen spawning, Human/Inventory operations, and removal.
+It does not use generated Lua strings, console commands, raw EntitySystem spawn, or entity cloning. Archetypes
+are human Soul UUIDs read from the local `Tables.pak`; the searchable
 client catalog and versioned [JSON/Markdown catalog](docs/npc-archetypes.md) use
 `763db0bb-4469-497d-bdc9-712b3df91b5a` (`ksta_additive_man_18`) as the built-in fallback.
 See [Controlled NPC API and avatar protocol](docs/npc-api.md).
@@ -159,14 +177,23 @@ targets, including the console world-loading entry point.
 
 ## Manual installation
 
-Copy the built loader to the directory containing `KingdomCome.exe` and name it `d3d12.dll`.
+Copy `d3d12_.dll` and KCSE's `dinput8.dll` to the directory containing
+`KingdomCome.exe`; rename `d3d12_.dll` to `d3d12.dll`. Copy
+`KCD2MPKCSEBridge.dll` to
+`<game-root>\mods\KCD2MP\KCSE\Plugins\`.
 The default Steam destination is:
 
 ```text
 KingdomComeDeliverance2\Bin\Win64MasterMasterSteamPGO
 ```
 
-To uninstall KCD2MP, remove or rename `d3d12.dll`.
+KCSE additionally requires the address-library file matching the installed game build under
+`<game-root>\KCSE\addresslib\`. The build tool refuses to deploy `dinput8.dll` until a
+`kcd_addresslib_*.bin` file is present there, because KCSE intentionally fails closed when it
+cannot resolve its versioned native addresses.
+
+To uninstall KCD2MP and its KCSE integration, remove or rename `d3d12.dll`, `dinput8.dll`, and
+`mods\KCD2MP\KCSE\Plugins\KCD2MPKCSEBridge.dll`.
 
 ## Existing modding features
 

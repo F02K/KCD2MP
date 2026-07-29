@@ -167,6 +167,63 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual((destination / "d3d12.pdb").read_bytes(), b"pdb")
             self.assertFalse((destination / "d3d12.dll.kcd2mp.tmp").exists())
 
+    def test_deploys_kcse_loader_and_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            result = self._result(artifacts)
+            kcse_loader = artifacts / "dinput8.dll"
+            kcse_loader_pdb = artifacts / "dinput8.pdb"
+            kcse_bridge = artifacts / "KCD2MPKCSEBridge.dll"
+            kcse_bridge_pdb = artifacts / "KCD2MPKCSEBridge.pdb"
+            kcse_loader.write_bytes(b"kcse")
+            kcse_loader_pdb.write_bytes(b"kcse-pdb")
+            kcse_bridge.write_bytes(b"bridge")
+            kcse_bridge_pdb.write_bytes(b"bridge-pdb")
+            result = BuildResult(
+                result.profile,
+                result.build_dir,
+                result.dll_path,
+                result.pdb_path,
+                kcse_loader_path=kcse_loader,
+                kcse_loader_pdb_path=kcse_loader_pdb,
+                kcse_bridge_path=kcse_bridge,
+                kcse_bridge_pdb_path=kcse_bridge_pdb,
+            )
+            game_root = _create_game_root(root / "game")
+            address_library = game_root / "KCSE" / "addresslib"
+            address_library.mkdir(parents=True)
+            (address_library / "kcd_addresslib_steam_test.bin").write_bytes(b"db")
+
+            destination = deploy_artifacts(result, game_root, lambda: False)
+
+            self.assertEqual((destination / "dinput8.dll").read_bytes(), b"kcse")
+            plugin_dir = game_root / "mods" / "KCD2MP" / "KCSE" / "Plugins"
+            self.assertEqual(
+                (plugin_dir / "KCD2MPKCSEBridge.dll").read_bytes(), b"bridge"
+            )
+
+    def test_kcse_deploy_requires_address_library(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            result = self._result(artifacts)
+            kcse_loader = artifacts / "dinput8.dll"
+            kcse_loader.write_bytes(b"kcse")
+            result = BuildResult(
+                result.profile,
+                result.build_dir,
+                result.dll_path,
+                result.pdb_path,
+                kcse_loader_path=kcse_loader,
+            )
+            game_root = _create_game_root(root / "game")
+
+            with self.assertRaisesRegex(BuildToolError, "address library"):
+                deploy_artifacts(result, game_root, lambda: False)
+
     def test_rejects_missing_game_executable(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -58,6 +58,9 @@ namespace kcd2mp
 	    std::size_t maximum);
 	[[nodiscard]] bool is_valid_display_name(std::string_view value);
 	[[nodiscard]] bool is_valid_chat(std::string_view value);
+	[[nodiscard]] bool is_uuid(std::string_view value);
+	[[nodiscard]] bool is_valid_avatar_equipment_slot(
+	    std::string_view value);
 	[[nodiscard]] bool is_valid_profile(const protocol::PlayerProfile &profile);
 	[[nodiscard]] bool is_valid_avatar_descriptor(
 	    const protocol::AvatarDescriptor &avatar);

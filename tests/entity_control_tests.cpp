@@ -11,11 +11,18 @@ namespace
 		bool active{};
 		bool hidden{};
 		bool writable{true};
+		bool eligible{true};
 	};
 
 	class fake_backend final : public kcd2mp::entity_control_backend
 	{
 	public:
+		bool should_disable(
+		    kcd2mp::controlled_entity entity) const override
+		{
+			return static_cast<fake_entity *>(entity)->eligible;
+		}
+
 		bool is_active(kcd2mp::controlled_entity entity) const override
 		{
 			return static_cast<fake_entity *>(entity)->active;
@@ -64,12 +71,14 @@ int main()
 	fake_entity active_visible{true, false};
 	fake_entity inactive_hidden{false, true};
 	fake_entity destroyed_while_disabled{true, false};
+	fake_entity ui_helper{true, false, true, false};
 	std::vector<controlled_entity> entities{
 	    &local_player,
 	    &remote_player,
 	    &active_visible,
 	    &inactive_hidden,
-	    &destroyed_while_disabled};
+	    &destroyed_while_disabled,
+	    &ui_helper};
 
 	assert(controller.register_player(&local_player).failed == 0);
 	assert(controller.register_player(&remote_player).failed == 0);
@@ -80,6 +89,7 @@ int main()
 	assert(remote_player.active && !remote_player.hidden);
 	assert(!active_visible.active && active_visible.hidden);
 	assert(!inactive_hidden.active && inactive_hidden.hidden);
+	assert(ui_helper.active && !ui_helper.hidden);
 
 	fake_entity spawned{true, false};
 	assert(controller.entity_created(&spawned).affected == 1);
@@ -93,6 +103,7 @@ int main()
 	assert(enabled.restored == 2);
 	assert(active_visible.active && !active_visible.hidden);
 	assert(!inactive_hidden.active && inactive_hidden.hidden);
+	assert(ui_helper.active && !ui_helper.hidden);
 	assert(!controller.disabled());
 
 	fake_entity unwritable{true, false, false};

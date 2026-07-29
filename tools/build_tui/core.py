@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 APP_ID = "1771300"
 GAME_BIN_RELATIVE = Path("Bin") / "Win64MasterMasterSteamPGO"
 GAME_EXECUTABLE = "KingdomCome.exe"
-PROJECT_TARGET = "KCD2MP"
+PROJECT_TARGET = "KCD2MPRuntime"
 SERVER_TARGET = "KCD2MPServer"
 AUDIT_TARGET = "KCD2MPSignatureAudit"
 TEST_TARGETS = ("KCD2MPTests",)
@@ -61,6 +61,10 @@ class BuildResult:
     pdb_path: Path
     audit_path: Optional[Path] = None
     server_path: Optional[Path] = None
+    kcse_loader_path: Optional[Path] = None
+    kcse_loader_pdb_path: Optional[Path] = None
+    kcse_bridge_path: Optional[Path] = None
+    kcse_bridge_pdb_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -512,6 +516,10 @@ class BuildService:
             pdb_path=artifact_dir / "d3d12_.pdb",
             audit_path=artifact_dir / "{}.exe".format(AUDIT_TARGET),
             server_path=artifact_dir / "{}.exe".format(SERVER_TARGET),
+            kcse_loader_path=artifact_dir / "dinput8.dll",
+            kcse_loader_pdb_path=artifact_dir / "dinput8.pdb",
+            kcse_bridge_path=artifact_dir / "KCD2MPKCSEBridge.dll",
+            kcse_bridge_pdb_path=artifact_dir / "KCD2MPKCSEBridge.pdb",
         )
         missing = [
             str(path)
@@ -520,6 +528,10 @@ class BuildService:
                 result.pdb_path,
                 result.audit_path,
                 result.server_path,
+                result.kcse_loader_path,
+                result.kcse_loader_pdb_path,
+                result.kcse_bridge_path,
+                result.kcse_bridge_pdb_path,
             )
             if path is not None and not path.is_file()
         ]
@@ -839,18 +851,52 @@ def deploy_artifacts(
     if not executable.is_file():
         raise BuildToolError("Deployment target does not contain {}: {}".format(GAME_EXECUTABLE, destination))
 
-    missing = [str(path) for path in (result.dll_path, result.pdb_path) if not path.is_file()]
+    artifacts = [
+        result.dll_path,
+        result.pdb_path,
+        result.kcse_loader_path,
+        result.kcse_loader_pdb_path,
+        result.kcse_bridge_path,
+        result.kcse_bridge_pdb_path,
+    ]
+    missing = [str(path) for path in artifacts if path is not None and not path.is_file()]
     if missing:
         raise BuildToolError("Cannot deploy missing build artifacts:\n{}".format("\n".join(missing)))
     if process_checker():
         raise BuildToolError(
             "{} is running. Close the game before deploying.".format(GAME_EXECUTABLE)
         )
+    if result.kcse_loader_path is not None:
+        address_library = normalized_root / "KCSE" / "addresslib"
+        if not address_library.is_dir() or not any(
+            address_library.glob("kcd_addresslib_*.bin")
+        ):
+            raise BuildToolError(
+                "KCSE requires an address library before dinput8.dll can be deployed. "
+                "Place the matching kcd_addresslib_*.bin in {}.".format(
+                    address_library
+                )
+            )
 
     targets = [
         (result.pdb_path, destination / "d3d12.pdb"),
         (result.dll_path, destination / "d3d12.dll"),
     ]
+    if result.kcse_loader_path is not None:
+        targets.append((result.kcse_loader_path, destination / "dinput8.dll"))
+    if result.kcse_loader_pdb_path is not None:
+        targets.append((result.kcse_loader_pdb_path, destination / "dinput8.pdb"))
+    plugin_destination = normalized_root / "mods" / "KCD2MP" / "KCSE" / "Plugins"
+    if result.kcse_bridge_path is not None or result.kcse_bridge_pdb_path is not None:
+        plugin_destination.mkdir(parents=True, exist_ok=True)
+    if result.kcse_bridge_path is not None:
+        targets.append(
+            (result.kcse_bridge_path, plugin_destination / "KCD2MPKCSEBridge.dll")
+        )
+    if result.kcse_bridge_pdb_path is not None:
+        targets.append(
+            (result.kcse_bridge_pdb_path, plugin_destination / "KCD2MPKCSEBridge.pdb")
+        )
     temporary_paths: List[Path] = []
     try:
         for source, target in targets:
@@ -861,7 +907,8 @@ def deploy_artifacts(
             os.replace(temporary, target)
     except PermissionError as exc:
         raise BuildToolError(
-            "Windows refused to replace d3d12.dll. Close the game and any debugger, then retry."
+            "Windows refused to replace a KCD2MP/KCSE runtime file. "
+            "Close the game and any debugger, then retry."
         ) from exc
     except OSError as exc:
         raise BuildToolError("Deployment failed: {}".format(exc)) from exc

@@ -9,7 +9,9 @@
       "default-features": false,
       "version>=": "1.5.1"
     },
-    "protobuf"
+    "protobuf",
+    "boost-container",
+    "spdlog"
   ],
   "overrides": [
     {

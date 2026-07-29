@@ -1,6 +1,8 @@
 #include "multiplayer/remote_avatar.hpp"
 
+#include <array>
 #include <cassert>
+#include <chrono>
 #include <unordered_map>
 #include <vector>
 
@@ -22,9 +24,35 @@ namespace
 		std::optional<kcd2mp::remote_avatar_handle> spawn(
 		    const kcd2mp::remote_avatar_snapshot &player) override
 		{
+			++spawn_attempts;
+			if ((!desired_spawns_succeed
+			        && player.avatar.archetype_id()
+			            != kcd2mp::npc::default_soul_id)
+			    || (!fallback_spawns_succeed
+			        && player.avatar.archetype_id()
+			            == kcd2mp::npc::default_soul_id))
+			{
+				return std::nullopt;
+			}
 			const auto handle = next_handle++;
 			players[handle] = player;
+			states[handle] = spawned_state;
 			return handle;
+		}
+
+		kcd2mp::remote_avatar_backend_status status(
+		    kcd2mp::remote_avatar_handle avatar) const override
+		{
+			const auto found = states.find(avatar);
+			return found == states.end()
+			    ? kcd2mp::remote_avatar_backend_status{
+			          kcd2mp::remote_avatar_state::failed,
+			          "avatar is missing"}
+			    : kcd2mp::remote_avatar_backend_status{
+			          found->second,
+			          found->second == kcd2mp::remote_avatar_state::failed
+			              ? "injected failure"
+			              : ""};
 		}
 
 		bool update(
@@ -41,18 +69,28 @@ namespace
 		void remove(kcd2mp::remote_avatar_handle avatar) override
 		{
 			players.erase(avatar);
+			states.erase(avatar);
 			++removed;
 		}
 
 		bool enabled{true};
+		bool desired_spawns_succeed{true};
+		bool fallback_spawns_succeed{true};
 		bool updates_succeed{true};
+		kcd2mp::remote_avatar_state spawned_state{
+		    kcd2mp::remote_avatar_state::ready};
 		kcd2mp::remote_avatar_handle next_handle{1};
 		std::size_t removed{};
+		std::size_t spawn_attempts{};
 		std::size_t appearance_updates{};
 		std::unordered_map<
 		    kcd2mp::remote_avatar_handle,
 		    kcd2mp::remote_avatar_snapshot>
 		    players;
+		std::unordered_map<
+		    kcd2mp::remote_avatar_handle,
+		    kcd2mp::remote_avatar_state>
+		    states;
 	};
 
 	kcd2mp::remote_avatar_snapshot player(
@@ -123,5 +161,99 @@ int main()
 	assert(!result.success);
 	assert(result.error == "avatar backend unavailable");
 	assert(manager.size() == 0);
+
+	using namespace std::chrono_literals;
+	fake_backend fallback_backend;
+	fallback_backend.desired_spawns_succeed = false;
+	remote_avatar_manager fallback_manager(fallback_backend);
+	auto fallback_players = std::vector{
+	    player(3, 30.0F, protocol::MOVEMENT_MODE_IDLE)};
+	fallback_players[0].avatar.set_archetype_id(
+	    "11111111-2222-4333-8444-555555555555");
+	const auto start = remote_avatar_manager::clock::now();
+	result = fallback_manager.sync(fallback_players, start);
+	assert(result.success);
+	assert(result.degraded);
+	assert(fallback_manager.size() == 1);
+	assert(fallback_backend.players.begin()->second.avatar.archetype_id()
+	    == npc::default_soul_id);
+
+	fallback_backend.desired_spawns_succeed = true;
+	fallback_backend.spawned_state = remote_avatar_state::pending;
+	result = fallback_manager.sync(fallback_players, start + 500ms);
+	assert(result.success);
+	assert(fallback_backend.players.size() == 1);
+	result = fallback_manager.sync(fallback_players, start + 1s);
+	assert(result.success);
+	assert(fallback_backend.players.size() == 2);
+	for (auto &[handle, state] : fallback_backend.states)
+	{
+		if (fallback_backend.players.at(handle).avatar.archetype_id()
+		    == fallback_players[0].avatar.archetype_id())
+			state = remote_avatar_state::ready;
+	}
+	result = fallback_manager.sync(fallback_players, start + 1100ms);
+	assert(result.success);
+	assert(fallback_backend.players.size() == 1);
+	assert(fallback_backend.players.begin()->second.avatar.archetype_id()
+	    == fallback_players[0].avatar.archetype_id());
+
+	const auto fallback_handle = fallback_backend.players.begin()->first;
+	fallback_backend.states[fallback_handle] =
+	    remote_avatar_state::failed;
+	result = fallback_manager.sync(fallback_players, start + 2s);
+	assert(result.success);
+	assert(result.degraded);
+	for (auto &[handle, state] : fallback_backend.states)
+	{
+		if (fallback_backend.players.at(handle).avatar.archetype_id()
+		    == npc::default_soul_id)
+			state = remote_avatar_state::failed;
+	}
+	result = fallback_manager.sync(fallback_players, start + 2500ms);
+	assert(!result.success);
+	assert(result.error.contains("fallback Soul"));
+	assert(result.error.contains("player 3"));
+
+	fake_backend backoff_backend;
+	backoff_backend.desired_spawns_succeed = false;
+	remote_avatar_manager backoff_manager(backoff_backend);
+	auto backoff_players = std::vector{
+	    player(4, 40.0F, protocol::MOVEMENT_MODE_IDLE)};
+	backoff_players[0].avatar.set_archetype_id(
+	    "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee");
+	const auto backoff_start = remote_avatar_manager::clock::now();
+	result = backoff_manager.sync(backoff_players, backoff_start);
+	assert(result.success);
+	assert(backoff_backend.spawn_attempts == 2);
+	for (const auto [elapsed, expected_attempts] :
+	     std::array{
+	         std::pair{500ms, std::size_t{2}},
+	         std::pair{1000ms, std::size_t{3}},
+	         std::pair{2000ms, std::size_t{3}},
+	         std::pair{3000ms, std::size_t{4}},
+	         std::pair{7000ms, std::size_t{5}},
+	         std::pair{15000ms, std::size_t{6}},
+	         std::pair{31000ms, std::size_t{7}},
+	         std::pair{61000ms, std::size_t{8}}})
+	{
+		result = backoff_manager.sync(
+		    backoff_players,
+		    backoff_start + elapsed);
+		assert(result.success);
+		assert(backoff_backend.spawn_attempts == expected_attempts);
+	}
+
+	fake_backend default_failure_backend;
+	default_failure_backend.fallback_spawns_succeed = false;
+	remote_avatar_manager default_failure_manager(
+	    default_failure_backend);
+	auto default_failure_players = std::vector{
+	    player(5, 50.0F, protocol::MOVEMENT_MODE_IDLE)};
+	result = default_failure_manager.sync(default_failure_players);
+	assert(!result.success);
+	assert(result.error.contains("default Soul"));
+	assert(default_failure_backend.spawn_attempts == 1);
+	assert(default_failure_manager.size() == 0);
 	return 0;
 }

@@ -1,0 +1,27 @@
+#include <IIndexedMesh.h> // <> required for Interfuscator
+
+STRUCT_INFO_BEGIN(SMeshTexCoord)
+	STRUCT_VAR_INFO(s, TYPE_INFO(float))
+	STRUCT_VAR_INFO(t, TYPE_INFO(float))
+STRUCT_INFO_END(SMeshTexCoord)
+
+STRUCT_INFO_BEGIN(SMeshColor)
+	STRUCT_VAR_INFO(r, TYPE_INFO(uint8))
+	STRUCT_VAR_INFO(g, TYPE_INFO(uint8))
+	STRUCT_VAR_INFO(b, TYPE_INFO(uint8))
+	STRUCT_VAR_INFO(a, TYPE_INFO(uint8))
+STRUCT_INFO_END(SMeshColor)
+
+STRUCT_INFO_BEGIN(SMeshTangents)
+	STRUCT_VAR_INFO(Tangent, TYPE_INFO(Vec4sf))
+	STRUCT_VAR_INFO(Binormal, TYPE_INFO(Vec4sf))
+STRUCT_INFO_END(SMeshTangents)
+
+STRUCT_INFO_BEGIN(SMeshQTangents)
+	STRUCT_VAR_INFO(TangentBinormal, TYPE_INFO(Vec4sf))
+STRUCT_INFO_END(SMeshQTangents)
+
+STRUCT_INFO_BEGIN(SMeshBoneMapping)
+	STRUCT_VAR_INFO(boneIDs, TYPE_INFO(ColorB))
+	STRUCT_VAR_INFO(weights, TYPE_INFO(ColorB))
+STRUCT_INFO_END(SMeshBoneMapping)

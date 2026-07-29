@@ -5,6 +5,7 @@
 #include "hooks/hooking.hpp"
 #include "input/hotkey.hpp"
 #include "kcd2_init.hpp"
+#include "kcse/bridge_client.hpp"
 #include "logger/exception_handler.hpp"
 #include "memory/byte_patch_manager.hpp"
 #include "memory/module.hpp"
@@ -148,6 +149,21 @@ namespace
 		hotkey::init_hotkeys();
 		g_hooking->enable();
 		LOG(INFO) << "Hooks enabled.";
+
+		const auto kcse_status = kcd2mp::kcse::current_bridge_status();
+		if (kcse_status.available)
+		{
+			LOGF(
+			    INFO,
+			    "KCSE/libKCD2 bridge detected (KCSE v{}, game version 0x{:08X}).",
+			    kcse_status.kcse_version,
+			    kcse_status.game_version);
+		}
+		else
+		{
+			LOG(INFO) << kcse_status.diagnostic
+			          << "; KCD2MP will retry when the NPC API is used.";
+		}
 
 		asi_loader::init(module);
 		g_running = true;

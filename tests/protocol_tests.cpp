@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <format>
 #include <limits>
 #include <string>
 #include <vector>
@@ -114,8 +115,9 @@ int main()
 	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
 	avatar->set_revision(1);
 	auto *visible_item = avatar->add_equipment();
-	visible_item->set_definition_id("item.sword");
-	visible_item->set_equipped_slot("right_hand");
+	visible_item->set_definition_id(
+	    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+	visible_item->set_equipped_slot("PrimaryMainHand");
 	auto *skill = profile->add_skills();
 	skill->set_id("sword");
 	skill->set_level(5);
@@ -147,8 +149,32 @@ int main()
 
 	auto duplicate_slot = *avatar;
 	*duplicate_slot.add_equipment() = duplicate_slot.equipment(0);
-	duplicate_slot.mutable_equipment(1)->set_definition_id("item.shield");
+	duplicate_slot.mutable_equipment(1)->set_definition_id(
+	    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
 	assert(!is_valid_avatar_descriptor(duplicate_slot));
+	auto invalid_uuid = *avatar;
+	invalid_uuid.mutable_equipment(0)->set_definition_id("runtime-item-42");
+	assert(!is_valid_avatar_descriptor(invalid_uuid));
+	auto invalid_slot = *avatar;
+	invalid_slot.mutable_equipment(0)->set_equipped_slot("horse_body");
+	assert(!is_valid_avatar_descriptor(invalid_slot));
+	auto invalid_weapon_state = *avatar;
+	invalid_weapon_state.set_weapon_class(
+	    protocol::AVATAR_WEAPON_CLASS_NONE);
+	invalid_weapon_state.set_weapon_drawn(true);
+	assert(!is_valid_avatar_descriptor(invalid_weapon_state));
+	auto oversized_avatar = *avatar;
+	for (std::size_t index = oversized_avatar.equipment_size();
+	     index <= max_avatar_equipment_items;
+	     ++index)
+	{
+		auto *extra = oversized_avatar.add_equipment();
+		extra->set_definition_id(std::format(
+		    "aaaaaaaa-aaaa-4aaa-8aaa-{:012x}",
+		    index));
+		extra->set_equipped_slot("body_plate");
+	}
+	assert(!is_valid_avatar_descriptor(oversized_avatar));
 
 	protocol::AvatarPolicy policy;
 	policy.set_default_archetype_id(

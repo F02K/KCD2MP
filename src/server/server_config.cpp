@@ -196,6 +196,8 @@ namespace kcd2mp::server
 		}
 		if (seen.insert(config.default_avatar_archetype).second)
 			normalized.push_back(config.default_avatar_archetype);
+		if (seen.insert(std::string(npc::default_soul_id)).second)
+			normalized.emplace_back(npc::default_soul_id);
 		config.allowed_avatar_archetypes = std::move(normalized);
 	}
 

@@ -328,7 +328,10 @@ class BuildApp(App[None]):
                 write_log("=== Auditing installed WHGame.dll before deployment ===")
                 self.service.audit(profile, game_root, write_log, result)
                 destination = deploy_artifacts(result, game_root)
-                write_log("Deployed d3d12.dll and d3d12.pdb to {}".format(destination))
+                write_log(
+                    "Deployed d3d12, dinput8/KCSE, and the KCD2MP KCSE bridge to "
+                    "{}".format(destination)
+                )
                 message = "{} build deployed successfully.".format(profile.label)
             else:
                 message = "{} build completed successfully.".format(profile.label)

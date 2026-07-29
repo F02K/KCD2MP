@@ -1,0 +1,61 @@
+{
+    "version": 6,
+    "configurePresets": [
+        {
+            "name": "default",
+            "displayName": "KCD RE (Debug: no optimization, loadable)",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build",
+            "environment": {
+                "VSLANG": "1033"
+            },
+            "toolset": {
+                "value": "host=x64",
+                "strategy": "external"
+            },
+            "architecture": {
+                "value": "x64",
+                "strategy": "external"
+            },
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "/Od /Ob0 /Zi /DNDEBUG",
+                "CMAKE_CXX_COMPILER": "cl.exe",
+                "CMAKE_MAKE_PROGRAM": "C:/Program Files/Microsoft Visual Studio/18/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe"
+            }
+        },
+        {
+            "name": "layout",
+            "displayName": "KCD RE (Class Layout Dump)",
+            "inherits": "default",
+            "binaryDir": "${sourceDir}/build-layout",
+            "cacheVariables": {
+                "CLASS_LAYOUT": "ALL"
+            }
+        },
+        {
+            "name": "release",
+            "displayName": "KCD RE (Release / RelWithDebInfo, optimized)",
+            "inherits": "default",
+            "binaryDir": "${sourceDir}/build-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "/O2 /Ob2 /Zi /DNDEBUG"
+            }
+        }
+    ],
+    "buildPresets": [
+        {
+            "name": "default",
+            "configurePreset": "default"
+        },
+        {
+            "name": "layout",
+            "configurePreset": "layout"
+        },
+        {
+            "name": "release",
+            "configurePreset": "release"
+        }
+    ]
+}
