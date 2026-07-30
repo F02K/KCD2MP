@@ -5,11 +5,10 @@
 #include "hooks/hooking.hpp"
 #include "input/hotkey.hpp"
 #include "kcd2_init.hpp"
-#include "kcse/bridge_client.hpp"
+#include "kcse/client_proxy.hpp"
 #include "logger/exception_handler.hpp"
 #include "memory/byte_patch_manager.hpp"
 #include "memory/module.hpp"
-#include "multiplayer/client.hpp"
 #include "paths/paths.hpp"
 #include "threads/thread_pool.hpp"
 #include "version.hpp"
@@ -141,28 +140,23 @@ namespace
 		new renderer();
 		LOG(INFO) << "Renderer initialized.";
 
-		// The D3D12 proxy remains loaded for the process lifetime. Keep the network
-		// thread out of CRT static destruction under the Windows loader lock.
-		kcd2mp::g_multiplayer_client = new kcd2mp::multiplayer_client();
-		LOG(INFO) << "Multiplayer client initialized.";
-
 		hotkey::init_hotkeys();
 		g_hooking->enable();
 		LOG(INFO) << "Hooks enabled.";
 
-		const auto kcse_status = kcd2mp::kcse::current_bridge_status();
-		if (kcse_status.available)
+		const auto kcse_status =
+		    kcd2mp::kcse::ui_client().runtime_capability();
+		if (kcd2mp::kcse::ui_client().available())
 		{
-			LOGF(
-			    INFO,
-			    "KCSE/libKCD2 bridge detected (KCSE v{}, game version 0x{:08X}).",
-			    kcse_status.kcse_version,
-			    kcse_status.game_version);
+			LOG(INFO) << "KCSE-owned multiplayer client detected.";
+			if (!kcse_status.available)
+				LOG(INFO) << kcse_status.diagnostic;
 		}
 		else
 		{
-			LOG(INFO) << kcse_status.diagnostic
-			          << "; KCD2MP will retry when the NPC API is used.";
+			LOG(INFO)
+			    << "KCD2MPKCSEClient.dll is not loaded; the UI remains "
+			       "available but in-game multiplayer is disabled.";
 		}
 
 		asi_loader::init(module);

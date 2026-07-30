@@ -580,6 +580,22 @@ namespace kcd2mp::server
 			    "unsupported WHGame build");
 			return;
 		}
+		if (!hello.has_runtime()
+		    || (hello.runtime().features()
+		            & required_client_runtime_capabilities)
+		        != required_client_runtime_capabilities
+		    || hello.runtime().kcse_version() == 0
+		    || hello.runtime().game_version()
+		        != supported_kcse_game_version
+		    || hello.runtime().release_index()
+		        != supported_kcse_release_index
+		    || hello.runtime().address_library().empty())
+		{
+			reject_hello(
+			    protocol::REJECT_REASON_GAME_BUILD_MISMATCH,
+			    "KCSE/libKCD2 runtime capabilities are incomplete");
+			return;
+		}
 		if (hello.password() != m_config.password)
 		{
 			reject_hello(
@@ -692,11 +708,11 @@ namespace kcd2mp::server
 				    "an identity token is required for this player profile");
 				return;
 			}
-			protocol::PlayerProfile created;
-			created.set_player_id(m_store.allocate_player_id());
-			created.set_revision(1);
-			created.set_display_name(pending.display_name);
-			created.set_level_id(m_store.manifest().level_id);
+			protocol::PlayerProfile created = instantiate_starter_profile(
+			    m_config.starter_profile,
+			    m_store.allocate_player_id(),
+			    pending.display_name,
+			    m_store.manifest().level_id);
 			apply_default_avatar(created);
 			if (m_store.manifest().spawn_valid)
 			{
@@ -811,8 +827,13 @@ namespace kcd2mp::server
 			    "client loaded a stale or different sandbox session");
 			return;
 		}
+		auto candidate_profile = pending.persisted->profile;
+		if (message.has_avatar())
+			*candidate_profile.mutable_avatar() = message.avatar();
 		if (!message.has_avatar()
-		    || !is_valid_avatar_descriptor(message.avatar()))
+		    || !is_valid_avatar_descriptor(message.avatar())
+		    || !is_valid_profile(candidate_profile)
+		    || !avatar_allowed(message.avatar()))
 		{
 			reject(
 			    connection,
@@ -1026,8 +1047,12 @@ namespace kcd2mp::server
 		}
 		player.avatar_update_times.push_back(now);
 
+		auto candidate_profile = player.profile;
+		if (message.has_avatar())
+			*candidate_profile.mutable_avatar() = message.avatar();
 		if (!message.has_avatar()
-		    || !is_valid_avatar_descriptor(message.avatar()))
+		    || !is_valid_avatar_descriptor(message.avatar())
+		    || !is_valid_profile(candidate_profile))
 		{
 			protocol::Envelope rejected;
 			auto *response = rejected.mutable_avatar_rejected();
@@ -1220,6 +1245,14 @@ namespace kcd2mp::server
 		avatar->set_stance(protocol::AVATAR_STANCE_RELAXED);
 		avatar->set_weapon_class(protocol::AVATAR_WEAPON_CLASS_NONE);
 		avatar->set_weapon_drawn(false);
+		for (const auto &item : profile.inventory())
+		{
+			if (!item.has_equipped_slot())
+				continue;
+			auto *visible = avatar->add_equipment();
+			visible->set_definition_id(item.definition_id());
+			visible->set_equipped_slot(item.equipped_slot());
+		}
 	}
 
 	bool server_core::avatar_allowed(

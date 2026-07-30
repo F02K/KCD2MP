@@ -9,15 +9,23 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class SignatureArchitectureTests(unittest.TestCase):
-    def test_registry_is_the_single_source_for_67_signatures(self) -> None:
+    def test_every_configuration_builds_the_active_kcse_client(self) -> None:
+        cmake = (PROJECT_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        self.assertFalse((PROJECT_ROOT / "src" / "kcse" / "plugin_stub.cpp").exists())
+        self.assertNotIn("<CONFIG:Debug>:${SRC_DIR}/kcse/plugin_stub.cpp", cmake)
+        self.assertIn('"${SRC_DIR}/kcse/plugin.cpp"', cmake)
+        self.assertIn('set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")', cmake)
+        self.assertIn("set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)", cmake)
+
+    def test_registry_is_the_single_source_for_65_signatures(self) -> None:
         core = (
             PROJECT_ROOT / "src" / "signatures" / "signature_core.cpp"
         ).read_text(encoding="utf-8")
         init = (PROJECT_ROOT / "src" / "kcd2_init.cpp").read_text(encoding="utf-8")
         entries = re.findall(r'signature_spec\{"([^"]+)",\s*"([^"]+)"', core)
 
-        self.assertEqual(len(entries), 67)
-        self.assertEqual(len({name for name, _ in entries}), 67)
+        self.assertEqual(len(entries), 65)
+        self.assertEqual(len({name for name, _ in entries}), 65)
         self.assertIn("static_assert(signature_registry.size()", core)
         self.assertNotIn("kcd2_address::scan(", init)
         self.assertNotIn(".get_call()", init)
@@ -42,6 +50,10 @@ class SignatureArchitectureTests(unittest.TestCase):
         self.assertIn('"CEntitySystem::SpawnEntity"', core)
         self.assertIn('"CEntitySystem::RemoveEntity"', core)
         self.assertIn('"CEntitySystem::GetEntityIterator"', core)
+        self.assertIn('"IEntitySystem::AddSink ABI"', core)
+        self.assertIn('"CCryAction::EndGameContext ABI"', core)
+        self.assertIn('"CEntity::ResolvePhysicsProxy ABI"', core)
+        self.assertIn('"C_SoulList::ApplySharedSoul ABI"', core)
         self.assertIn('"CEntitySystem::GetEntityLayerData"', core)
         self.assertIn('"gEnv pConsole pointer"', core)
         self.assertIn('resolved("gEnv pConsole pointer")', init)

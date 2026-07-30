@@ -4,8 +4,6 @@
 #include "hooks/hooking.hpp"
 #include "kcd2_address.hpp"
 #include "memory/gm_address.hpp"
-#include "multiplayer/client.hpp"
-#include "multiplayer/game_bridge.hpp"
 
 #include <config/config.hpp>
 #include <gui/gui.hpp>
@@ -30,7 +28,6 @@ namespace big
 	static lua_State *g_early_main_lua_state = nullptr;
 
 	extern void render_imgui_frame();
-	static void ensure_multiplayer_console_commands();
 	static void execute_queued_engine_console_commands();
 
 	static bool lua_init_once = true;
@@ -42,9 +39,7 @@ namespace big
 		std::scoped_lock l2(g_lua_manager->m_module_lock);
 
 		const auto res = big::g_hooking->get_original<hook_CScriptSystem_Update>()(a1);
-		ensure_multiplayer_console_commands();
 		execute_queued_engine_console_commands();
-		kcd2mp::game::game_thread_tick();
 
 		if (g_lua_execute_buffer_queue.size())
 		{
@@ -929,8 +924,6 @@ namespace big
 	static __int64 g_CXConsole = 0;
 	static uintptr_t *g_CXConsole_pointer = nullptr;
 	static void **g_expected_CXConsole_vtable = nullptr;
-	static bool g_multiplayer_console_commands_registered = false;
-	static void register_multiplayer_console_commands(__int64 console);
 
 	static cry_cvar *find_engine_cvar(std::string_view name)
 	{
@@ -1101,9 +1094,6 @@ namespace big
 	}
 
 	static engine_console_command_queue g_engine_console_commands;
-	using new_game_helper_start = void(__fastcall *)(void *);
-	static new_game_helper_start g_new_game_helper_start = nullptr;
-	static uintptr_t *g_c_game_instance_pointer = nullptr;
 
 	engine_console_submit_status queue_engine_console_command(
 	    std::string command)
@@ -1124,182 +1114,6 @@ namespace big
 				    "Queued local engine-console command could not be executed: '{}'.",
 				    command);
 			}
-		}
-	}
-
-	bool retail_new_game_start_available()
-	{
-		return g_new_game_helper_start && g_c_game_instance_pointer;
-	}
-
-	bool retail_new_game_start()
-	{
-		if (!retail_new_game_start_available())
-		{
-			LOG(ERROR) << "Retail C_NewGameHelper::Start wrapper is unavailable.";
-			return false;
-		}
-		if (IsBadReadPtr(g_c_game_instance_pointer, sizeof(*g_c_game_instance_pointer)))
-		{
-			LOG(ERROR) << "Retail C_Game instance pointer is unreadable.";
-			return false;
-		}
-
-		const auto game = *g_c_game_instance_pointer;
-		if (!game || IsBadReadPtr(reinterpret_cast<const void *>(game + 0xB8), sizeof(void *)))
-		{
-			LOG(ERROR) << "Retail C_Game instance is unavailable.";
-			return false;
-		}
-		auto *helper = *reinterpret_cast<void **>(game + 0xB8);
-		if (!helper || IsBadReadPtr(helper, sizeof(void *)))
-		{
-			LOG(ERROR) << "Retail C_NewGameHelper instance is unavailable.";
-			return false;
-		}
-		auto **vtable = *reinterpret_cast<void ***>(helper);
-		if (!vtable
-		    || IsBadReadPtr(vtable, sizeof(void *) * 2)
-		    || vtable[1] != reinterpret_cast<void *>(g_new_game_helper_start))
-		{
-			LOG(ERROR) << "Retail C_NewGameHelper VTable validation failed.";
-			return false;
-		}
-
-		LOG(INFO) << "Invoking the audited retail C_NewGameHelper::Start path.";
-		g_new_game_helper_start(helper);
-		return true;
-	}
-
-	struct console_command_args
-	{
-		virtual ~console_command_args() = default;
-		virtual int GetArgCount() const = 0;
-		virtual const char *GetArg(int index) const = 0;
-		virtual const char *GetCommandLine() const = 0;
-	};
-
-	static void mp_connect_command(console_command_args *args)
-	{
-		if (!kcd2mp::g_multiplayer_client || !args || args->GetArgCount() < 2)
-		{
-			LOG(INFO) << "Usage: mp_connect <host:port> [name]";
-			return;
-		}
-		kcd2mp::client_options options;
-		options.address = args->GetArg(1);
-		options.display_name =
-		    args->GetArgCount() >= 3 ? args->GetArg(2) : "Henry";
-		const auto sandbox = kcd2mp::game::sandbox_capability();
-		if (!sandbox.available)
-		{
-			LOG(WARNING) << "mp_connect blocked: " << sandbox.diagnostic;
-			return;
-		}
-		if (!kcd2mp::game::can_start_join())
-		{
-			LOG(WARNING)
-			    << "mp_connect blocked: finish loading a native save first.";
-			return;
-		}
-		if (!kcd2mp::g_multiplayer_client->connect(std::move(options)))
-		{
-			LOG(WARNING) << "mp_connect rejected the request. Check address, name, and client state.";
-		}
-	}
-
-	static void mp_disconnect_command(console_command_args *)
-	{
-		if (kcd2mp::g_multiplayer_client)
-		{
-			kcd2mp::g_multiplayer_client->disconnect();
-		}
-	}
-
-	static void mp_debug_start_native_game_command(console_command_args *)
-	{
-		if (!kcd2mp::game::sandbox_active() || !g_player_entity)
-		{
-			LOG(WARNING) << "mp_debug_start_native_game requires a loaded KCD2MP sandbox.";
-			return;
-		}
-		if (!retail_new_game_start())
-		{
-			LOG(ERROR) << "mp_debug_start_native_game could not invoke the retail start path.";
-		}
-	}
-
-	static void mp_status_command(console_command_args *)
-	{
-		if (!kcd2mp::g_multiplayer_client)
-		{
-			LOG(INFO) << "Multiplayer client is not initialized.";
-			return;
-		}
-		const auto status = kcd2mp::g_multiplayer_client->status();
-		LOGF(
-		    INFO,
-		    "Multiplayer: state={}, player={}, server='{}', level='{}', ping={} ms, loss={:.1f}%, queue={}, error='{}'",
-		    kcd2mp::to_string(status.state),
-		    status.local_player_id,
-		    status.server_name,
-		    status.level_id,
-		    status.ping_ms,
-		    status.packet_loss_percent,
-		    status.game_queue_size,
-		    status.error);
-	}
-
-	static void mp_say_command(console_command_args *args)
-	{
-		if (!kcd2mp::g_multiplayer_client || !args || args->GetArgCount() < 2)
-		{
-			LOG(INFO) << "Usage: mp_say <text>";
-			return;
-		}
-		std::string text;
-		for (int index = 1; index < args->GetArgCount(); ++index)
-		{
-			if (!text.empty())
-			{
-				text += ' ';
-			}
-			text += args->GetArg(index);
-		}
-		if (!kcd2mp::g_multiplayer_client->send_chat(std::move(text)))
-		{
-			LOG(WARNING) << "mp_say failed: client is disconnected or the message is invalid.";
-		}
-	}
-
-	static void register_multiplayer_console_commands(__int64 console)
-	{
-		if (!console || g_multiplayer_console_commands_registered)
-		{
-			return;
-		}
-		using callback = void (*)(console_command_args *);
-		using add_command = __int64(__fastcall *)(
-		    __int64,
-		    const char *,
-		    callback,
-		    int,
-		    const char *);
-		auto **vtable = *reinterpret_cast<void ***>(console);
-		const auto add = reinterpret_cast<add_command>(vtable[33]);
-		add(console, "mp_connect", mp_connect_command, 0, "Connect to KCD2MP: mp_connect <host:port> [name]. Passwords are accepted only in ImGui.");
-		add(console, "mp_disconnect", mp_disconnect_command, 0, "Disconnect from the KCD2MP server.");
-		add(console, "mp_debug_start_native_game", mp_debug_start_native_game_command, 0, "Developer-only: invoke the audited retail New Game start path for loading-transition diagnosis.");
-		add(console, "mp_status", mp_status_command, 0, "Print KCD2MP connection diagnostics.");
-		add(console, "mp_say", mp_say_command, 0, "Send global chat: mp_say <text>.");
-		g_multiplayer_console_commands_registered = true;
-	}
-
-	static void ensure_multiplayer_console_commands()
-	{
-		if (g_CXConsole && !g_multiplayer_console_commands_registered)
-		{
-			register_multiplayer_console_commands(g_CXConsole);
 		}
 	}
 
@@ -1365,7 +1179,6 @@ namespace big
 		const auto res = big::g_hooking->get_original<hook_CXConsole_Ctor>()(a1);
 
 		g_CXConsole = a1;
-		register_multiplayer_console_commands(a1);
 
 		return res;
 	}
@@ -1381,7 +1194,6 @@ namespace big
 
 	static __int64 hook_CEntity_dctor(CEntity *centity_inst, char a2)
 	{
-		kcd2mp::game::on_entity_destroyed(centity_inst);
 		if (g_player_entity == centity_inst)
 		{
 			g_player_entity = nullptr;
@@ -1410,12 +1222,7 @@ namespace big
 		if (strcmp(a1->GetName(), "Dude") == 0)
 		{
 			g_player_entity = a1;
-			kcd2mp::game::register_player_entity(a1);
 			LOG(INFO) << "Player entity found";
-		}
-		else
-		{
-			kcd2mp::game::on_entity_created(a1);
 		}
 
 		return res;
@@ -2612,12 +2419,6 @@ namespace big
 		game_pushref = kcd2_address::resolved("game_pushref");
 		game_index2adr = kcd2_address::resolved("game index2adr");
 		game_luaH_new = kcd2_address::resolved("game luaH_new");
-		g_new_game_helper_start =
-		    kcd2_address::resolved("C_NewGameHelper_Start")
-		        .as<new_game_helper_start>();
-		g_c_game_instance_pointer =
-		    kcd2_address::resolved("C_Game instance pointer")
-		        .as<uintptr_t *>();
 		g_C3DEngine_UnRegisterEntityImpl_ptr =
 		    kcd2_address::resolved("C3DEngine_UnRegisterEntityImpl");
 		CXConsole_Ctor = kcd2_address::resolved("CXConsole_ctor");

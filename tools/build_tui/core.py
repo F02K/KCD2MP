@@ -63,8 +63,9 @@ class BuildResult:
     server_path: Optional[Path] = None
     kcse_loader_path: Optional[Path] = None
     kcse_loader_pdb_path: Optional[Path] = None
-    kcse_bridge_path: Optional[Path] = None
-    kcse_bridge_pdb_path: Optional[Path] = None
+    kcse_client_path: Optional[Path] = None
+    kcse_client_pdb_path: Optional[Path] = None
+    address_library_path: Optional[Path] = None
 
 
 @dataclass(frozen=True)
@@ -518,8 +519,15 @@ class BuildService:
             server_path=artifact_dir / "{}.exe".format(SERVER_TARGET),
             kcse_loader_path=artifact_dir / "dinput8.dll",
             kcse_loader_pdb_path=artifact_dir / "dinput8.pdb",
-            kcse_bridge_path=artifact_dir / "KCD2MPKCSEBridge.dll",
-            kcse_bridge_pdb_path=artifact_dir / "KCD2MPKCSEBridge.pdb",
+            kcse_client_path=artifact_dir / "KCD2MPKCSEClient.dll",
+            kcse_client_pdb_path=artifact_dir / "KCD2MPKCSEClient.pdb",
+            address_library_path=(
+                self.project_root
+                / "runtime"
+                / "KCSE"
+                / "addresslib"
+                / "kcd_addresslib_steam_release_1_5-15693.bin"
+            ),
         )
         missing = [
             str(path)
@@ -530,8 +538,9 @@ class BuildService:
                 result.server_path,
                 result.kcse_loader_path,
                 result.kcse_loader_pdb_path,
-                result.kcse_bridge_path,
-                result.kcse_bridge_pdb_path,
+                result.kcse_client_path,
+                result.kcse_client_pdb_path,
+                result.address_library_path,
             )
             if path is not None and not path.is_file()
         ]
@@ -856,8 +865,9 @@ def deploy_artifacts(
         result.pdb_path,
         result.kcse_loader_path,
         result.kcse_loader_pdb_path,
-        result.kcse_bridge_path,
-        result.kcse_bridge_pdb_path,
+        result.kcse_client_path,
+        result.kcse_client_pdb_path,
+        result.address_library_path,
     ]
     missing = [str(path) for path in artifacts if path is not None and not path.is_file()]
     if missing:
@@ -867,15 +877,13 @@ def deploy_artifacts(
             "{} is running. Close the game before deploying.".format(GAME_EXECUTABLE)
         )
     if result.kcse_loader_path is not None:
-        address_library = normalized_root / "KCSE" / "addresslib"
-        if not address_library.is_dir() or not any(
-            address_library.glob("kcd_addresslib_*.bin")
+        if (
+            result.address_library_path is None
+            or not result.address_library_path.is_file()
         ):
             raise BuildToolError(
-                "KCSE requires an address library before dinput8.dll can be deployed. "
-                "Place the matching kcd_addresslib_*.bin in {}.".format(
-                    address_library
-                )
+                "KCSE deployment is missing the bundled Steam address library "
+                "for release_1_5-15693."
             )
 
     targets = [
@@ -887,15 +895,24 @@ def deploy_artifacts(
     if result.kcse_loader_pdb_path is not None:
         targets.append((result.kcse_loader_pdb_path, destination / "dinput8.pdb"))
     plugin_destination = normalized_root / "mods" / "KCD2MP" / "KCSE" / "Plugins"
-    if result.kcse_bridge_path is not None or result.kcse_bridge_pdb_path is not None:
+    if result.kcse_client_path is not None or result.kcse_client_pdb_path is not None:
         plugin_destination.mkdir(parents=True, exist_ok=True)
-    if result.kcse_bridge_path is not None:
+    if result.kcse_client_path is not None:
         targets.append(
-            (result.kcse_bridge_path, plugin_destination / "KCD2MPKCSEBridge.dll")
+            (result.kcse_client_path, plugin_destination / "KCD2MPKCSEClient.dll")
         )
-    if result.kcse_bridge_pdb_path is not None:
+    if result.kcse_client_pdb_path is not None:
         targets.append(
-            (result.kcse_bridge_pdb_path, plugin_destination / "KCD2MPKCSEBridge.pdb")
+            (result.kcse_client_pdb_path, plugin_destination / "KCD2MPKCSEClient.pdb")
+        )
+    if result.address_library_path is not None:
+        address_library_destination = normalized_root / "KCSE" / "addresslib"
+        address_library_destination.mkdir(parents=True, exist_ok=True)
+        targets.append(
+            (
+                result.address_library_path,
+                address_library_destination / result.address_library_path.name,
+            )
         )
     temporary_paths: List[Path] = []
     try:

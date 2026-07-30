@@ -6,8 +6,7 @@
 #include "lua/bindings/imgui_window.hpp"
 #include "lua_extensions/lua_manager_extension.hpp"
 #include "lua_extensions/lua_module_ext.hpp"
-#include "multiplayer/client.hpp"
-#include "multiplayer/game_bridge.hpp"
+#include "kcse/client_proxy.hpp"
 #include "npc/catalog.hpp"
 
 #include <gui/widgets/imgui_extensions.hpp>
@@ -215,7 +214,8 @@ namespace big
 
 		void RenderMultiplayer()
 		{
-			if (!g_show_multiplayer || !kcd2mp::g_multiplayer_client)
+			auto &client = kcd2mp::kcse::ui_client();
+			if (!g_show_multiplayer)
 			{
 				return;
 			}
@@ -244,28 +244,31 @@ namespace big
 				return;
 			}
 
-			auto status = kcd2mp::g_multiplayer_client->status();
+			auto status = client.status();
 			ImGui::Text("Status: %s", kcd2mp::to_string(status.state));
 			if (!status.server_name.empty())
 			{
 				ImGui::SameLine();
 				ImGui::TextDisabled("(%s)", status.server_name.c_str());
 			}
-			const auto sandbox = kcd2mp::game::sandbox_capability();
-			const auto joinable = kcd2mp::game::can_start_join();
+			const auto sandbox = client.runtime_capability();
+			const auto joinable = client.can_start_join();
+			const bool disconnected =
+			    status.state == kcd2mp::client_state::disconnected;
 			ImGui::Text(
-			    "Sandbox gate: %s",
-			    sandbox.available ? "ready" : "blocked");
+			    "Multiplayer runtime: %s",
+			    sandbox.available ? "ready" :
+			                        (disconnected ? "idle" : "initializing"));
 			if (!sandbox.available)
 			{
 				ImGui::TextWrapped("%s", sandbox.diagnostic.c_str());
 			}
-			if (big::g_player_entity)
+			const auto loaded_level = client.current_level_id();
+			if (!loaded_level.empty())
 			{
-				const auto loaded_level = kcd2mp::game::current_level_id();
 				ImGui::Text(
 				    "Join source: loaded native save (level %s)",
-				    loaded_level.empty() ? "unknown" : loaded_level.c_str());
+				    loaded_level.c_str());
 				ImGui::TextWrapped(
 				    "The save must be on the server's level. Save and autosave are locked once the server bootstrap is accepted.");
 			}
@@ -290,8 +293,6 @@ namespace big
 				    status.error.c_str());
 			}
 
-			const bool disconnected =
-			    status.state == kcd2mp::client_state::disconnected;
 			ImGui::BeginDisabled(!disconnected);
 			if (ImGui::InputText("Address", &address))
 			{
@@ -308,8 +309,7 @@ namespace big
 			ImGui::InputText("Recovery claim code", &claim_code);
 			ImGui::EndDisabled();
 
-			ImGui::BeginDisabled(
-			    !disconnected || !sandbox.available || !joinable);
+			ImGui::BeginDisabled(!disconnected || !joinable);
 			if (ImGui::Button("Connect"))
 			{
 				kcd2mp::client_options options;
@@ -317,7 +317,7 @@ namespace big
 				options.display_name = display_name;
 				options.password = password;
 				options.claim_code = claim_code;
-				if (!kcd2mp::g_multiplayer_client->connect(std::move(options)))
+				if (!client.connect(options))
 				{
 					LOG(WARNING) << "Multiplayer connect request was invalid.";
 				}
@@ -329,13 +329,13 @@ namespace big
 			ImGui::BeginDisabled(disconnected);
 			if (ImGui::Button("Disconnect"))
 			{
-				kcd2mp::g_multiplayer_client->disconnect();
+				client.disconnect();
 				password.clear();
 			}
 			ImGui::EndDisabled();
 
 			ImGui::SeparatorText("Players");
-			const auto players = kcd2mp::g_multiplayer_client->remote_players();
+			const auto players = client.remote_players();
 			ImGui::Text(
 			    "You: %llu | Remote players: %zu",
 			    static_cast<unsigned long long>(status.local_player_id),
@@ -374,8 +374,7 @@ namespace big
 						    : archetype;
 						if (ImGui::Selectable(label.c_str(), active))
 						{
-							(void)kcd2mp::g_multiplayer_client
-							    ->select_avatar(archetype);
+							(void)client.select_avatar(archetype);
 						}
 						if (ImGui::IsItemHovered())
 						{
@@ -483,8 +482,7 @@ namespace big
 			ImGui::SeparatorText("Global Chat");
 			if (ImGui::BeginChild("MultiplayerChat", {0.0F, 150.0F}, true))
 			{
-				for (const auto& entry :
-				     kcd2mp::g_multiplayer_client->chat_history())
+				for (const auto& entry : client.chat_history())
 				{
 					ImGui::TextWrapped(
 					    "%s: %s",
@@ -502,7 +500,7 @@ namespace big
 			ImGui::SameLine();
 			if ((submit || ImGui::Button("Send")) && !chat_text.empty())
 			{
-				if (kcd2mp::g_multiplayer_client->send_chat(chat_text))
+				if (client.send_chat(chat_text))
 				{
 					chat_text.clear();
 				}
@@ -1484,9 +1482,8 @@ namespace big
 		static auto previous_multiplayer_state =
 		    kcd2mp::client_state::disconnected;
 		static bool developer_console_was_open{};
-		const auto multiplayer_state = kcd2mp::g_multiplayer_client
-		    ? kcd2mp::g_multiplayer_client->status().state
-		    : kcd2mp::client_state::disconnected;
+		const auto multiplayer_state =
+		    kcd2mp::kcse::ui_client().status().state;
 		const bool developer_console_just_closed =
 		    developer_console_was_open && !g_show_developer_console;
 		if (m_is_open

@@ -1,0 +1,91 @@
+#pragma once
+
+#include "multiplayer/runtime.hpp"
+#include "kcse/native_entity_backend.hpp"
+#include "kcse/native_profile_backend.hpp"
+#include "kcse/native_remote_avatar_backend.hpp"
+
+#include <KCSE/KCSEAPI.h>
+
+#include <atomic>
+#include <cstdint>
+#include <mutex>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
+
+namespace kcd2mp::kcse
+{
+	class native_runtime final : public client_runtime
+	{
+	public:
+		explicit native_runtime(const KCSE::IKCSEInterface &kcse);
+
+		void on_lifecycle(std::uint32_t message_type) noexcept;
+		[[nodiscard]] bool on_frame();
+
+		[[nodiscard]] runtime_descriptor descriptor() const override;
+		[[nodiscard]] runtime_gate capability() const override;
+		[[nodiscard]] bool can_start_join() const override;
+		[[nodiscard]] bool prepare_multiplayer() override;
+		void cancel_multiplayer_preparation() override;
+		[[nodiscard]] sandbox_start_result begin_sandbox(
+		    const protocol::ServerBootstrap &bootstrap) override;
+		[[nodiscard]] sandbox_poll_result poll_sandbox() override;
+		[[nodiscard]] bool sandbox_active() const override;
+		void end_sandbox() override;
+		[[nodiscard]] std::string current_level_id() const override;
+		[[nodiscard]] std::optional<protocol::PlayerProfile>
+		local_profile() override;
+		[[nodiscard]] bool set_non_player_entities_disabled(
+		    bool disabled) override;
+
+		[[nodiscard]] std::optional<protocol::TransformState>
+		local_transform() const;
+		[[nodiscard]] std::optional<protocol::AvatarDescriptor>
+		local_avatar_visual() const;
+		[[nodiscard]] bool apply_local_correction(
+		    const protocol::TransformState &transform);
+		[[nodiscard]] remote_avatar_sync_result sync_remote_players(
+		    std::span<const remote_avatar_snapshot> players);
+		[[nodiscard]] std::uint64_t epoch() const noexcept;
+
+	private:
+		void invalidate_epoch_on_game_thread();
+		void refresh_cached_state();
+		void restore_save_load();
+		void begin_native_unload(std::string_view reason);
+		void finish_native_unload_if_complete();
+		[[nodiscard]] bool native_world_unloaded() const;
+
+		const KCSE::IKCSEInterface &m_kcse;
+		std::string m_address_library;
+		std::atomic<std::uint64_t> m_epoch{1};
+		std::atomic<bool> m_epoch_invalidated{};
+		std::atomic<bool> m_data_loaded{};
+		std::atomic<bool> m_frame_seen{};
+		std::atomic<bool> m_multiplayer_requested{};
+
+		mutable std::mutex m_cache_mutex;
+		std::uint64_t m_capabilities{};
+		std::string m_level_id;
+		std::optional<protocol::TransformState> m_local_transform;
+		std::uint64_t m_transform_sequence{};
+		std::string m_diagnostic;
+		bool m_sandbox_active{};
+		sandbox_poll_result m_sandbox_progress;
+		bool m_save_load_locked{};
+		bool m_unload_pending{};
+		bool m_probe_transform_verified{};
+		bool m_probe_complete{};
+		std::atomic<bool> m_probe_failed{};
+		bool m_preparation_active{};
+		std::uint32_t m_preparation_frames{};
+		std::string m_probe_error;
+		native_entity_backend m_entities;
+		native_profile_backend m_profiles;
+		native_remote_avatar_backend m_remote_backend;
+		remote_avatar_manager m_remote_avatars;
+	};
+}

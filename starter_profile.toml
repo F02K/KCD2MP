@@ -1,0 +1,57 @@
+[profile]
+money = 100
+
+[stats]
+strength = { level = 1, progress = 0.0 }
+agility = { level = 1, progress = 0.0 }
+vitality = { level = 1, progress = 0.0 }
+speech = { level = 1, progress = 0.0 }
+vision = { level = 1, progress = 0.0 }
+hearing = { level = 1, progress = 0.0 }
+barter = { level = 1, progress = 0.0 }
+courage = { level = 1, progress = 0.0 }
+storyProgress = { level = 1, progress = 0.0 }
+prestige = { level = 1, progress = 0.0 }
+
+[skills]
+stealth = { level = 1, progress = 0.0 }
+horse_riding = { level = 1, progress = 0.0 }
+fencing = { level = 1, progress = 0.0 }
+bard = { level = 1, progress = 0.0 }
+thievery = { level = 1, progress = 0.0 }
+pickpocketing_obsolete = { level = 1, progress = 0.0 }
+alchemy = { level = 1, progress = 0.0 }
+cooking = { level = 1, progress = 0.0 }
+craftsmanship = { level = 1, progress = 0.0 }
+smithing_obsolete = { level = 1, progress = 0.0 }
+fishing = { level = 1, progress = 0.0 }
+mining = { level = 1, progress = 0.0 }
+first_aid = { level = 1, progress = 0.0 }
+drinking = { level = 1, progress = 0.0 }
+survival = { level = 1, progress = 0.0 }
+defense = { level = 1, progress = 0.0 }
+weapon_sword = { level = 1, progress = 0.0 }
+heavy_weapons = { level = 1, progress = 0.0 }
+weapon_bow_obsolete = { level = 1, progress = 0.0 }
+marksmanship = { level = 1, progress = 0.0 }
+weapon_shield = { level = 1, progress = 0.0 }
+weapon_mace_obsolete = { level = 1, progress = 0.0 }
+weapon_dagger = { level = 1, progress = 0.0 }
+weapon_large = { level = 1, progress = 0.0 }
+weapon_unarmed = { level = 1, progress = 0.0 }
+herbalism_obsolete = { level = 1, progress = 0.0 }
+scholarship = { level = 1, progress = 0.0 }
+tailoring = { level = 1, progress = 0.0 }
+armourer = { level = 1, progress = 0.0 }
+weaponsmithing = { level = 1, progress = 0.0 }
+shoemaking = { level = 1, progress = 0.0 }
+gunsmithing = { level = 1, progress = 0.0 }
+bowyery = { level = 1, progress = 0.0 }
+gambling = { level = 1, progress = 0.0 }
+houndmaster = { level = 1, progress = 0.0 }
+
+[[items]]
+definition_id = "da94ed8b-5b3b-4e2f-8c85-34ea3d0090ea"
+count = 2
+quality = 100.0
+condition = 1.0

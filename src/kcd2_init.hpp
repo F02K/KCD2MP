@@ -73,9 +73,6 @@ namespace big
 	    bool defer_execution = true);
 	[[nodiscard]] engine_console_submit_status queue_engine_console_command(
 	    std::string command);
-	[[nodiscard]] bool retail_new_game_start_available();
-	[[nodiscard]] bool retail_new_game_start();
-
 	inline std::vector<vanilla_mod_system_info> g_vanilla_mods;
 
 	// global|level_name_specific -> xml filename

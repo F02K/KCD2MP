@@ -1,9 +1,11 @@
 #pragma once
 
 #include "kcd2mp.pb.h"
+#include "multiplayer/runtime_capabilities.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <optional>
 #include <span>
 #include <string>
@@ -14,19 +16,73 @@
 
 namespace kcd2mp
 {
-	constexpr std::uint32_t protocol_version = 3;
-	constexpr std::string_view version_string = "0.3.0";
+	constexpr std::uint32_t protocol_version = 4;
+	constexpr std::string_view version_string = "0.4.0";
 	constexpr std::uint32_t supported_whgame_timestamp = 0x6A350E20;
 	constexpr std::uint64_t supported_whgame_image_size = 0x5B2D000;
+	constexpr std::uint32_t supported_kcse_game_version = 0x01050600;
+	constexpr std::uint32_t supported_kcse_release_index = 1;
 	constexpr std::size_t max_application_message_size = 64 * 1024;
 	constexpr std::size_t max_players = 8;
 	constexpr std::size_t max_display_name_codepoints = 32;
 	constexpr std::size_t min_display_name_codepoints = 3;
 	constexpr std::size_t max_chat_codepoints = 256;
-	constexpr std::size_t max_profile_rpg_values = 128;
-	constexpr std::size_t max_profile_inventory_items = 512;
 	constexpr std::size_t max_avatar_equipment_items = 32;
 	constexpr std::size_t max_avatar_archetypes = 32;
+	constexpr std::size_t profile_stat_count = 10;
+	constexpr std::size_t profile_skill_count = 35;
+	constexpr std::size_t max_profile_inventory_items = 512;
+	constexpr std::int64_t max_profile_money = 2'000'000'000;
+	constexpr std::uint32_t max_profile_item_count = 1'000'000;
+	inline constexpr std::array<std::string_view, profile_stat_count>
+	    canonical_stat_ids{
+	        "strength",
+	        "agility",
+	        "vitality",
+	        "speech",
+	        "vision",
+	        "hearing",
+	        "barter",
+	        "courage",
+	        "storyProgress",
+	        "prestige"};
+	inline constexpr std::array<std::string_view, profile_skill_count>
+	    canonical_skill_ids{
+	        "stealth",
+	        "horse_riding",
+	        "fencing",
+	        "bard",
+	        "thievery",
+	        "pickpocketing_obsolete",
+	        "alchemy",
+	        "cooking",
+	        "craftsmanship",
+	        "smithing_obsolete",
+	        "fishing",
+	        "mining",
+	        "first_aid",
+	        "drinking",
+	        "survival",
+	        "defense",
+	        "weapon_sword",
+	        "heavy_weapons",
+	        "weapon_bow_obsolete",
+	        "marksmanship",
+	        "weapon_shield",
+	        "weapon_mace_obsolete",
+	        "weapon_dagger",
+	        "weapon_large",
+	        "weapon_unarmed",
+	        "herbalism_obsolete",
+	        "scholarship",
+	        "tailoring",
+	        "armourer",
+	        "weaponsmithing",
+	        "shoemaking",
+	        "gunsmithing",
+	        "bowyery",
+	        "gambling",
+	        "houndmaster"};
 	constexpr std::string_view default_avatar_archetype_id =
 	    npc::default_soul_id;
 

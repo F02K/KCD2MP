@@ -5,6 +5,7 @@
 #include <charconv>
 #include <cstring>
 #include <fstream>
+#include <initializer_list>
 #include <limits>
 #include <utility>
 
@@ -83,8 +84,6 @@ namespace kcd2::signatures
 		    signature_spec{"CryScriptSystem_Init", "E8 ? ? ? ? 84 C0 74 ? E8 ? ? ? ? 41 38 BE", resolution_kind::relative_call, target_region::executable},
 		    signature_spec{"CScriptSystem_Update", "48 89 5C 24 ? 48 89 74 24 ? 57 48 83 EC ? 48 8B 3D ? ? ? ? 48 8B F1 33 D2", resolution_kind::direct, target_region::executable},
 		    signature_spec{"CScriptSystem_ExecuteBuffer", "48 8B C4 48 89 58 ? 48 89 68 ? 48 89 70 ? 48 89 78 ? 41 56 48 83 EC ? 48 8B F9 48 89 50", resolution_kind::direct, target_region::executable},
-		    signature_spec{"C_NewGameHelper_Start", "48 89 5C 24 ? 55 48 8B EC 48 81 EC ? ? ? ? 48 8B D9 E8 ? ? ? ? F3 0F 10 0D ? ? ? ? 48 8B 88 A8 01 00 00", resolution_kind::direct, target_region::executable},
-		    signature_spec{"C_Game instance pointer", "48 89 1D ? ? ? ? E8 ? ? ? ? 48 85 C0 74 ? 48 8B C8 E8 ? ? ? ? EB ? 48 8B C7 48 89 83 50 01 00 00", resolution_kind::rip_relative_memory, target_region::readable},
 		};
 
 		static_assert(signature_registry.size() == expected_signature_count);
@@ -1039,6 +1038,7 @@ namespace kcd2::signatures
 		validate_named_vtable("CEntity vtable", "CEntity vtable[0]", 0, false);
 		validate_named_vtable("CEntity vtable", "CEntity::SetFlags", 5, false);
 		validate_named_vtable("CEntity vtable", "CEntity::GetFlags", 6, false);
+		validate_named_vtable("CEntity vtable", "CEntity::SetWorldTM", 31, false);
 		validate_named_vtable("CEntity vtable", "CEntity::Activate", 52, false);
 		validate_named_vtable("CEntity vtable", "CEntity::IsActive", 53, false);
 		validate_named_vtable("CEntity vtable", "CEntity::Hide", 63, false);
@@ -1056,7 +1056,17 @@ namespace kcd2::signatures
 		validate_named_vtable(
 		    "CEntitySystem vtable",
 		    "CEntitySystem::GetEntityIterator",
-		    21,
+		    22,
+		    true);
+		validate_named_vtable(
+		    "CEntitySystem vtable",
+		    "CEntitySystem::AddSink",
+		    29,
+		    true);
+		validate_named_vtable(
+		    "CEntitySystem vtable",
+		    "CEntitySystem::RemoveSink",
+		    30,
 		    true);
 		validate_named_vtable(
 		    "CEntitySystem vtable",
@@ -1070,6 +1080,137 @@ namespace kcd2::signatures
 		validate_named_vtable("CBrush vtable", "CBrush vtable[0]", 0, false);
 		validate_named_vtable("CPhysicalEntity vtable", "CPhysicalEntity vtable[0]", 0, false);
 		validate_named_vtable("C3DEngine vtable", "C3DEngine vtable[38]", 38, false);
+
+		const auto validate_native_anchor =
+		    [&](std::string_view name,
+		        uint64_t rva,
+		        std::initializer_list<uint8_t> expected)
+		{
+			++report.derived_requested;
+			if (!image.is_executable(rva, expected.size())
+			    || !std::equal(
+			        expected.begin(),
+			        expected.end(),
+			        image.data(rva)))
+			{
+				report.diagnostics.push_back({
+				    std::string(name),
+				    failure_kind::invalid_target,
+				    0,
+				    "native multiplayer ABI anchor bytes do not match",
+				});
+				return;
+			}
+			++report.derived_resolved;
+			report.derived_addresses.push_back(
+			    {std::string(name), rva, rva});
+		};
+
+		// These fixed-RVA anchors are intentionally audited only after the exact
+		// WHGame hash gate in the audit executable. Together with the vtable
+		// checks above they pin every native join call chain introduced by the
+		// KCSE runtime.
+		validate_native_anchor(
+		    "IEntity::SetWorldTM ABI",
+		    0x7F0DF4,
+		    {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08});
+		validate_native_anchor(
+		    "CEntity::ResolvePhysicsProxy ABI",
+		    0x3CE9A8,
+		    {0x48, 0x89, 0x5C, 0x24, 0x10, 0x55, 0x56, 0x57,
+		        0x41, 0x56, 0x41, 0x57});
+		validate_native_anchor(
+		    "CCryAction::EndGameContext ABI",
+		    0xB6E3FC,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74});
+		validate_native_anchor(
+		    "IActorSystem::CreateActor ABI",
+		    0xB86120,
+		    {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08});
+		validate_native_anchor(
+		    "C_Soul::SetSharedSoulGuid ABI",
+		    0x3F124C,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C});
+		validate_native_anchor(
+		    "C_SoulList::ApplySharedSoul ABI",
+		    0x3F4578,
+		    {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57});
+		validate_native_anchor(
+		    "C_InventoryBase::BuildItemInitParams ABI",
+		    0x4533E4,
+		    {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20});
+		validate_native_anchor(
+		    "C_InventoryBase::InsertCreatedItem ABI",
+		    0x465FC0,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74});
+		validate_native_anchor(
+		    "C_Item::SetInstanceGuid ABI",
+		    0x467A6C,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74});
+		validate_native_anchor(
+		    "C_Soul absolute RPG setter ABI",
+		    0x469BF0,
+		    {0x8B, 0xC2, 0x48, 0x8D, 0x0C, 0xC1});
+		validate_native_anchor(
+		    "C_Human::DrawWeapon ABI",
+		    0x2AA24A0,
+		    {0x40, 0x53, 0x48, 0x83, 0xEC, 0x20});
+		validate_native_anchor(
+		    "C_Human::HolsterWeapon ABI",
+		    0x8EE994,
+		    {0x4C, 0x8B, 0xDC, 0x53, 0x48, 0x83, 0xEC, 0x60});
+		validate_native_anchor(
+		    "C_Human::IsWeaponDrawn ABI",
+		    0x8C69B4,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C});
+		validate_native_anchor(
+		    "IEntitySystem::AddSink ABI",
+		    0xDC006C,
+		    {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x08});
+		validate_native_anchor(
+		    "IEntitySystem::RemoveSink ABI",
+		    0xDA68BC,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x6C});
+		validate_native_anchor(
+		    "IEntitySystem::InitEntity sink dispatch ABI",
+		    0x5CB0F8,
+		    {0x48, 0x89, 0x5C, 0x24, 0x08, 0x48, 0x89, 0x74});
+
+		++report.derived_requested;
+		constexpr uint64_t cry_action_vtable = 0x40472D0;
+		constexpr size_t end_game_context_slot = 52;
+		uint64_t end_game_context_target{};
+		if (image.is_readable(
+		        cry_action_vtable
+		            + end_game_context_slot * sizeof(uint64_t),
+		        sizeof(uint64_t)))
+		{
+			std::memcpy(
+			    &end_game_context_target,
+			    image.data(
+			        cry_action_vtable
+			        + end_game_context_slot * sizeof(uint64_t)),
+			    sizeof(end_game_context_target));
+		}
+		const auto end_game_context_rva =
+		    image.virtual_address_to_rva(end_game_context_target);
+		if (end_game_context_rva && *end_game_context_rva == 0xB6E3FC)
+		{
+			++report.derived_resolved;
+			report.derived_addresses.push_back({
+			    "CCryAction::EndGameContext vtable[52]",
+			    cry_action_vtable,
+			    *end_game_context_rva});
+		}
+		else
+		{
+			report.diagnostics.push_back({
+			    "CCryAction::EndGameContext vtable[52]",
+			    failure_kind::invalid_target,
+			    0,
+			    "CCryAction slot 52 does not target the audited unload routine",
+			});
+		}
 		return report;
 	}
 

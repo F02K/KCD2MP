@@ -48,8 +48,30 @@ namespace kcd2mp
 		{
 			if (envelope.has_client_hello())
 			{
-				return is_valid_display_name(
-				    envelope.client_hello().display_name());
+				const auto &message = envelope.client_hello();
+				return message.protocol_version() == protocol_version
+				    && message.client_version() == version_string
+				    && message.whgame_timestamp()
+				        == supported_whgame_timestamp
+				    && message.whgame_image_size()
+				        == supported_whgame_image_size
+				    && is_valid_display_name(message.display_name())
+				    && message.password().size() <= 256
+				    && message.content_hash().size() <= 64
+				    && message.resume_token().size() <= 128
+				    && message.has_runtime()
+				    && (message.runtime().features()
+				            & ~known_client_runtime_capabilities)
+				        == 0
+				    && message.runtime().runtime_epoch() != 0
+				    && message.runtime().kcse_version() != 0
+				    && message.runtime().game_version()
+				        == supported_kcse_game_version
+				    && message.runtime().release_index()
+				        == supported_kcse_release_index
+				    && valid_identifier(
+				        message.runtime().address_library(),
+				        64);
 			}
 			if (envelope.has_server_challenge())
 			{
@@ -477,61 +499,81 @@ namespace kcd2mp
 		if (profile.player_id() == 0 || profile.revision() == 0
 		    || !is_valid_display_name(profile.display_name())
 		    || !valid_identifier(profile.level_id())
-		    || profile.money() < 0
-		    || profile.stats_size() > static_cast<int>(max_profile_rpg_values)
-		    || profile.skills_size() > static_cast<int>(max_profile_rpg_values)
+		    || profile.money() < 0 || profile.money() > max_profile_money
+		    || profile.stats_size() != static_cast<int>(profile_stat_count)
+		    || profile.skills_size() != static_cast<int>(profile_skill_count)
 		    || profile.inventory_size()
 		        > static_cast<int>(max_profile_inventory_items)
 		    || (profile.transform_valid()
 		        && (!profile.has_last_transform()
 		            || !is_finite_transform(profile.last_transform())))
-		    || (profile.has_avatar()
-		        && !is_valid_avatar_descriptor(profile.avatar())))
+		    || !profile.has_avatar()
+		    || !is_valid_avatar_descriptor(profile.avatar()))
 		{
 			return false;
 		}
 		const auto valid_rpg = [](const protocol::RpgValue &value)
 		{
-			return valid_identifier(value.id(), 64)
-			    && value.level() >= 0 && value.level() <= 100
-			    && std::isfinite(value.xp()) && value.xp() >= 0.0F;
+			return value.level() >= 0 && value.level() <= 100
+			    && std::isfinite(value.progress())
+			    && value.progress() >= 0.0F && value.progress() <= 1.0F;
 		};
-		if (!std::ranges::all_of(profile.stats(), valid_rpg)
-		    || !std::ranges::all_of(profile.skills(), valid_rpg))
+		const auto exact_rpg_set = [&](const auto &values, const auto &ids)
+		{
+			std::unordered_set<std::string_view> found;
+			for (const auto &value : values)
+			{
+				if (!valid_rpg(value)
+				    || std::ranges::find(ids, value.id()) == ids.end()
+				    || !found.insert(value.id()).second)
+				{
+					return false;
+				}
+			}
+			return found.size() == ids.size();
+		};
+		if (!exact_rpg_set(profile.stats(), canonical_stat_ids)
+		    || !exact_rpg_set(profile.skills(), canonical_skill_ids))
 		{
 			return false;
 		}
-		std::unordered_set<std::string> rpg_ids;
-		for (const auto &value : profile.stats())
-		{
-			if (!rpg_ids.insert("stat:" + value.id()).second)
-			{
-				return false;
-			}
-		}
-		for (const auto &value : profile.skills())
-		{
-			if (!rpg_ids.insert("skill:" + value.id()).second)
-			{
-				return false;
-			}
-		}
+
 		std::unordered_set<std::string> instance_ids;
-		return std::ranges::all_of(
-		    profile.inventory(),
-		    [&](const protocol::InventoryItem &item)
-		    {
-			    return valid_identifier(item.instance_id())
-			        && instance_ids.insert(item.instance_id()).second
-			        && valid_identifier(item.definition_id())
-			        && item.count() > 0 && item.count() <= 1'000'000
-			        && std::isfinite(item.quality())
-			        && item.quality() >= 0.0F && item.quality() <= 100.0F
-			        && std::isfinite(item.condition())
-			        && item.condition() >= 0.0F && item.condition() <= 100.0F
-			        && (item.equipped_slot().empty()
-			            || valid_identifier(item.equipped_slot(), 64));
-		    });
+		std::unordered_set<std::string> equipped_slots;
+		for (const auto &item : profile.inventory())
+		{
+			if (!is_uuid(item.instance_id())
+			    || !instance_ids.insert(item.instance_id()).second
+			    || !is_uuid(item.definition_id())
+			    || item.count() == 0 || item.count() > max_profile_item_count
+			    || !std::isfinite(item.quality())
+			    || item.quality() < 0.0F || item.quality() > 100.0F
+			    || !std::isfinite(item.condition())
+			    || item.condition() < 0.0F || item.condition() > 1.0F)
+			{
+				return false;
+			}
+			if (item.has_equipped_slot()
+			    && (!is_valid_avatar_equipment_slot(item.equipped_slot())
+			        || !equipped_slots.insert(item.equipped_slot()).second))
+			{
+				return false;
+			}
+		}
+		for (const auto &visible : profile.avatar().equipment())
+		{
+			const auto match = std::ranges::find_if(
+			    profile.inventory(),
+			    [&](const protocol::InventoryItem &item)
+			    {
+				    return item.definition_id() == visible.definition_id()
+				        && item.has_equipped_slot()
+				        && item.equipped_slot() == visible.equipped_slot();
+			    });
+			if (match == profile.inventory().end())
+				return false;
+		}
+		return true;
 	}
 
 	bool is_finite_transform(const protocol::TransformState &transform)

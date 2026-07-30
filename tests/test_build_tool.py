@@ -167,7 +167,7 @@ class DeploymentTests(unittest.TestCase):
             self.assertEqual((destination / "d3d12.pdb").read_bytes(), b"pdb")
             self.assertFalse((destination / "d3d12.dll.kcd2mp.tmp").exists())
 
-    def test_deploys_kcse_loader_and_bridge(self) -> None:
+    def test_deploys_kcse_loader_and_client(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             artifacts = root / "artifacts"
@@ -175,12 +175,14 @@ class DeploymentTests(unittest.TestCase):
             result = self._result(artifacts)
             kcse_loader = artifacts / "dinput8.dll"
             kcse_loader_pdb = artifacts / "dinput8.pdb"
-            kcse_bridge = artifacts / "KCD2MPKCSEBridge.dll"
-            kcse_bridge_pdb = artifacts / "KCD2MPKCSEBridge.pdb"
+            kcse_client = artifacts / "KCD2MPKCSEClient.dll"
+            kcse_client_pdb = artifacts / "KCD2MPKCSEClient.pdb"
+            address_library = artifacts / "kcd_addresslib_steam_release_1_5-15693.bin"
             kcse_loader.write_bytes(b"kcse")
             kcse_loader_pdb.write_bytes(b"kcse-pdb")
-            kcse_bridge.write_bytes(b"bridge")
-            kcse_bridge_pdb.write_bytes(b"bridge-pdb")
+            kcse_client.write_bytes(b"client")
+            kcse_client_pdb.write_bytes(b"client-pdb")
+            address_library.write_bytes(b"db")
             result = BuildResult(
                 result.profile,
                 result.build_dir,
@@ -188,23 +190,30 @@ class DeploymentTests(unittest.TestCase):
                 result.pdb_path,
                 kcse_loader_path=kcse_loader,
                 kcse_loader_pdb_path=kcse_loader_pdb,
-                kcse_bridge_path=kcse_bridge,
-                kcse_bridge_pdb_path=kcse_bridge_pdb,
+                kcse_client_path=kcse_client,
+                kcse_client_pdb_path=kcse_client_pdb,
+                address_library_path=address_library,
             )
             game_root = _create_game_root(root / "game")
-            address_library = game_root / "KCSE" / "addresslib"
-            address_library.mkdir(parents=True)
-            (address_library / "kcd_addresslib_steam_test.bin").write_bytes(b"db")
 
             destination = deploy_artifacts(result, game_root, lambda: False)
 
             self.assertEqual((destination / "dinput8.dll").read_bytes(), b"kcse")
             plugin_dir = game_root / "mods" / "KCD2MP" / "KCSE" / "Plugins"
             self.assertEqual(
-                (plugin_dir / "KCD2MPKCSEBridge.dll").read_bytes(), b"bridge"
+                (plugin_dir / "KCD2MPKCSEClient.dll").read_bytes(), b"client"
+            )
+            self.assertEqual(
+                (
+                    game_root
+                    / "KCSE"
+                    / "addresslib"
+                    / "kcd_addresslib_steam_release_1_5-15693.bin"
+                ).read_bytes(),
+                b"db",
             )
 
-    def test_kcse_deploy_requires_address_library(self) -> None:
+    def test_kcse_deploy_requires_bundled_address_library(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             artifacts = root / "artifacts"

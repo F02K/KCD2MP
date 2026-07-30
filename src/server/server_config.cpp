@@ -138,12 +138,23 @@ namespace kcd2mp::server
 		    (*server)["movement_tolerance_m"].value_or(config.movement_tolerance_m);
 		config.world_directory =
 		    (*server)["world_directory"].value_or(config.world_directory.string());
+		config.starter_profile_path =
+		    (*server)["starter_profile"].value_or(
+		        config.starter_profile_path.string());
 		if (config.world_directory.is_relative())
 		{
 			config.world_directory =
 			    std::filesystem::absolute(path).parent_path()
 			    / config.world_directory;
 		}
+		if (config.starter_profile_path.is_relative())
+		{
+			config.starter_profile_path =
+			    std::filesystem::absolute(path).parent_path()
+			    / config.starter_profile_path;
+		}
+		config.starter_profile =
+		    load_starter_profile_template(config.starter_profile_path);
 		if (const auto *spawn = (*server)["initial_spawn"].as_table())
 		{
 			const auto x = (*spawn)["x"].value<double>();
@@ -253,6 +264,7 @@ namespace kcd2mp::server
 		{
 			throw std::runtime_error("world_directory must not be empty");
 		}
+		validate_starter_profile_template(config.starter_profile);
 		protocol::AvatarPolicy avatar_policy;
 		avatar_policy.set_default_archetype_id(
 		    config.default_avatar_archetype);

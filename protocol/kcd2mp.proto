@@ -95,6 +95,15 @@ message PlayerSnapshot {
   AvatarDescriptor avatar = 7;
 }
 
+message ClientRuntimeCapabilities {
+  uint64 features = 1;
+  uint32 kcse_version = 2;
+  uint32 game_version = 3;
+  uint32 release_index = 4;
+  uint64 runtime_epoch = 5;
+  string address_library = 6;
+}
+
 message ClientHello {
   uint32 protocol_version = 1;
   string client_version = 2;
@@ -105,6 +114,7 @@ message ClientHello {
   string level_id = 7;
   string content_hash = 8;
   string resume_token = 9;
+  ClientRuntimeCapabilities runtime = 10;
 }
 
 message ServerChallenge {
@@ -121,7 +131,7 @@ message ClientAuthenticate {
 message RpgValue {
   string id = 1;
   int32 level = 2;
-  float xp = 3;
+  float progress = 3;
 }
 
 message InventoryItem {
@@ -130,7 +140,7 @@ message InventoryItem {
   uint32 count = 3;
   float quality = 4;
   float condition = 5;
-  string equipped_slot = 6;
+  optional string equipped_slot = 6;
 }
 
 message PlayerProfile {

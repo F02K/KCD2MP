@@ -19,6 +19,7 @@ allowed_avatar_archetypes = ["763db0bb-4469-497d-bdc9-712b3df91b5a"]
 max_player_speed_mps = 15.0
 movement_tolerance_m = 2.0
 world_directory = "world"
+starter_profile = "starter_profile.toml"
 
 # Optional. If omitted, the first authenticated client initializes the spawn.
 # [server.initial_spawn]

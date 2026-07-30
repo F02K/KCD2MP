@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "npc/catalog.hpp"
+#include "server/starter_profile.hpp"
 
 namespace kcd2mp::server
 {
@@ -48,6 +49,9 @@ namespace kcd2mp::server
 		float max_player_speed_mps{15.0F};
 		float movement_tolerance_m{2.0F};
 		std::filesystem::path world_directory{"world"};
+		std::filesystem::path starter_profile_path{"starter_profile.toml"};
+		starter_profile_template starter_profile{
+		    default_starter_profile_template()};
 		std::optional<initial_spawn_config> initial_spawn;
 	};
 

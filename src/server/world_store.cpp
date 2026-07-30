@@ -19,7 +19,7 @@ namespace kcd2mp::server
 {
 	namespace
 	{
-		constexpr std::uint32_t manifest_schema = 1;
+		constexpr std::uint32_t manifest_schema = 3;
 
 		std::string toml_escape(std::string_view value)
 		{
@@ -320,7 +320,10 @@ namespace kcd2mp::server
 		if (!session
 		    || (*session)["schema"].value_or(0U) != manifest_schema)
 		{
-			throw std::runtime_error("world/session.toml has an unsupported schema");
+			throw std::runtime_error(
+			    "world/session.toml is not persistence schema 3; "
+			    "pre-profile-v4 worlds cannot be migrated safely, so configure "
+			    "a new empty world directory");
 		}
 		m_manifest.server_id = (*session)["server_id"].value_or(std::string{});
 		m_manifest.session_id = (*session)["session_id"].value_or(std::string{});

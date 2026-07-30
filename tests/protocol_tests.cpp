@@ -42,8 +42,18 @@ int main()
 	protocol::Envelope envelope;
 	auto *hello = envelope.mutable_client_hello();
 	hello->set_protocol_version(protocol_version);
+	hello->set_client_version(version_string);
+	hello->set_whgame_timestamp(supported_whgame_timestamp);
+	hello->set_whgame_image_size(supported_whgame_image_size);
 	hello->set_display_name("Henry");
 	hello->set_level_id("sandbox");
+	auto *runtime = hello->mutable_runtime();
+	runtime->set_features(required_client_runtime_capabilities);
+	runtime->set_kcse_version(1);
+	runtime->set_game_version(0x01050600);
+	runtime->set_release_index(1);
+	runtime->set_runtime_epoch(1);
+	runtime->set_address_library("test-address-library");
 	std::string error;
 	const auto encoded = encode(envelope, reliability::reliable, &error);
 	assert(encoded);
@@ -109,7 +119,6 @@ int main()
 	profile->set_revision(1);
 	profile->set_display_name("Henry");
 	profile->set_level_id("sandbox");
-	profile->set_money(200);
 	auto *avatar = profile->mutable_avatar();
 	avatar->set_archetype_id(
 	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
@@ -118,24 +127,50 @@ int main()
 	visible_item->set_definition_id(
 	    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 	visible_item->set_equipped_slot("PrimaryMainHand");
-	auto *skill = profile->add_skills();
-	skill->set_id("sword");
-	skill->set_level(5);
-	skill->set_xp(12.5F);
-	auto *item = profile->add_inventory();
-	item->set_instance_id("instance-1");
-	item->set_definition_id("item.sword");
-	item->set_count(1);
-	item->set_quality(80.0F);
-	item->set_condition(95.0F);
-	item->set_equipped_slot("right_hand");
+	profile->set_money(100);
+	for (const auto id : canonical_stat_ids)
+	{
+		auto *value = profile->add_stats();
+		value->set_id(id);
+		value->set_level(1);
+		value->set_progress(0.0F);
+	}
+	for (const auto id : canonical_skill_ids)
+	{
+		auto *value = profile->add_skills();
+		value->set_id(id);
+		value->set_level(1);
+		value->set_progress(0.0F);
+	}
+	auto *inventory_item = profile->add_inventory();
+	inventory_item->set_instance_id(
+	    "11111111-1111-4111-8111-111111111111");
+	inventory_item->set_definition_id(visible_item->definition_id());
+	inventory_item->set_count(1);
+	inventory_item->set_quality(100.0F);
+	inventory_item->set_condition(1.0F);
+	inventory_item->set_equipped_slot(visible_item->equipped_slot());
 	assert(is_valid_profile(*profile));
+	auto incomplete_profile = *profile;
+	incomplete_profile.mutable_skills()->RemoveLast();
+	assert(!is_valid_profile(incomplete_profile));
+	auto duplicate_instance = *profile;
+	*duplicate_instance.add_inventory() = duplicate_instance.inventory(0);
+	assert(!is_valid_profile(duplicate_instance));
+	auto invalid_condition = *profile;
+	invalid_condition.mutable_inventory(0)->set_condition(1.01F);
+	assert(!is_valid_profile(invalid_condition));
 	const auto encoded_profile =
 	    encode(profile_envelope, reliability::reliable, &error);
 	assert(encoded_profile);
 	const auto decoded_profile = decode(encoded_profile->bytes, &error);
 	assert(decoded_profile);
-	assert(decoded_profile->client_profile_update().profile().money() == 200);
+	assert(
+	    decoded_profile->client_profile_update()
+	        .profile()
+	        .avatar()
+	        .archetype_id()
+	    == "763db0bb-4469-497d-bdc9-712b3df91b5a");
 
 	protocol::Envelope avatar_update_envelope;
 	auto *avatar_update =
@@ -207,24 +242,7 @@ int main()
 	assert(decoded_control);
 	assert(decoded_control->server_entity_control()
 	    .non_player_entities_disabled());
-	assert(version_string == "0.3.0");
+	assert(version_string == "0.4.0");
 
-	profile->mutable_inventory(0)->set_quality(
-	    std::numeric_limits<float>::quiet_NaN());
-	assert(!is_valid_profile(*profile));
-	profile->mutable_inventory(0)->set_quality(80.0F);
-	*profile->add_inventory() = profile->inventory(0);
-	assert(!is_valid_profile(*profile));
-	profile->mutable_inventory()->RemoveLast();
-	for (std::size_t index = 1;
-	     index <= max_profile_inventory_items;
-	     ++index)
-	{
-		*profile->add_inventory() = profile->inventory(0);
-		profile->mutable_inventory(
-		    static_cast<int>(index))->set_instance_id(
-		    "instance-" + std::to_string(index + 1));
-	}
-	assert(!is_valid_profile(*profile));
 	return 0;
 }

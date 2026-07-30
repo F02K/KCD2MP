@@ -170,9 +170,5 @@ int main()
 	assert(parameters.idle_until_first_patch);
 	assert(!parameters.perceptor_object_ai);
 	assert(!parameters.perceptible_object_ai);
-	assert(select_lua_spawn_binding(true, true) == lua_spawn_binding::xgen_ai_module);
-	assert(select_lua_spawn_binding(true, false) == lua_spawn_binding::xgen_ai_module);
-	assert(select_lua_spawn_binding(false, true) == lua_spawn_binding::system);
-	assert(select_lua_spawn_binding(false, false) == lua_spawn_binding::unavailable);
 	return 0;
 }

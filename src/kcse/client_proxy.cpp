@@ -1,0 +1,195 @@
+#include "kcse/client_proxy.hpp"
+
+#include <Windows.h>
+
+#include <algorithm>
+#include <atomic>
+#include <cstring>
+#include <string_view>
+#include <utility>
+
+namespace kcd2mp::kcse
+{
+	namespace
+	{
+		std::atomic<const client_api *> g_api{};
+
+		template<std::size_t N>
+		void copy_text(char (&target)[N], std::string_view value)
+		{
+			const auto count = std::min(value.size(), N - 1);
+			std::memcpy(target, value.data(), count);
+			target[count] = '\0';
+		}
+
+	}
+
+	const client_api *ui_client_proxy::load() const noexcept
+	{
+		if (const auto *loaded = g_api.load(std::memory_order_acquire))
+			return loaded;
+		const auto module = GetModuleHandleW(client_module_name);
+		if (!module)
+			return nullptr;
+		const auto query = reinterpret_cast<query_client>(
+		    GetProcAddress(module, client_query_export));
+		const auto *candidate = query ? query(client_abi_version) : nullptr;
+		if (!compatible(candidate))
+			return nullptr;
+		g_api.store(candidate, std::memory_order_release);
+		return candidate;
+	}
+
+	bool ui_client_proxy::available() const noexcept
+	{
+		return load() != nullptr;
+	}
+
+	runtime_gate ui_client_proxy::runtime_capability() const
+	{
+		runtime_status value;
+		const auto *api = load();
+		if (!api || api->get_runtime_status(&value) == 0)
+			return {false, false, "KCD2MP KCSE client is not loaded."};
+		return {value.available != 0, false, value.diagnostic};
+	}
+
+	bool ui_client_proxy::can_start_join() const
+	{
+		runtime_status value;
+		const auto *api = load();
+		return api && api->get_runtime_status(&value) != 0
+		    && value.joinable != 0;
+	}
+
+	std::string ui_client_proxy::current_level_id() const
+	{
+		runtime_status value;
+		const auto *api = load();
+		return api && api->get_runtime_status(&value) != 0
+		    ? std::string(value.level_id) :
+		      std::string{};
+	}
+
+	bool ui_client_proxy::connect(const client_options &options) const
+	{
+		const auto *api = load();
+		if (!api)
+			return false;
+		connect_request request;
+		copy_text(request.address, options.address);
+		copy_text(request.display_name, options.display_name);
+		copy_text(request.password, options.password);
+		copy_text(request.content_hash, options.content_hash);
+		copy_text(request.claim_code, options.claim_code);
+		return api->connect(&request) != 0;
+	}
+
+	void ui_client_proxy::disconnect() const
+	{
+		if (const auto *api = load())
+			api->disconnect();
+	}
+
+	bool ui_client_proxy::send_chat(std::string text) const
+	{
+		const auto *api = load();
+		return api && api->send_chat(text.c_str()) != 0;
+	}
+
+	bool ui_client_proxy::select_avatar(std::string archetype_id) const
+	{
+		const auto *api = load();
+		return api && api->select_avatar(archetype_id.c_str()) != 0;
+	}
+
+	client_status ui_client_proxy::status() const
+	{
+		client_status_view value;
+		const auto *api = load();
+		if (!api || api->get_status(&value) == 0)
+		{
+			client_status result;
+			result.error = "KCD2MP KCSE client is not loaded.";
+			return result;
+		}
+		client_status result;
+		result.state = static_cast<client_state>(value.state);
+		result.local_player_id = value.local_player_id;
+		result.ping_ms = value.ping_ms;
+		result.packet_loss_percent = value.packet_loss_percent;
+		result.game_queue_size = value.game_queue_size;
+		result.server_name = value.server_name;
+		result.server_id = value.server_id;
+		result.session_id = value.session_id;
+		result.level_id = value.level_id;
+		result.error = value.error;
+		result.avatar_archetype_id = value.avatar_archetype_id;
+		result.avatar_policy.set_default_archetype_id(
+		    value.default_avatar_archetype_id);
+		const auto count = api->copy_avatar_archetypes(nullptr, 0);
+		std::vector<fixed_string> archetypes(count);
+		if (count != 0)
+		{
+			archetypes.resize(std::min(
+			    count,
+			    api->copy_avatar_archetypes(archetypes.data(), count)));
+		}
+		for (const auto &archetype : archetypes)
+			result.avatar_policy.add_allowed_archetype_ids(archetype.value);
+		return result;
+	}
+
+	std::vector<kcd2mp::remote_player_view>
+	ui_client_proxy::remote_players() const
+	{
+		const auto *api = load();
+		if (!api)
+			return {};
+		const auto count = api->copy_players(nullptr, 0);
+		std::vector<kcd2mp::kcse::remote_player_view> raw(count);
+		if (count != 0)
+			raw.resize(std::min(count, api->copy_players(raw.data(), count)));
+		std::vector<kcd2mp::remote_player_view> result;
+		result.reserve(raw.size());
+		for (const auto &value : raw)
+		{
+			kcd2mp::remote_player_view player;
+			player.id = value.player_id;
+			player.connected = value.connected != 0;
+			player.movement_mode =
+			    static_cast<protocol::MovementMode>(value.movement_mode);
+			player.display_name = value.display_name;
+			result.push_back(std::move(player));
+		}
+		return result;
+	}
+
+	std::vector<chat_entry> ui_client_proxy::chat_history() const
+	{
+		const auto *api = load();
+		if (!api)
+			return {};
+		const auto count = api->copy_chat(nullptr, 0);
+		std::vector<chat_entry_view> raw(count);
+		if (count != 0)
+			raw.resize(std::min(count, api->copy_chat(raw.data(), count)));
+		std::vector<chat_entry> result;
+		result.reserve(raw.size());
+		for (const auto &value : raw)
+		{
+			result.push_back(
+			    {value.player_id,
+			     value.display_name,
+			     value.text,
+			     value.server_time_ms});
+		}
+		return result;
+	}
+
+	ui_client_proxy &ui_client()
+	{
+		static ui_client_proxy instance;
+		return instance;
+	}
+}

@@ -1,0 +1,198 @@
+#include "multiplayer/profile_reconciler.hpp"
+#include "server/starter_profile.hpp"
+
+#include <cassert>
+#include <string>
+#include <unordered_set>
+
+namespace
+{
+	using namespace kcd2mp;
+
+	class fake_backend final : public profile_backend
+	{
+	public:
+		protocol::PlayerProfile profile;
+		std::vector<std::string> operations;
+		std::unordered_set<std::string> definitions;
+		std::string fail_operation;
+		bool failed_once{};
+
+		std::optional<protocol::PlayerProfile> capture(
+		    std::string &) override
+		{
+			return profile;
+		}
+		bool validate_definition(
+		    std::string_view id,
+		    std::string &error) override
+		{
+			if (!definitions.contains(std::string(id)))
+			{
+				error = "unknown definition";
+				return false;
+			}
+			return true;
+		}
+		int slot_layer(std::string_view slot) const override
+		{
+			return slot == "body_plate" ? 20 : 10;
+		}
+		bool perform(std::string operation, std::string &error)
+		{
+			operations.push_back(operation);
+			if (!failed_once && operation == fail_operation)
+			{
+				failed_once = true;
+				error = "injected failure";
+				return false;
+			}
+			return true;
+		}
+		bool unequip(std::string_view id, std::string &error) override
+		{
+			if (!perform("unequip:" + std::string(id), error))
+				return false;
+			for (auto &item : *profile.mutable_inventory())
+				if (item.instance_id() == id)
+					item.clear_equipped_slot();
+			profile.mutable_avatar()->clear_equipment();
+			return true;
+		}
+		bool remove_item(std::string_view id, std::string &error) override
+		{
+			if (!perform("remove:" + std::string(id), error))
+				return false;
+			auto *items = profile.mutable_inventory();
+			for (int index = 0; index < items->size(); ++index)
+				if ((*items)[index].instance_id() == id)
+				{
+					items->DeleteSubrange(index, 1);
+					break;
+				}
+			return true;
+		}
+		bool create_item(
+		    const protocol::InventoryItem &item,
+		    std::string &error) override
+		{
+			if (!perform("create:" + item.instance_id(), error))
+				return false;
+			*profile.add_inventory() = item;
+			return true;
+		}
+		bool update_item(
+		    const protocol::InventoryItem &item,
+		    std::string &error) override
+		{
+			if (!perform("update:" + item.instance_id(), error))
+				return false;
+			for (auto &existing : *profile.mutable_inventory())
+				if (existing.instance_id() == item.instance_id())
+				{
+					const auto slot = existing.has_equipped_slot()
+					    ? std::optional(existing.equipped_slot())
+					    : std::nullopt;
+					existing = item;
+					existing.clear_equipped_slot();
+					if (slot)
+						existing.set_equipped_slot(*slot);
+				}
+			return true;
+		}
+		bool set_money(std::int64_t value, std::string &error) override
+		{
+			if (!perform("money", error))
+				return false;
+			profile.set_money(value);
+			return true;
+		}
+		bool set_rpg_value(
+		    bool skill,
+		    const protocol::RpgValue &value,
+		    std::string &error) override
+		{
+			if (!perform(
+			        std::string(skill ? "skill:" : "stat:") + value.id(),
+			        error))
+				return false;
+			auto *values =
+			    skill ? profile.mutable_skills() : profile.mutable_stats();
+			for (auto &existing : *values)
+				if (existing.id() == value.id())
+					existing = value;
+			return true;
+		}
+		bool equip(
+		    std::string_view id,
+		    std::string_view slot,
+		    std::string &error) override
+		{
+			if (!perform("equip:" + std::string(id), error))
+				return false;
+			for (auto &item : *profile.mutable_inventory())
+				if (item.instance_id() == id)
+					item.set_equipped_slot(slot);
+			return true;
+		}
+		bool set_avatar_state(
+		    const protocol::AvatarDescriptor &avatar,
+		    std::string &error) override
+		{
+			if (!perform("avatar", error))
+				return false;
+			*profile.mutable_avatar() = avatar;
+			return true;
+		}
+		bool set_transform(
+		    const protocol::TransformState &value,
+		    std::string &error) override
+		{
+			if (!perform("transform", error))
+				return false;
+			profile.set_transform_valid(true);
+			*profile.mutable_last_transform() = value;
+			return true;
+		}
+	};
+}
+
+int main()
+{
+	using namespace kcd2mp;
+	auto baseline = server::instantiate_starter_profile(
+	    server::default_starter_profile_template(),
+	    1,
+	    "Henry",
+	    "sandbox");
+	auto *avatar = baseline.mutable_avatar();
+	avatar->set_archetype_id(
+	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
+	avatar->set_revision(1);
+
+	auto target = baseline;
+	target.set_money(250);
+	target.mutable_stats(0)->set_level(7);
+	target.mutable_inventory(0)->set_count(5);
+
+	fake_backend success;
+	success.profile = baseline;
+	success.definitions.insert(target.inventory(0).definition_id());
+	const auto applied = reconcile_profile(success, target);
+	assert(applied.success);
+	assert(success.profile.money() == 250);
+	assert(success.profile.stats(0).level() == 7);
+	assert(success.profile.inventory(0).count() == 5);
+
+	fake_backend rollback;
+	rollback.profile = baseline;
+	rollback.definitions = success.definitions;
+	rollback.fail_operation = "skill:alchemy";
+	const auto failed = reconcile_profile(rollback, target);
+	assert(!failed.success);
+	assert(failed.rollback_attempted);
+	assert(failed.rollback_succeeded);
+	assert(rollback.profile.money() == baseline.money());
+	assert(rollback.profile.stats(0).level() == baseline.stats(0).level());
+	return 0;
+}

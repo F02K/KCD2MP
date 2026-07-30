@@ -1,4 +1,8 @@
-# KCD2MP 0.3 sandbox multiplayer status
+# KCD2MP 0.3 sandbox multiplayer status (historical)
+
+This document describes the removed pre-v4 prototype. It is retained as
+development history and is not an engine-ABI reference. See the
+[v4 libKCD2/KCSE migration audit](libkcd2-kcse-migration.md).
 
 ## Implemented foundation
 
@@ -114,9 +118,9 @@ or transform is unavailable. The supported public world IDs are `2` (`trosecko`)
 (`kutnohorsko`), and `4` (`klaster`); additional retail test levels are allowlisted for
 development.
 
-The remaining native gaps are automatic creation/loading of an isolated multiplayer save copy,
-full RPG/profile capture and application, stronger quest/dialog scheduler isolation, and the
-complete two-client retail acceptance matrix.
+The multiplayer profile is applied only to the already loaded runtime session. Automatic creation
+of a separate save copy, quest/dialog scheduler state, and general world deltas remain outside the
+profile contract. The complete two-client retail acceptance matrix remains a release check.
 
 ## Server entity isolation and remote avatars
 
@@ -124,45 +128,36 @@ complete two-client retail acceptance matrix.
 `ServerEntityControl` state. `disable_non_player_entities` selects the state after server start.
 Accepted clients and late joiners receive the same value.
 
-On the game thread the client limits isolation to `CEntity` instances carrying CryEngine's
-`ENTITY_FLAG_HAS_AI`. It preserves their active and hidden state before calling the audited
-`Activate(false)` and `Hide(true)` VTable entries. The local `Dude`, registered remote-player
-entities, UI/Flash helpers, cameras, particles, equipment, and all other non-AI entities are
-excluded. Newly created AI entities inherit the disabled state, destroyed entities are forgotten,
-and enable/disconnect restores the per-entity values.
+On the game thread the client isolates every existing and newly spawned non-player Entity. It
+captures flags, AI object ID, activation, visibility, and physics state before applying the exact
+sink-driven isolation mutations. The local player and registered remote-player Entities are
+exceptions. Destroyed or reused Entities are tracked by the audited `IEntitySystemSink` order;
+enable/disconnect restores every surviving Entity symmetrically.
 
 The remote-avatar manager consumes the existing interpolated remote-player views and implements
 the complete spawn/update/remove lifecycle behind a native backend contract. Reconnecting players
 remain at their last transform and `PlayerLeft` removes their avatar.
 
-The retail backend prefers `XGenAIModule.SpawnEntity` and falls back to
-`System.SpawnEntity` when the retail Lua VM does not export the XGen spawn
-binding. Both are called through protected typed calls in the existing
-Game Lua VM, then polls `System.GetEntity` until Entity, Soul, Actor, Human, and Inventory are
-available. Spawn parameters select the authoritative Soul and disable AI and perception. The
-native entity is registered as a player exception, physics is disabled, and interpolated position
-and rotation are applied through `CEntity::SetWorldTM`. When a game build exports the legacy
-`Actor.SetMovementTarget` binding it also receives the network velocity for Idle/Walk/Run
-animation. Current retail builds that removed this binding use transform-only movement instead;
-the missing optional animation path does not fail the remote-avatar lifecycle.
+The retail backend calls native `IActorSystem::CreateActor` with the `NPC` factory, registers the
+Entity as a player exception before isolation can affect it, applies the authoritative shared Soul,
+and polls the readiness chain Entity → Actor → Soul → Human → Inventory. AI, perception flags, and
+the concrete physical Entity proxy are disabled. Interpolated position and rotation are written
+through audited `IEntity::SetWorldTM`; Idle/Walk/Run requests are driven through the native Actor
+MovementController.
 
-Local visible equipment is sampled from the live Inventory at no more than 4 Hz. Item,
-equipment-slot, armor, and weapon metadata are combined with active mod table paks in load order;
-KCD2 resolves the resulting Character/STORM visuals from its already active database. Only
-definition UUID and canonical slot are transmitted. Receivers create local item instances, equip
-in layer order through the retail `Inventory.CreateItem`/`Inventory.FindItem` path, and apply
-weapon set and Draw/Holster state. A fatal transaction restores the last confirmed equipment;
-individual definitions absent from the receiving client's active database are skipped with a
-transition diagnostic. Receiver-local items are cleaned up with `Inventory.DeleteItem`; active
-weapon sampling uses the retail `Human.GetItemInHand` binding rather than the removed legacy
-`Inventory.GetCurrentItemId` method.
+Local inventory and equipment are captured natively. Logical instance UUID, definition UUID,
+count, quality, condition, canonical slot, stance, and Draw/Holster state are transmitted.
+Receivers validate all definitions before mutation, unequip in reverse layer order, reconcile
+instances, equip in layer order, and apply weapon state. Any failed mutation restores the last
+confirmed state through the same reconciler; rollback failure immediately starts native world
+unload.
 
-Failed desired Souls or replacements retain a visible built-in fallback and retry after
-1/2/4/8/16/30 seconds. A replacement becomes active only after it is fully ready. Avatar-local
-errors do not close the connection; only an unavailable complete fallback lifecycle is fatal.
-Removal first unregisters the player exception and then uses `System.RemoveEntity`, including on
-disconnect, level change, and external entity destruction. No Workshop runtime dependency,
-generated Lua, console, raw EntitySystem spawn, or cloning fallback is used.
+Failed desired Souls or replacements retain the built-in Default-Soul fallback and retry after
+1/2/4/8/16/30 seconds. A replacement becomes active only after it is fully ready. Backend failures
+produce a concrete client error. Removal transactionally clears created equipment, unregisters the
+player exception, and calls native `IEntitySystem::RemoveEntity`, including on disconnect, epoch
+change, sandbox end, and external destruction. No Workshop runtime dependency, generated Lua,
+console, raw EntitySystem spawn, or cloning fallback is used.
 
 ## Local developer console
 
@@ -197,18 +192,20 @@ Automated tests cover:
   fallback/retry/cleanup behavior, and controlled-NPC external-destruction handling;
 - equipment catalog slot filtering, layer order, weapon classification, and active mod-pak
   overlays; avatar UUID/slot/revision validation and non-disconnecting rejection;
-- the existing PE fingerprint and native signature registry, including the audited console
-  execution VTable target.
+- starter TOML validation, exact stat/skill sets, inventory diffs, stack changes, slot ordering,
+  transactional profile rollback, stale handles, epochs, and capability masks;
+- delayed Actor/Soul/Human readiness, spawn timeout, external destroy, Default-Soul fallback,
+  remove in each lifecycle state, and partially failed equipment transactions;
+- the exact PE fingerprint and native signature registry, including transform, sink, physics,
+  item/equipment/RPG, Human weapon, and native unload targets.
 
 DPAPI isolation across two different Windows user accounts, native save-directory byte/timestamp
 comparison, 30-minute in-game play, the full two-client Soul/equipment/weapon/locomotion matrix,
-fault injection, and clean exit after final disconnect remain manual acceptance tests. Native
-remote-character isolation and cleanup must still be confirmed in-game before Version 0.3 can be
-called release-ready.
+fault injection, and clean exit after final disconnect remain manual acceptance tests.
 
 World deltas for containers, doors, NPCs, weather, time, and quests remain outside version 0.3.
 
-Version 0.3 additionally defines revisioned remote-avatar descriptors, server-side archetype
-allowlists, visible equipment/stance replication, and an engine-neutral controlled-NPC/Lua API.
-The retail character backend remains behind a complete pre-`WorldReady` capability probe so a
-partial Actor/Soul/Inventory lifecycle cannot enter multiplayer.
+Version 0.4 defines revisioned remote-avatar descriptors, server-side archetype allowlists, and
+visible equipment/stance replication. The native controlled-NPC machinery remains an internal
+multiplayer component and is not exposed as a general Lua API. A complete pre-`WorldReady` active
+probe publishes the runtime capability mask.

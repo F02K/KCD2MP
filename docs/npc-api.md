@@ -1,127 +1,19 @@
 # Controlled NPC API
 
-KCD2MP 0.3 contains an engine-neutral controlled-NPC manager and a Lua API.
-NPCs created through this API are visual, locally owned actors. AI, dialogue,
-quests, damage, collision, and save persistence are intentionally outside the
-contract.
+The former Lua-backed controlled-NPC API was removed in protocol/runtime v4.
+It used Game Lua for XGen spawning, inventory and equipment, and therefore is
+not a valid implementation source for the native multiplayer client.
 
-The retail backend spans both native loaders. KCSE runs from `dinput8.dll`;
-KCD2MP runs from `d3d12.dll`; `KCD2MPKCSEBridge.dll` is loaded as a KCSE
-plugin. Their versioned C ABI passes only fixed-size values and opaque pointers.
-No C++ standard-library object or allocator ownership crosses the DLL boundary.
-KCSE/libKCD2 resolves and validates the native Entity, Actor, and Soul, while
-KCD2MP's audited Game-Lua path currently owns XGen spawning, Human/Inventory
-operations, and removal. The bridge also exposes KCSE's game-thread task queue
-for later native NPC operations.
+Remote players now belong exclusively to `KCD2MPKCSEClient.dll`. A replacement
+general-purpose mod API is intentionally not exposed. The multiplayer runtime
+uses the complete internal native lifecycle:
 
-The retail backend uses protected calls into KCD2's already running Game Lua VM.
-It prefers `XGenAIModule.SpawnEntity`; retail builds that do not export that
-binding use `System.SpawnEntity` with the Soul GUID and matching human entity
-class from the runtime catalog. Both paths initialize the complete
-Entity/Soul/Actor/Human/Inventory/STORM lifecycle. KCD2MP then verifies the
-components, maps the native entity ID, disables physics, and applies transforms
-through `CEntity::SetWorldTM`. The capability remains fail-closed when neither
-spawn binding is available or when any other required binding is missing. No Workshop mod,
-copied script, generated Lua string, console command, raw EntitySystem spawn, or
-memory clone is used.
+`spawn → Actor/Soul/Human readiness → transform/motion → equipment → remove`
 
-## Lua
+Raw `IEntitySystem::SpawnEntity`, Entity names, and Game-Lua calls are not
+accepted as substitutes. The KCSE client actively probes the native path and
+reports a concrete lifecycle error if any stage fails.
 
-```lua
-local handle, err = npc.spawn({
-    archetype = "763db0bb-4469-497d-bdc9-712b3df91b5a",
-    position = { x = 0.0, y = 0.0, z = 0.0 },
-    rotation = { x = 0.0, y = 0.0, z = 0.0, w = 1.0 },
-    locomotion = "idle",
-    appearance = {
-        stance = "relaxed",
-        weapon_class = "none",
-        weapon_drawn = false,
-        equipment = {},
-    },
-})
-
-if not handle then
-    log.warning(err)
-    return
-end
-
-local state, diagnostic = npc.status(handle)
-npc.set_transform(handle, {
-    position = { x = 1.0, y = 2.0, z = 3.0 },
-    rotation = { x = 0.0, y = 0.0, z = 0.0, w = 1.0 },
-})
-npc.set_locomotion(handle, "walk")
-npc.remove(handle)
-```
-
-Valid locomotion values are `idle`, `walk`, and `run`. Valid weapon classes
-are `none`, `one_handed`, `two_handed`, `polearm`, `bow`, and `crossbow`.
-Stance is either `relaxed` or `ready`. At most 32 visible equipment entries
-are accepted.
-
-Handles are owned by the plugin that created them. All of a plugin's handles
-are queued for removal when the plugin is cleaned up or hot-reloaded.
-`npc.set_locomotion` remains source-compatible and uses standard walk/run
-speeds along the facing direction. Multiplayer avatars additionally provide
-their measured horizontal velocity to the same backend.
-
-## Human Soul catalog
-
-`archetype` is a concrete human Soul UUID. The client deterministically reads
-all human Soul rows from the local `Data/Tables.pak`; animal Soul archetypes are
-excluded. The supported `1308617_856` catalog contains 7,266 entries and is
-checked against a versioned fingerprint before it is exposed to multiplayer.
-The generated [JSON](../data/npc_archetypes.json) and
-[Markdown overview](npc-archetypes.md) are produced by
-`tools/generate_npc_catalog.py`.
-
-The built-in fallback is `763db0bb-4469-497d-bdc9-712b3df91b5a`
-(`ksta_additive_man_18`, `char_GENERIC_MAN_COMMONER_18`). Unknown configured,
-stored, or network-provided Soul IDs are normalized to that fallback. The
-server allowlist is deduplicated after normalization.
-
-## Multiplayer avatar contract
-
-The server owns an archetype allowlist:
-
-```toml
-default_avatar_archetype = "763db0bb-4469-497d-bdc9-712b3df91b5a"
-allowed_avatar_archetypes = ["763db0bb-4469-497d-bdc9-712b3df91b5a"]
-```
-
-Avatar descriptors are sent reliably and revisioned independently from
-movement snapshots. `ServerAccepted` and `PlayerJoined` include the full
-descriptor; regular `WorldSnapshot` messages contain only dynamic movement.
-The owning client may submit at most four avatar changes per second.
-
-The server validates UUID syntax, at most 32 items, canonical and unique
-equipment slots, stance, weapon class, drawn-state consistency, and the base
-revision. A stale revision receives the authoritative descriptor. Unknown but
-structurally valid Soul IDs receive the normalized authoritative descriptor.
-Invalid avatar content receives `AvatarRejected` without closing the
-multiplayer connection. Player movement continues to use the client-originated,
-server-validated transform pipeline.
-
-The client canonicalizes equipment by slot and coalesces visual changes to at
-most four reliable updates per second. Remote transforms and locomotion are
-applied continuously; equipment, stance, weapon class, and drawn state are
-applied only when the avatar revision changes. A Soul change spawns the
-replacement before removing the old handle.
-
-Visible equipment is captured from the live inventory at most four times per
-second. Horse and non-equipped inventory entries are excluded. Clothing is
-ordered by body layer and weapons afterwards. Runtime item IDs never cross the
-network: the receiver creates local instances with `Inventory.CreateItem`,
-resolves their local runtime IDs through `Inventory.FindItem`, equips them through
-`Actor.EquipInventoryItem`, and applies the weapon set plus Draw/Holster state.
-Created receiver-local items are destroyed through `Inventory.DeleteItem`.
-The local catalog includes base tables and active mod paks;
-each receiver still confirms the definition against its active ItemManager.
-
-If the desired Soul or prepared replacement fails, the existing visible avatar
-is retained or the built-in Soul is spawned. Desired state is retried after
-1, 2, 4, 8, 16, and then 30 seconds. A prepared primary replaces the fallback
-only after it reaches ready state. Disconnect, level change, external entity
-destruction, and plugin cleanup unregister the player exception before
-`System.RemoveEntity` removes the Actor and KCD2MP-created items.
+The Human Soul catalog remains available as read-only data for UI and server
+allowlist validation. Native Entity IDs, WUIDs, and pointers never cross the UI
+ABI or network protocol.

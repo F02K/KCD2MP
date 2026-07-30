@@ -1,0 +1,118 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace kcd2mp::kcse
+{
+	inline constexpr std::uint32_t client_abi_version = 4;
+	inline constexpr std::uint64_t client_build_id = 0x000400006A350E20ULL;
+	inline constexpr wchar_t client_module_name[] = L"KCD2MPKCSEClient.dll";
+	inline constexpr char client_query_export[] = "KCD2MP_QueryClient";
+
+	inline constexpr std::size_t short_text_capacity = 64;
+	inline constexpr std::size_t text_capacity = 256;
+
+	struct fixed_string
+	{
+		char value[short_text_capacity]{};
+	};
+
+	struct connect_request
+	{
+		std::uint32_t struct_size{sizeof(connect_request)};
+		char address[short_text_capacity]{};
+		char display_name[short_text_capacity]{};
+		char password[text_capacity]{};
+		char content_hash[short_text_capacity]{};
+		char claim_code[short_text_capacity]{};
+	};
+
+	struct runtime_status
+	{
+		std::uint32_t struct_size{sizeof(runtime_status)};
+		std::uint32_t available{};
+		std::uint32_t joinable{};
+		std::uint32_t kcse_version{};
+		std::uint32_t game_version{};
+		std::uint32_t release_index{};
+		std::uint64_t epoch{};
+		std::uint64_t capabilities{};
+		char address_library[short_text_capacity]{};
+		char level_id[short_text_capacity]{};
+		char diagnostic[text_capacity]{};
+	};
+
+	struct client_status_view
+	{
+		std::uint32_t struct_size{sizeof(client_status_view)};
+		std::uint32_t state{};
+		std::uint64_t local_player_id{};
+		std::int32_t ping_ms{-1};
+		float packet_loss_percent{};
+		std::uint32_t game_queue_size{};
+		char server_name[short_text_capacity]{};
+		char server_id[short_text_capacity]{};
+		char session_id[short_text_capacity]{};
+		char level_id[short_text_capacity]{};
+		char error[text_capacity]{};
+		char avatar_archetype_id[short_text_capacity]{};
+		char default_avatar_archetype_id[short_text_capacity]{};
+	};
+
+	struct remote_player_view
+	{
+		std::uint64_t player_id{};
+		std::uint32_t connected{};
+		std::uint32_t movement_mode{};
+		char display_name[short_text_capacity]{};
+	};
+
+	struct chat_entry_view
+	{
+		std::uint64_t player_id{};
+		std::uint64_t server_time_ms{};
+		char display_name[short_text_capacity]{};
+		char text[text_capacity]{};
+	};
+
+	struct client_api
+	{
+		std::uint32_t struct_size{};
+		std::uint32_t abi_version{};
+		std::uint64_t build_id{};
+		std::uint32_t(__cdecl *get_runtime_status)(
+		    runtime_status *result) noexcept{};
+		std::uint32_t(__cdecl *connect)(
+		    const connect_request *request) noexcept{};
+		void(__cdecl *disconnect)() noexcept{};
+		std::uint32_t(__cdecl *send_chat)(const char *text) noexcept{};
+		std::uint32_t(__cdecl *select_avatar)(
+		    const char *archetype_id) noexcept{};
+		std::uint32_t(__cdecl *get_status)(
+		    client_status_view *result) noexcept{};
+		std::uint32_t(__cdecl *copy_players)(
+		    remote_player_view *output,
+		    std::uint32_t capacity) noexcept{};
+		std::uint32_t(__cdecl *copy_chat)(
+		    chat_entry_view *output,
+		    std::uint32_t capacity) noexcept{};
+		std::uint32_t(__cdecl *copy_avatar_archetypes)(
+		    fixed_string *output,
+		    std::uint32_t capacity) noexcept{};
+	};
+
+	using query_client = const client_api *(__cdecl *)(
+	    std::uint32_t requested_abi) noexcept;
+
+	[[nodiscard]] constexpr bool compatible(const client_api *api) noexcept
+	{
+		return api && api->struct_size == sizeof(client_api)
+		    && api->abi_version == client_abi_version
+		    && api->build_id == client_build_id
+		    && api->get_runtime_status && api->connect && api->disconnect
+		    && api->send_chat && api->select_avatar && api->get_status
+		    && api->copy_players && api->copy_chat
+		    && api->copy_avatar_archetypes;
+	}
+}

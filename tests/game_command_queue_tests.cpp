@@ -28,5 +28,11 @@ int main()
 	assert(drained.size() == 2);
 	assert(drained.front().has_chat_broadcast());
 	assert(drained.back().has_player_left());
+
+	kcd2mp::protocol::Envelope stale;
+	stale.mutable_player_left()->set_player_id(9);
+	assert(queue.push(std::move(stale), true));
+	queue.clear();
+	assert(queue.size() == 0);
 	return 0;
 }

@@ -79,6 +79,12 @@ namespace kcd2mp
 			return m_queue.size();
 		}
 
+		void clear()
+		{
+			std::scoped_lock lock(m_mutex);
+			m_queue.clear();
+		}
+
 	private:
 		std::size_t m_capacity;
 		mutable std::mutex m_mutex;

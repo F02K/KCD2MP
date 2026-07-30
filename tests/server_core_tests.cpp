@@ -78,6 +78,13 @@ namespace
 		message->set_whgame_image_size(supported_whgame_image_size);
 		message->set_display_name(std::move(name));
 		message->set_password("secret");
+		auto *runtime = message->mutable_runtime();
+		runtime->set_features(required_client_runtime_capabilities);
+		runtime->set_kcse_version(1);
+		runtime->set_game_version(0x01050600);
+		runtime->set_release_index(1);
+		runtime->set_runtime_epoch(1);
+		runtime->set_address_library("test-address-library");
 		return envelope;
 	}
 
@@ -216,7 +223,8 @@ namespace
 	    server_core &core,
 	    connection_id connection,
 	    time_point now,
-	    player_id expected_id)
+	    player_id expected_id,
+	    protocol::PlayerProfile *enrolled_profile = nullptr)
 	{
 		core.on_transport_connected(connection, now);
 		core.on_message(connection, hello(), now);
@@ -230,6 +238,8 @@ namespace
 		assert(bootstrap.mode() == protocol::BOOTSTRAP_MODE_LOAD);
 		assert(!bootstrap.issued_identity_token().empty());
 		const auto token = bootstrap.issued_identity_token();
+		if (enrolled_profile)
+			*enrolled_profile = bootstrap.profile();
 
 		core.on_message(connection, ready(bootstrap), now + 2ms);
 		outbound = core.take_outbound();
@@ -268,6 +278,9 @@ int main()
 	temporary_world parsed_config_world;
 	{
 		const auto path = parsed_config_world.path / "server.toml";
+		std::filesystem::copy_file(
+		    std::filesystem::path(KCD2MP_SOURCE_DIR) / "starter_profile.toml",
+		    parsed_config_world.path / "starter_profile.toml");
 		std::ofstream output(path);
 		output
 		    << "[server]\n"
@@ -299,35 +312,62 @@ int main()
 		assert(!std::filesystem::exists(invalid.world_directory));
 	}
 
+	temporary_world incomplete_runtime_world;
+	{
+		server_core core(config_for(incomplete_runtime_world.path));
+		core.on_transport_connected(90, start);
+		auto missing_capability = hello();
+		missing_capability.mutable_client_hello()
+		    ->mutable_runtime()
+		    ->set_features(runtime_capability_kcse);
+		core.on_message(90, missing_capability, start);
+		auto outbound = core.take_outbound();
+		assert(has_rejection(
+		    outbound,
+		    90,
+		    protocol::REJECT_REASON_GAME_BUILD_MISMATCH));
+
+		core.on_transport_connected(91, start);
+		auto missing_address_library = hello();
+		missing_address_library.mutable_client_hello()
+		    ->mutable_runtime()
+		    ->clear_address_library();
+		core.on_message(91, missing_address_library, start);
+		outbound = core.take_outbound();
+		assert(has_rejection(
+		    outbound,
+		    91,
+		    protocol::REJECT_REASON_GAME_BUILD_MISMATCH));
+	}
+
 	temporary_world persistent_world;
 	std::string identity_token;
 	player_id persistent_id{};
 	{
 		auto counter = 0;
+		protocol::PlayerProfile enrolled_profile;
 		server_core core(
 		    config_for(persistent_world.path),
 		    [&]
 		    {
 			    return "test-token-" + std::to_string(++counter);
 		    });
-		identity_token = connect_new_player(core, 1, start, 1);
+		identity_token = connect_new_player(
+		    core,
+		    1,
+		    start,
+		    1,
+		    &enrolled_profile);
 		persistent_id = core.players().front().id;
 		core.on_message(1, client_transform(100), start + 3ms);
 		assert(core.players().front().last_sequence == 100);
 
 		protocol::Envelope update;
 		auto *profile_update = update.mutable_client_profile_update();
-		profile_update->set_base_revision(1);
+		profile_update->set_base_revision(enrolled_profile.revision());
 		auto *profile = profile_update->mutable_profile();
-		profile->set_player_id(persistent_id);
-		profile->set_revision(1);
-		profile->set_display_name("Henry");
-		profile->set_level_id("sandbox");
-		profile->set_money(1234);
-		auto *stat = profile->add_stats();
-		stat->set_id("strength");
-		stat->set_level(7);
-		stat->set_xp(42.0F);
+		*profile = enrolled_profile;
+		profile->set_money(profile->money() + 1);
 		core.on_message(1, update, start + 4ms);
 		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
@@ -359,7 +399,7 @@ int main()
 		outbound = core.take_outbound();
 		const auto reclaimed = find_bootstrap(outbound, 3);
 		assert(!reclaimed.issued_identity_token().empty());
-		assert(reclaimed.profile().money() == 1234);
+		assert(reclaimed.profile().revision() == 2);
 		identity_token = reclaimed.issued_identity_token();
 	}
 
@@ -375,8 +415,7 @@ int main()
 		auto outbound = restarted.take_outbound();
 		const auto bootstrap = find_bootstrap(outbound, 10);
 		assert(bootstrap.profile().player_id() == persistent_id);
-		assert(bootstrap.profile().money() == 1234);
-		assert(bootstrap.profile().stats(0).id() == "strength");
+		assert(bootstrap.profile().revision() == 2);
 		restarted.on_message(10, ready(bootstrap), start + 1002ms);
 		(void)restarted.take_outbound();
 		restarted.on_message(
@@ -529,7 +568,33 @@ int main()
 		config.known_avatar_archetypes.insert(std::string(knight_soul));
 		config.allowed_avatar_archetypes.push_back(std::string(knight_soul));
 		server_core core(config);
-		(void)connect_new_player(core, 37, start, 1);
+		protocol::PlayerProfile enrolled_profile;
+		(void)connect_new_player(
+		    core,
+		    37,
+		    start,
+		    1,
+		    &enrolled_profile);
+
+		protocol::Envelope inventory_update;
+		auto *inventory_message =
+		    inventory_update.mutable_client_profile_update();
+		inventory_message->set_base_revision(enrolled_profile.revision());
+		*inventory_message->mutable_profile() = enrolled_profile;
+		auto *inventory_item =
+		    inventory_message->mutable_profile()->add_inventory();
+		inventory_item->set_instance_id(
+		    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
+		inventory_item->set_definition_id(
+		    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+		inventory_item->set_count(1);
+		inventory_item->set_quality(1.0F);
+		inventory_item->set_condition(1.0F);
+		inventory_item->set_equipped_slot("PrimaryMainHand");
+		core.on_message(37, inventory_update, start + 3ms);
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_accepted());
 
 		protocol::Envelope update;
 		auto *message = update.mutable_client_avatar_update();
@@ -545,13 +610,13 @@ int main()
 		item->set_definition_id(
 		    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 		item->set_equipped_slot("PrimaryMainHand");
-		core.on_message(37, update, start + 1ms);
-		auto outbound = core.take_outbound();
+		core.on_message(37, update, start + 4ms);
+		outbound = core.take_outbound();
 		assert(outbound.size() == 1);
 		assert(outbound.front().envelope.has_avatar_accepted());
 		assert(outbound.front().envelope.avatar_accepted().revision() == 2);
 
-		core.on_message(37, update, start + 2ms);
+		core.on_message(37, update, start + 5ms);
 		outbound = core.take_outbound();
 		assert(outbound.size() == 1);
 		assert(outbound.front().envelope.has_avatar_rejected());
@@ -570,7 +635,7 @@ int main()
 		avatar->set_revision(2);
 		avatar->set_archetype_id(
 		    "99999999-9999-4999-8999-999999999999");
-		core.on_message(37, update, start + 3ms);
+		core.on_message(37, update, start + 6ms);
 		outbound = core.take_outbound();
 		assert(outbound.size() == 1);
 		assert(outbound.front().envelope.has_avatar_rejected());

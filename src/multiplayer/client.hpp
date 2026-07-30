@@ -3,6 +3,7 @@
 #include "multiplayer/game_command_queue.hpp"
 #include "multiplayer/identity_store.hpp"
 #include "multiplayer/networking.hpp"
+#include "multiplayer/runtime.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -79,7 +80,7 @@ namespace kcd2mp
 	class multiplayer_client
 	{
 	public:
-		multiplayer_client();
+		explicit multiplayer_client(client_runtime &runtime);
 		~multiplayer_client();
 		multiplayer_client(const multiplayer_client &) = delete;
 		multiplayer_client &operator=(const multiplayer_client &) = delete;
@@ -89,6 +90,7 @@ namespace kcd2mp
 		void fail(std::string error);
 		[[nodiscard]] bool send_chat(std::string text);
 		[[nodiscard]] bool select_avatar(std::string archetype_id);
+		void runtime_epoch_changed();
 		void game_tick(
 		    std::optional<protocol::TransformState> local_transform,
 		    std::optional<protocol::AvatarDescriptor> local_avatar_visual,
@@ -102,6 +104,8 @@ namespace kcd2mp
 		[[nodiscard]] std::optional<protocol::TransformState> take_local_correction();
 
 	private:
+		client_runtime &m_runtime;
+
 		struct connect_command
 		{
 			client_options options;
@@ -159,6 +163,8 @@ namespace kcd2mp
 		};
 
 		void network_loop(std::stop_token stop);
+		void advance_runtime_preflight();
+		void ensure_network_thread();
 		void set_state(client_state state, std::string error = {});
 		void queue_network(network_command command);
 		void queue_profile_snapshot(protocol::PlayerProfile profile);
@@ -193,6 +199,7 @@ namespace kcd2mp
 		std::optional<std::string> m_desired_archetype;
 		bool m_avatar_update_pending{};
 		std::optional<protocol::ServerBootstrap> m_pending_bootstrap;
+		std::optional<client_options> m_pending_connect;
 		bool m_profile_update_pending{};
 		std::uint32_t m_profile_snapshot_interval_seconds{15};
 
@@ -205,6 +212,29 @@ namespace kcd2mp
 		std::chrono::steady_clock::time_point m_last_avatar_sent{};
 	};
 
-	inline multiplayer_client *g_multiplayer_client{};
-	[[nodiscard]] const char *to_string(client_state state);
+	[[nodiscard]] inline const char *to_string(client_state state)
+	{
+		switch (state)
+		{
+		case client_state::disconnected:
+			return "Disconnected";
+		case client_state::preflight:
+			return "Preflight";
+		case client_state::authenticating:
+			return "Authenticating";
+		case client_state::waiting_for_bootstrap:
+			return "Waiting for bootstrap";
+		case client_state::loading_sandbox:
+			return "Loading sandbox";
+		case client_state::applying_profile:
+			return "Applying profile";
+		case client_state::connected:
+			return "Connected";
+		case client_state::reconnecting:
+			return "Reconnecting";
+		case client_state::closing:
+			return "Closing";
+		}
+		return "Unknown";
+	}
 }

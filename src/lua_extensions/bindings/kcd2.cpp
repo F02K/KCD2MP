@@ -5,7 +5,6 @@
 #include <kcd2_init.hpp>
 #include <lua/lua_manager.hpp>
 #include <lua_extensions/lua_module_ext.hpp>
-#include <multiplayer/game_bridge.hpp>
 
 #include <tuple>
 
@@ -19,104 +18,6 @@ namespace big
 namespace lua::kcd2
 {
 	static ankerl::unordered_dense::map<std::string, void*> g_file_path_to_bank;
-
-	static std::uint64_t pack_npc_handle(kcd2mp::npc::handle value)
-	{
-		return static_cast<std::uint64_t>(value.generation) << 32
-		    | value.slot;
-	}
-
-	static kcd2mp::npc::handle unpack_npc_handle(std::uint64_t value)
-	{
-		return {
-		    static_cast<std::uint32_t>(value),
-		    static_cast<std::uint32_t>(value >> 32)};
-	}
-
-	static kcd2mp::npc::owner_id npc_owner(sol::this_environment env)
-	{
-		return reinterpret_cast<kcd2mp::npc::owner_id>(
-		    big::lua_module::this_from(env));
-	}
-
-	static kcd2mp::npc::transform npc_transform_from_table(
-	    const sol::table& value)
-	{
-		kcd2mp::npc::transform result;
-		if (sol::optional<sol::table> position = value["position"])
-		{
-			result.position = {
-			    position->get_or("x", 0.0F),
-			    position->get_or("y", 0.0F),
-			    position->get_or("z", 0.0F)};
-		}
-		if (sol::optional<sol::table> rotation = value["rotation"])
-		{
-			result.rotation = {
-			    rotation->get_or("x", 0.0F),
-			    rotation->get_or("y", 0.0F),
-			    rotation->get_or("z", 0.0F),
-			    rotation->get_or("w", 1.0F)};
-		}
-		return result;
-	}
-
-	static std::optional<kcd2mp::npc::locomotion> npc_locomotion_from_string(
-	    std::string_view value)
-	{
-		if (value == "idle")
-			return kcd2mp::npc::locomotion::idle;
-		if (value == "walk")
-			return kcd2mp::npc::locomotion::walk;
-		if (value == "run")
-			return kcd2mp::npc::locomotion::run;
-		return std::nullopt;
-	}
-
-	static std::optional<kcd2mp::npc::appearance> npc_appearance_from_table(
-	    const sol::table& value)
-	{
-		kcd2mp::npc::appearance result;
-		const auto stance = value.get_or("stance", std::string{"relaxed"});
-		if (stance == "ready")
-			result.pose = kcd2mp::npc::stance::ready;
-		else if (stance != "relaxed")
-			return std::nullopt;
-		const auto weapon =
-		    value.get_or("weapon_class", std::string{"none"});
-		const std::array weapon_names{
-		    std::string_view{"none"},
-		    std::string_view{"one_handed"},
-		    std::string_view{"two_handed"},
-		    std::string_view{"polearm"},
-		    std::string_view{"bow"},
-		    std::string_view{"crossbow"}};
-		const auto weapon_iterator =
-		    std::ranges::find(weapon_names, weapon);
-		if (weapon_iterator == weapon_names.end())
-			return std::nullopt;
-		result.weapon = static_cast<kcd2mp::npc::weapon_class>(
-		    std::distance(weapon_names.begin(), weapon_iterator));
-		result.weapon_drawn = value.get_or("weapon_drawn", false);
-		if (sol::optional<sol::table> equipment = value["equipment"])
-		{
-			for (const auto& entry : *equipment)
-			{
-				const auto item = entry.second.as<sol::table>();
-				result.items.push_back({
-				    item.get_or("definition_id", std::string{}),
-				    item.get_or("equipped_slot", std::string{})});
-				if (result.items.back().definition_id.empty()
-				    || result.items.back().equipped_slot.empty()
-				    || result.items.size() > 32)
-					return std::nullopt;
-			}
-		}
-		if (result.weapon_drawn
-		    && result.weapon == kcd2mp::npc::weapon_class::none)
-			return std::nullopt;
-		return result;
-	}
 
 	// Lua API: Function
 	// Table: audio
@@ -195,81 +96,6 @@ namespace lua::kcd2
 
 	void bind(sol::table& state)
 	{
-		{
-			auto ns = state.create_named("npc");
-			ns["spawn"] = [](const sol::table& spec, sol::this_environment env)
-			    -> std::tuple<sol::optional<std::uint64_t>, std::string>
-			{
-				const auto owner = npc_owner(env);
-				const auto archetype =
-				    spec.get_or("archetype", std::string{});
-				if (!owner || archetype.empty())
-					return {sol::nullopt, "invalid NPC owner or archetype"};
-				kcd2mp::npc::spawn_request request;
-				request.archetype_id = archetype;
-				request.world_transform = npc_transform_from_table(spec);
-				if (const auto movement = npc_locomotion_from_string(
-				        spec.get_or("locomotion", std::string{"idle"})))
-					request.movement = *movement;
-				else
-					return {sol::nullopt, "invalid NPC locomotion"};
-				if (sol::optional<sol::table> appearance = spec["appearance"])
-				{
-					const auto parsed = npc_appearance_from_table(*appearance);
-					if (!parsed)
-						return {sol::nullopt, "invalid NPC appearance"};
-					request.visual = *parsed;
-				}
-				const auto spawned = kcd2mp::game::npc_manager().spawn(
-				    std::move(request),
-				    owner);
-				if (!spawned)
-					return {sol::nullopt, spawned.diagnostic};
-				return {pack_npc_handle(spawned.npc), std::string{}};
-			};
-			ns["status"] = [](std::uint64_t packed)
-			{
-				const auto status = kcd2mp::game::npc_manager().get_status(
-				    unpack_npc_handle(packed));
-				return std::tuple{
-				    std::string{kcd2mp::npc::to_string(status.value)},
-				    status.diagnostic};
-			};
-			ns["set_transform"] = [](
-			                             std::uint64_t packed,
-			                             const sol::table& value)
-			{
-				return kcd2mp::game::npc_manager().set_transform(
-				    unpack_npc_handle(packed),
-				    npc_transform_from_table(value));
-			};
-			ns["set_locomotion"] = [](
-			                              std::uint64_t packed,
-			                              std::string mode)
-			{
-				const auto movement = npc_locomotion_from_string(mode);
-				return movement
-				    && kcd2mp::game::npc_manager().set_locomotion(
-				        unpack_npc_handle(packed),
-				        *movement);
-			};
-			ns["set_appearance"] = [](
-			                              std::uint64_t packed,
-			                              const sol::table& value)
-			{
-				const auto appearance = npc_appearance_from_table(value);
-				return appearance
-				    && kcd2mp::game::npc_manager().set_appearance(
-				        unpack_npc_handle(packed),
-				        *appearance);
-			};
-			ns["remove"] = [](std::uint64_t packed)
-			{
-				return kcd2mp::game::npc_manager().remove(
-				    unpack_npc_handle(packed));
-			};
-		}
-
 		{
 			auto ns = state["log"].get_or_create<sol::table>();
 

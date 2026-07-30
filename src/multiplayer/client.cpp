@@ -1,6 +1,5 @@
 #include "multiplayer/client.hpp"
 #include "multiplayer/avatar_visual.hpp"
-#include "multiplayer/game_bridge.hpp"
 
 #include <algorithm>
 #include <array>
@@ -38,12 +37,8 @@ namespace kcd2mp
 
 	}
 
-	multiplayer_client::multiplayer_client() :
-	    m_network_thread(
-	        [this](std::stop_token stop)
-	        {
-		        network_loop(stop);
-	        })
+	multiplayer_client::multiplayer_client(client_runtime &runtime) :
+	    m_runtime(runtime)
 	{
 	}
 
@@ -64,13 +59,10 @@ namespace kcd2mp
 		{
 			return false;
 		}
-		const auto sandbox = game::sandbox_capability();
-		if (!sandbox.available || !game::can_start_join())
+		if (!m_runtime.can_start_join())
 		{
 			std::scoped_lock lock(m_state_mutex);
-			m_status.error = !sandbox.available
-			    ? sandbox.diagnostic
-			    : "Join requires a fully loaded native save.";
+			m_status.error = "Join requires a fully loaded native save.";
 			return false;
 		}
 		{
@@ -79,6 +71,18 @@ namespace kcd2mp
 			{
 				return false;
 			}
+		}
+		if (!m_runtime.prepare_multiplayer())
+		{
+			const auto gate = m_runtime.capability();
+			std::scoped_lock lock(m_state_mutex);
+			m_status.error = gate.diagnostic.empty()
+			    ? "Multiplayer runtime initialization could not start."
+			    : gate.diagnostic;
+			return false;
+		}
+		{
+			std::scoped_lock lock(m_state_mutex);
 			m_status = {};
 			m_status.state = client_state::preflight;
 			m_remote_players.clear();
@@ -95,14 +99,15 @@ namespace kcd2mp
 			m_last_avatar_sent = {};
 			m_profile_snapshot_interval_seconds = 15;
 			m_resume_token.clear();
+			m_pending_connect = std::move(options);
 		}
-		queue_network(connect_command{std::move(options)});
+		ensure_network_thread();
 		return true;
 	}
 
 	void multiplayer_client::disconnect()
 	{
-		if (const auto profile = game::local_profile())
+		if (const auto profile = m_runtime.local_profile())
 		{
 			queue_profile_snapshot(*profile);
 		}
@@ -113,6 +118,7 @@ namespace kcd2mp
 				return;
 			}
 			m_status.state = client_state::closing;
+			m_pending_connect.reset();
 		}
 		queue_network(disconnect_command{});
 	}
@@ -165,12 +171,45 @@ namespace kcd2mp
 		return true;
 	}
 
+	void multiplayer_client::runtime_epoch_changed()
+	{
+		m_game_commands.clear();
+		if (m_runtime.sandbox_active())
+			m_runtime.end_sandbox();
+		else
+			m_runtime.cancel_multiplayer_preparation();
+		{
+			std::scoped_lock lock(m_state_mutex);
+			m_remote_players.clear();
+			m_local_correction.reset();
+			m_pending_bootstrap.reset();
+			m_pending_avatar.reset();
+			m_desired_avatar.reset();
+			m_profile.reset();
+			m_local_avatar.reset();
+			m_profile_update_pending = false;
+			m_avatar_update_pending = false;
+			m_pending_connect.reset();
+			if (m_status.state == client_state::disconnected)
+			{
+				m_status.error.clear();
+				return;
+			}
+			m_status.state = client_state::closing;
+			m_status.error =
+			    "KCD2 runtime epoch changed; native handles and queued "
+			    "commands were invalidated.";
+		}
+		queue_network(disconnect_command{});
+	}
+
 	void multiplayer_client::game_tick(
 	    std::optional<protocol::TransformState> local_transform,
 	    std::optional<protocol::AvatarDescriptor> local_avatar_visual,
 	    std::string_view current_level,
 	    std::chrono::steady_clock::time_point now)
 	{
+		advance_runtime_preflight();
 		for (const auto &envelope : m_game_commands.drain())
 		{
 			handle_game_envelope(envelope, now);
@@ -238,12 +277,62 @@ namespace kcd2mp
 		}
 		if (profile_due)
 		{
-			if (const auto profile = game::local_profile())
+			if (const auto profile = m_runtime.local_profile())
 			{
 				queue_profile_snapshot(*profile);
 			}
 		}
 		update_interpolation(now);
+	}
+
+	void multiplayer_client::advance_runtime_preflight()
+	{
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::preflight
+			    || !m_pending_connect)
+				return;
+		}
+
+		const auto gate = m_runtime.capability();
+		if (!gate.available)
+		{
+			if (gate.pending)
+				return;
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state == client_state::preflight
+			    && m_pending_connect)
+			{
+				m_status.state = client_state::disconnected;
+				m_status.error = gate.diagnostic.empty()
+				    ? "Multiplayer runtime initialization failed."
+				    : gate.diagnostic;
+				m_pending_connect.reset();
+			}
+			return;
+		}
+
+		std::optional<client_options> options;
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::preflight
+			    || !m_pending_connect)
+				return;
+			options = std::move(m_pending_connect);
+			m_pending_connect.reset();
+		}
+		queue_network(connect_command{std::move(*options)});
+	}
+
+	void multiplayer_client::ensure_network_thread()
+	{
+		if (m_network_thread.joinable())
+			return;
+		m_network_thread = std::jthread(
+		    [this](std::stop_token stop)
+		    {
+			    network_loop(stop);
+		    });
 	}
 
 	client_status multiplayer_client::status() const
@@ -324,6 +413,15 @@ namespace kcd2mp
 					        hello->set_display_name(options.display_name);
 					        hello->set_password(options.password);
 					        hello->set_content_hash(options.content_hash);
+					        auto *runtime_info = hello->mutable_runtime();
+					        const auto runtime = m_runtime.descriptor();
+					        runtime_info->set_features(runtime.capabilities);
+					        runtime_info->set_kcse_version(runtime.kcse_version);
+					        runtime_info->set_game_version(runtime.game_version);
+					        runtime_info->set_release_index(runtime.release_index);
+					        runtime_info->set_runtime_epoch(runtime.epoch);
+					        runtime_info->set_address_library(
+					            runtime.address_library);
 					        if (!send_envelope(envelope, reliability::reliable))
 					        {
 						        set_state(
@@ -631,6 +729,7 @@ namespace kcd2mp
 		if (state == client_state::disconnected)
 		{
 			m_pending_bootstrap.reset();
+			m_pending_connect.reset();
 			m_status.local_player_id = 0;
 			m_status.ping_ms = -1;
 			m_status.packet_loss_percent = 0.0F;
@@ -711,7 +810,7 @@ namespace kcd2mp
 			}
 			const auto bootstrap_copy = bootstrap;
 			lock.unlock();
-			const auto result = game::begin_sandbox(bootstrap_copy);
+			const auto result = m_runtime.begin_sandbox(bootstrap_copy);
 			lock.lock();
 			if (!result.started)
 			{
@@ -726,7 +825,7 @@ namespace kcd2mp
 			    || m_status.state == client_state::closing)
 			{
 				lock.unlock();
-				game::end_sandbox();
+				m_runtime.end_sandbox();
 				return;
 			}
 			m_pending_bootstrap = bootstrap_copy;
@@ -845,7 +944,7 @@ namespace kcd2mp
 			        .non_player_entities_disabled();
 			lock.unlock();
 			const bool applied =
-			    game::set_non_player_entities_disabled(disabled);
+			    m_runtime.set_non_player_entities_disabled(disabled);
 			lock.lock();
 			if (!applied)
 			{
@@ -875,12 +974,12 @@ namespace kcd2mp
 			bootstrap = *m_pending_bootstrap;
 		}
 
-		const auto progress = game::poll_sandbox();
-		if (progress.phase == game::sandbox_phase::loading)
+		const auto progress = m_runtime.poll_sandbox();
+		if (progress.phase == sandbox_phase::loading)
 		{
 			return;
 		}
-		if (progress.phase != game::sandbox_phase::ready)
+		if (progress.phase != sandbox_phase::ready)
 		{
 			const auto reason = progress.error.empty()
 			    ? "sandbox bootstrap stopped before the world became ready"
@@ -901,7 +1000,7 @@ namespace kcd2mp
 				m_status.error = reason;
 			}
 			queue_network(world_failed_command{std::move(failed)});
-			game::end_sandbox();
+			m_runtime.end_sandbox();
 			return;
 		}
 
@@ -1102,29 +1201,4 @@ namespace kcd2mp
 		return result;
 	}
 
-	const char *to_string(client_state state)
-	{
-		switch (state)
-		{
-		case client_state::disconnected:
-			return "Disconnected";
-		case client_state::preflight:
-			return "Preflight";
-		case client_state::authenticating:
-			return "Authenticating";
-		case client_state::waiting_for_bootstrap:
-			return "Waiting for bootstrap";
-		case client_state::loading_sandbox:
-			return "Loading sandbox";
-		case client_state::applying_profile:
-			return "Applying profile";
-		case client_state::connected:
-			return "Connected";
-		case client_state::reconnecting:
-			return "Reconnecting";
-		case client_state::closing:
-			return "Closing";
-		}
-		return "Unknown";
-	}
 }

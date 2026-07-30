@@ -10,26 +10,6 @@
 
 namespace kcd2mp::npc
 {
-	enum class lua_spawn_binding
-	{
-		unavailable,
-		xgen_ai_module,
-		system,
-	};
-
-	[[nodiscard]] constexpr lua_spawn_binding select_lua_spawn_binding(bool xgen_spawn_available, bool system_spawn_available)
-	{
-		if (xgen_spawn_available)
-		{
-			return lua_spawn_binding::xgen_ai_module;
-		}
-		if (system_spawn_available)
-		{
-			return lua_spawn_binding::system;
-		}
-		return lua_spawn_binding::unavailable;
-	}
-
 	struct xgen_spawn_parameters
 	{
 		std::string name;
