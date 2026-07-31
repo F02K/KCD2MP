@@ -48,6 +48,64 @@ namespace kcd2mp
 		std::optional<protocol::TransformState> initial_spawn;
 	};
 
+	enum class sandbox_spawn_source
+	{
+		none,
+		profile,
+		server,
+		local_engine_default
+	};
+
+	struct sandbox_spawn_selection
+	{
+		std::optional<protocol::TransformState> transform;
+		sandbox_spawn_source source{sandbox_spawn_source::none};
+	};
+
+	[[nodiscard]] inline sandbox_spawn_selection select_sandbox_spawn(
+	    const protocol::ServerBootstrap &bootstrap,
+	    const std::optional<protocol::TransformState> &local_transform)
+	{
+		if (bootstrap.has_profile()
+		    && bootstrap.profile().transform_valid()
+		    && bootstrap.profile().has_last_transform())
+		{
+			return {
+			    bootstrap.profile().last_transform(),
+			    sandbox_spawn_source::profile};
+		}
+		if (bootstrap.spawn_valid() && bootstrap.has_spawn())
+		{
+			return {
+			    bootstrap.spawn(),
+			    sandbox_spawn_source::server};
+		}
+		if (bootstrap.mode() == protocol::BOOTSTRAP_MODE_INITIALIZE
+		    && local_transform)
+		{
+			return {
+			    *local_transform,
+			    sandbox_spawn_source::local_engine_default};
+		}
+		return {};
+	}
+
+	[[nodiscard]] inline const char *to_string(
+	    sandbox_spawn_source source) noexcept
+	{
+		switch (source)
+		{
+		case sandbox_spawn_source::profile:
+			return "profile.last_transform";
+		case sandbox_spawn_source::server:
+			return "bootstrap.spawn";
+		case sandbox_spawn_source::local_engine_default:
+			return "local.engine-default";
+		default:
+			return "none";
+		}
+	}
+
 	class client_runtime
 	{
 	public:

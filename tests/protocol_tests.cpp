@@ -128,6 +128,7 @@ int main()
 	    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 	visible_item->set_equipped_slot("PrimaryMainHand");
 	profile->set_money(100);
+	profile->set_money_subunits(7);
 	for (const auto id : canonical_stat_ids)
 	{
 		auto *value = profile->add_stats();
@@ -151,6 +152,10 @@ int main()
 	inventory_item->set_condition(1.0F);
 	inventory_item->set_equipped_slot(visible_item->equipped_slot());
 	assert(is_valid_profile(*profile));
+	auto invalid_money_subunits = *profile;
+	invalid_money_subunits.set_money_subunits(
+	    money_subunits_per_groschen);
+	assert(!is_valid_profile(invalid_money_subunits));
 	auto incomplete_profile = *profile;
 	incomplete_profile.mutable_skills()->RemoveLast();
 	assert(!is_valid_profile(incomplete_profile));
@@ -171,6 +176,11 @@ int main()
 	        .avatar()
 	        .archetype_id()
 	    == "763db0bb-4469-497d-bdc9-712b3df91b5a");
+	assert(
+	    decoded_profile->client_profile_update()
+	        .profile()
+	        .money_subunits()
+	    == 7);
 
 	protocol::Envelope avatar_update_envelope;
 	auto *avatar_update =

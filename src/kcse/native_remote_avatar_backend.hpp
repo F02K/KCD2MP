@@ -45,11 +45,15 @@ namespace kcd2mp::kcse
 	private:
 		struct entry
 		{
+			player_id player{};
 			std::uint32_t entity_id{};
 			std::uint64_t epoch{};
 			std::string shared_soul_guid;
 			bool shared_soul_applied{};
 			bool appearance_applied{};
+			bool first_transform_logged{};
+			bool first_motion_logged{};
+			bool first_weapon_action_logged{};
 			bool failed{};
 			std::string failure;
 			protocol::AvatarDescriptor appearance;

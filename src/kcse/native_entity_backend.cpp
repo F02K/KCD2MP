@@ -1,4 +1,5 @@
 #include "kcse/native_entity_backend.hpp"
+#include "kcse/join_trace.hpp"
 #include "multiplayer/protocol.hpp"
 
 #include <crysystem/CCryAction.h>
@@ -12,6 +13,7 @@
 
 #include <chrono>
 #include <cmath>
+#include <format>
 
 namespace kcd2mp::kcse
 {
@@ -58,6 +60,27 @@ namespace kcd2mp::kcse
 			        transform.position().x(),
 			        transform.position().y(),
 			        transform.position().z()));
+		}
+
+		bool guarded_set_world_tm(
+		    Offsets::IEntity *entity,
+		    const Matrix34 *matrix) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				entity->SetWorldTM(*matrix, 0);
+				return true;
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER(
+			    "join.entity.SetWorldTM.seh"))
+			{
+				return false;
+			}
+#else
+			entity->SetWorldTM(*matrix, 0);
+			return true;
+#endif
 		}
 	}
 
@@ -126,8 +149,42 @@ namespace kcd2mp::kcse
 		auto *framework = CCryAction::GetInstance();
 		auto *entity = framework ? framework->GetClientEntity() : nullptr;
 		auto *context = wh::game::S_GameContext::GetInstance();
+		KCD2MP_JOIN_TRACE(
+		    "join.local-player.state",
+		    std::format(
+		        "framework={} client_entity={} game_context={} "
+		        "actor_system={} entity_system={} thread_role={}",
+		        static_cast<void *>(framework),
+		        static_cast<void *>(entity),
+		        static_cast<void *>(context),
+		        context
+		            ? static_cast<void *>(context->m_pActorSystem)
+		            : nullptr,
+		        SSystemGlobalEnvironment::GetInstance()
+		                ? static_cast<void *>(
+		                      SSystemGlobalEnvironment::GetInstance()
+		                          ->pEntitySystem)
+		                : nullptr,
+		        join_trace::thread_role_name(
+		            join_trace::current_thread_role())));
+		if (!context || !entity)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.local-player.null",
+			    std::format(
+			        "context_null={} entity_null={}",
+			        context == nullptr,
+			        entity == nullptr));
+		}
 		auto *actor =
 		    context && entity ? context->GetActorById(entity->GetId()) : nullptr;
+		KCD2MP_JOIN_TRACE(
+		    actor ? "join.local-actor.resolved"
+		          : "join.local-actor.null",
+		    std::format(
+		        "entity={} actor={}",
+		        static_cast<void *>(entity),
+		        static_cast<void *>(actor)));
 		return {entity, actor};
 	}
 
@@ -135,10 +192,23 @@ namespace kcd2mp::kcse
 	native_entity_backend::read_transform(Offsets::IEntity *entity) const
 	{
 		if (!entity)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.entity.read-transform.skipped",
+			    "entity=nil");
 			return std::nullopt;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.entity.GetWorldTMPtr.begin",
+		    std::format("entity={}", static_cast<void *>(entity)));
 		const auto *matrix = entity->GetWorldTMPtr();
 		if (!matrix)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.entity.GetWorldTMPtr.nil",
+			    std::format("entity={}", static_cast<void *>(entity)));
 			return std::nullopt;
+		}
 		protocol::TransformState result;
 		result.mutable_position()->set_x(matrix->m03);
 		result.mutable_position()->set_y(matrix->m13);
@@ -157,14 +227,47 @@ namespace kcd2mp::kcse
 		if (!entity || !is_finite_transform(transform))
 		{
 			error = "native transform target or entity is invalid";
+			KCD2MP_JOIN_TRACE(
+			    "join.entity.write-transform.rejected",
+			    std::format(
+			        "entity={} finite={} error=\"{}\"",
+			        static_cast<void *>(entity),
+			        is_finite_transform(transform),
+			        error));
 			return false;
 		}
 		const auto matrix = matrix_from_transform(transform);
-		entity->SetWorldTM(matrix, 0);
+		KCD2MP_JOIN_TRACE(
+		    "join.entity.SetWorldTM.begin",
+		    std::format(
+		        "entity={} position=({:.6f},{:.6f},{:.6f}) "
+		        "rotation=({:.6f},{:.6f},{:.6f},{:.6f})",
+		        static_cast<void *>(entity),
+		        transform.position().x(),
+		        transform.position().y(),
+		        transform.position().z(),
+		        transform.rotation().x(),
+		        transform.rotation().y(),
+		        transform.rotation().z(),
+		        transform.rotation().w()));
+		if (!guarded_set_world_tm(entity, &matrix))
+		{
+			error = "SEH exception in IEntity::SetWorldTM";
+			KCD2MP_JOIN_TRACE(
+			    "join.entity.SetWorldTM.failed",
+			    error);
+			return false;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.entity.SetWorldTM.returned",
+		    std::format("entity={}", static_cast<void *>(entity)));
 		const auto verified = read_transform(entity);
 		if (!verified)
 		{
 			error = "SetWorldTM did not leave a readable matrix";
+			KCD2MP_JOIN_TRACE(
+			    "join.entity.SetWorldTM.verify-failed",
+			    error);
 			return false;
 		}
 		const auto &actual = verified->position();
@@ -180,8 +283,21 @@ namespace kcd2mp::kcse
 		if (position_error > 0.01F || dot < 0.9999F)
 		{
 			error = "SetWorldTM readback exceeded position/rotation tolerance";
+			KCD2MP_JOIN_TRACE(
+			    "join.entity.SetWorldTM.verify-failed",
+			    std::format(
+			        "position_error={} quaternion_dot={} error=\"{}\"",
+			        position_error,
+			        dot,
+			        error));
 			return false;
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.entity.SetWorldTM.ok",
+		    std::format(
+		        "position_error={} quaternion_dot={}",
+		        position_error,
+		        dot));
 		return true;
 	}
 
@@ -197,9 +313,20 @@ namespace kcd2mp::kcse
 		const auto local = player();
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
 		auto *system = environment ? environment->pEntitySystem : nullptr;
+		KCD2MP_JOIN_TRACE(
+		    "join.entity-isolation.precheck",
+		    std::format(
+		        "disabled={} local_entity={} environment={} entity_system={}",
+		        disabled,
+		        static_cast<void *>(local.entity),
+		        static_cast<void *>(environment),
+		        static_cast<void *>(system)));
 		if (!local.entity || !system)
 		{
 			error = "entity isolation requires the local player and entity system";
+			KCD2MP_JOIN_TRACE(
+			    "join.entity-isolation.failed",
+			    error);
 			return false;
 		}
 		ensure_sink_registered(*system);

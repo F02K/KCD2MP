@@ -49,6 +49,7 @@ namespace kcd2mp::kcse
 		    std::string &error) override;
 		[[nodiscard]] bool set_money(
 		    std::int64_t money,
+		    std::uint32_t subunits,
 		    std::string &error) override;
 		[[nodiscard]] bool set_rpg_value(
 		    bool skill,

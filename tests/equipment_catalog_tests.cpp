@@ -54,7 +54,7 @@ namespace
 	}
 }
 
-int main()
+int main(int argc, char **argv)
 {
 	using namespace kcd2mp::npc;
 	const std::vector<catalog_document> documents{
@@ -88,6 +88,8 @@ int main()
 <Armor Id="33333333-3333-3333-3333-333333333333" Clothing="BootsKnee"/>
 <Armor Id="44444444-4444-4444-4444-444444444444" Clothing="HorseBody"/>
 <MeleeWeapon Id="55555555-5555-5555-5555-555555555555" Class="1"/>
+<ItemAlias Id="b867dd0e-1bfe-40e9-b114-4b126a3ff1b0"
+ SourceItemId="55555555-5555-5555-5555-555555555555"/>
 <MissileWeapon Id="66666666-6666-6666-6666-666666666666" Class="2"/>
 <Food Id="77777777-7777-7777-7777-777777777777"/>
 </ItemClasses></database>)xml"}};
@@ -96,7 +98,7 @@ int main()
 	std::string error;
 	assert(catalog.load_documents(documents, error));
 	assert(error.empty());
-	assert(catalog.size() == 5);
+	assert(catalog.size() == 6);
 
 	const auto *padded =
 	    catalog.find("11111111-1111-1111-1111-111111111111");
@@ -114,6 +116,12 @@ int main()
 	assert(sword);
 	assert(sword->equipped_slot == "PrimaryMainHand");
 	assert(sword->weapon == weapon_class::one_handed);
+	const auto *sword_alias =
+	    catalog.find("b867dd0e-1bfe-40e9-b114-4b126a3ff1b0");
+	assert(sword_alias);
+	assert(sword_alias->equipped_slot == sword->equipped_slot);
+	assert(sword_alias->layer == sword->layer);
+	assert(sword_alias->weapon == sword->weapon);
 
 	const auto *bow =
 	    catalog.find("66666666-6666-6666-6666-666666666666");
@@ -140,10 +148,22 @@ int main()
 	}
 	equipment_catalog active_catalog;
 	assert(active_catalog.load_game_install(installation.path, error));
-	assert(active_catalog.size() == 6);
+	assert(active_catalog.size() == 7);
 	const auto *modded =
 	    active_catalog.find("88888888-8888-4888-8888-888888888888");
 	assert(modded);
 	assert(modded->equipped_slot == "body_cloth_padded");
+
+	if (argc == 2)
+	{
+		equipment_catalog installed_catalog;
+		assert(installed_catalog.load_tables_pak(argv[1], error));
+		const auto *installed_alias =
+		    installed_catalog.find(
+		        "b867dd0e-1bfe-40e9-b114-4b126a3ff1b0");
+		assert(installed_alias);
+		assert(installed_alias->equipped_slot == "PrimaryMainHand");
+		assert(installed_alias->weapon == weapon_class::one_handed);
+	}
 	return 0;
 }

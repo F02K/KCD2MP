@@ -16,7 +16,7 @@
 
 namespace kcd2mp
 {
-	constexpr std::uint32_t protocol_version = 4;
+	constexpr std::uint32_t protocol_version = 5;
 	constexpr std::string_view version_string = "0.4.0";
 	constexpr std::uint32_t supported_whgame_timestamp = 0x6A350E20;
 	constexpr std::uint64_t supported_whgame_image_size = 0x5B2D000;
@@ -33,6 +33,7 @@ namespace kcd2mp
 	constexpr std::size_t profile_skill_count = 35;
 	constexpr std::size_t max_profile_inventory_items = 512;
 	constexpr std::int64_t max_profile_money = 2'000'000'000;
+	constexpr std::uint32_t money_subunits_per_groschen = 10;
 	constexpr std::uint32_t max_profile_item_count = 1'000'000;
 	inline constexpr std::array<std::string_view, profile_stat_count>
 	    canonical_stat_ids{

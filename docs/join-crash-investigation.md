@@ -1,0 +1,209 @@
+# Join crash investigation
+
+## Scope and baselines
+
+- KCD2MP: `master` at `8d4b913`.
+- Bundled libKCD2 fork: `800f6aea241a22afe0dd592d905df89765a43734`.
+- libKCD2 upstream comparison point: `6d92dc3` (`upstream/master`).
+- Nested KCSE loader: `9279808`, identical on fork and upstream.
+- Runtime target: WHGame/KCD2 1.5.6, release index 15693.
+
+The fork diff is 24 files (`+495/-59`). The current multiplayer runtime does
+not use a Lua `System.SpawnEntity` call. It calls:
+
+```text
+IActorSystem::CreateActor(
+    channelId = 0,
+    name = "KCD2MP_Remote_<epoch>_<playerId>_<handle>",
+    actorClass = "NPC",
+    pos,
+    rot,
+    scale = (1,1,1),
+    entityId = 0)
+```
+
+`CreateActor` internally enters the engine entity-spawn path. There is no
+`fileNPCName` or entity-template parameter in this code path. The selected
+remote appearance is a validated shared-Soul GUID, applied after the Actor's
+Soul becomes available.
+
+Likewise, the native KCSE runtime does not dereference Lua `g_localActor`.
+Its equivalent readiness chain is `CCryAction::GetClientEntity()` plus
+`S_GameContext::GetActorById(entity->GetId())`; both pointers and the current
+EntitySystem pointer are traced before critical accesses.
+
+## Main finding
+
+The 2026-07-31 reproduction identifies the join fault. It is not in remote
+Puppet spawning. The active native ABI probe completed Actor creation, physics,
+Soul application, transform, locomotion, inventory creation, and equipment
+successfully before the connection opened.
+
+The server then sent `BOOTSTRAP_MODE_INITIALIZE` (`mode=1`). This mode is used
+when the server has no canonical spawn yet: the initializer must use its
+current engine-default player transform and return it in `ClientWorldReady`.
+The client verified that `m_local_transform` existed, but its spawn selection
+ignored that value:
+
+```text
+profile.transform_valid ? profile.last_transform : bootstrap.spawn
+```
+
+For an uninitialized session, both the new profile's `transform_valid` and the
+manifest's `spawn_valid` are false. Reading the absent protobuf
+`bootstrap.spawn()` produces its default value, including a zero-length
+quaternion. Copying that value into the profile while setting
+`transform_valid=true` changes a valid wire profile into an invalid local
+target. This explains the durable trace line:
+
+```text
+join.sandbox.profile-apply.failed |
+success=false rollback_succeeded=false error="target profile is invalid"
+```
+
+A second control-flow bug converted that harmless pre-validation rejection into
+the access violation. `reconcile_profile` correctly reports
+`rollback_attempted=false` because no native mutation occurred. The caller
+looked only at `rollback_succeeded=false`, interpreted it as a failed rollback,
+and called `begin_native_unload()`. Its first engine call was
+`IGameFramework::EndGameContext()`, after which the PostUpdate guard caught
+`0xC0000005` at `0x7ffa1da062d3`.
+
+The fix:
+
+1. selects profile transform, valid server spawn, or (for `INITIALIZE`) the
+   local engine-default transform, in that order;
+2. validates the selected transform and complete target profile before
+   disabling save/load or touching the native profile backend;
+3. unloads a modified world only when
+   `rollback_attempted && !rollback_succeeded`;
+4. logs and locally SEH-guards `EndGameContext` for a genuine future rollback
+   failure.
+
+The initializer selection and no-mutation rollback semantics have regression
+tests.
+
+### Follow-up: equipped hunting-sword alias
+
+After the bootstrap fix, the next join reached native baseline-profile capture
+and failed on equipped item `b867dd0e-1bfe-40e9-b114-4b126a3ff1b0`.
+The installed `Tables.pak` defines it as:
+
+```xml
+<ItemAlias
+  SourceItemId="c164f346-0463-4116-b790-094b11274e5e"
+  Id="b867dd0e-1bfe-40e9-b114-4b126a3ff1b0" />
+```
+
+The equipment catalog previously indexed only item nodes carrying their own
+armor or weapon metadata. It skipped `ItemAlias`, so the native inventory could
+not map this equipped hunting-sword variant to `PrimaryMainHand`. The parser now
+resolves `SourceItemId` chains after collecting direct definitions and inherits
+slot, layer, and weapon class while retaining the alias GUID. A regression test
+uses this exact alias, and the resulting test executable also succeeds against
+the locally installed game `Tables.pak`.
+
+### Follow-up: fractional Groschen
+
+Native KCD2 money stacks count tenths of one Groschen. Protocol v4 stored only
+whole Groschen and rejected any native total not divisible by ten. Rounding
+would make transaction rollback lossy, so protocol v5 adds
+`PlayerProfile.money_subunits` constrained to `0..9`. Native capture now splits
+the exact amount into whole Groschen and subunits; native apply combines both
+fields back into the exact stack amount. Equality checks, validation, server
+persistence, and rollback all include the subunit field. Starter-profile TOML
+continues to express whole Groschen and therefore defaults to zero subunits.
+
+## Fork versus upstream
+
+### Spawn and bindings
+
+- `Offsets::IActorSystem::CreateActor` is unchanged between fork and upstream.
+  Its parameter order matches the CryEngine SDK declaration. The custom
+  `void*` reference parameters retain the same Win64 ABI (addresses in the same
+  argument registers).
+- `IEntitySystem::SpawnEntity(SEntitySpawnParams&, bool)` is unchanged and is
+  not called directly by KCD2MP.
+- The fork changes `Offsets::IEntitySystem::AddSink` from two declared
+  parameters to three and adds the complete typed `IEntitySystemSink` vtable.
+  The runtime calls the new signature with an event mask of zero.
+- `IEntity` changes only name previously anonymous vtable slots
+  (`Activate/IsActive`, `Hide/IsHidden`) and marks `SetWorldTM` verified. Slot
+  positions do not change.
+
+### Struct/layout changes
+
+- `C_Actor` gains a method only; no data members move. Existing size/offset
+  assertions remain (`sizeof=0x9C0`, Soul at `+0x668`, movement controller at
+  `+0x180`).
+- `C_Soul+0x300` changes from an opaque 16-byte field to `CryGUID`; size remains
+  16 bytes and subsequent fields do not move (`sizeof=0xD20`).
+- `C_Human`, `CEntity`, and `C_InventoryBase` gain methods only.
+- No fork diff changes `S_GameContext::m_pActorSystem` (`+0x180`) or the
+  `CreateActor` vtable slot.
+
+There is therefore no static evidence of a parameter-order or data-size
+mismatch in the actual CreateActor call. Risk remains in the fork's new raw
+relocation/vtable helper implementations listed above.
+
+## Candidate exclusions and remaining risk
+
+- **Remote Puppet spawn:** excluded by the reproduction. The probe completed
+  every spawn, first transform/animation, Soul, and equipment operation before
+  networking began.
+- **Wrong thread:** excluded for the observed path. Networking callbacks
+  decode and enqueue protobuf messages only. Engine work is drained from
+  KCSE's `CCryAction::PostUpdate` hook. Every trace line includes thread ID and
+  role; the faulting path says `role=kcse-post-update`.
+- **D3D12 callback:** excluded for the current native path. The D3D12 module is
+  the UI/client proxy; it does not spawn remote Actors.
+- **Local Actor readiness:** excluded for this reproduction. It was guarded
+  before Connect and repeatedly traced with non-null Entity and Actor pointers.
+  The runtime requires DataLoaded, a PostUpdate frame, local entity/Actor, a
+  readable transform, and the full active ABI probe before network connect.
+- **Invalid `fileNPCName`:** not applicable in the current path. Class is the
+  literal `NPC`; the shared-Soul GUID must exist in the runtime catalog.
+- **Initialization timing / fork offsets:** not the cause of this fault. The
+  trace proves those calls returned successfully. Raw relocations remain a
+  general runtime risk, but they are downstream of no failing operation here.
+- **Initialization order:** KCSE installs its PostUpdate hook before queued
+  multiplayer frames execute, and `can_start_join()` requires DataLoaded and a
+  observed frame. The nested KCSE checkout is byte-for-byte at the same commit
+  as its upstream. No fork-specific order inversion was found.
+- **Actual cause:** initializer spawn-selection plus incorrect interpretation
+  of `rollback_succeeded=false` when `rollback_attempted=false`.
+
+## Trace output and interpretation
+
+`KCD2MP-join.log` is written next to `KCD2MPKCSEClient.dll`. Every line is
+flushed immediately and contains:
+
+- wall-clock timestamp;
+- join sequence ID;
+- process/thread ID and logical thread role;
+- source filename, line, and function;
+- one event and its parameters/result.
+
+Important last-line mappings:
+
+| Last durable event | The next operation / likely fault |
+|---|---|
+| `join.remote-spawn.engine-call.begin` | `IActorSystem::CreateActor` |
+| `join.remote-spawn.engine-call.returned` | `IActor::GetEntity` |
+| `join.remote-spawn.EnablePhysics.begin` | fork `CEntity::EnablePhysics` |
+| `join.remote-status.ApplySharedSoul.begin` | fork shared-Soul materialization |
+| `join.entity.SetWorldTM.begin` | `IEntity::SetWorldTM` |
+| `join.remote-animation.first-locomotion` | fork movement request |
+| `join.remote-appearance.CreateItem.begin` | fork inventory item creation |
+| `join.remote-animation.weapon-action.begin` | fork Human weapon action |
+| `join.sandbox.spawn-selection.ok` | selected source and exact transform |
+| `join.sandbox.target-profile.invalid` | target rejected before native mutation |
+| `join.sandbox.profile-apply.failed` | includes attempted/succeeded rollback and unload decision |
+| `join.sandbox.EndGameContext.begin` | guarded native world-unload call |
+| `join.sandbox.EndGameContext.seh` | `EndGameContext` raised SEH |
+| `join.kcse-post-update.seh` | caught engine-side SEH; includes code/address |
+
+For the verification reproduction, the expected initializer sequence is
+`spawn-selection.ok source=local.engine-default`,
+`target-profile.valid`, `profile-apply.ok`, and `sandbox.native.ready`. Preserve
+the join log together with any game crash dump/callstack and `KCSE.log`.

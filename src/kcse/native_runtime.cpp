@@ -1,4 +1,5 @@
 #include "kcse/native_runtime.hpp"
+#include "kcse/join_trace.hpp"
 #include "multiplayer/profile_reconciler.hpp"
 
 #include <REL/Module.h>
@@ -9,12 +10,29 @@
 
 #include <chrono>
 #include <cmath>
+#include <format>
 #include <string_view>
 
 namespace kcd2mp::kcse
 {
 	namespace
 	{
+#ifdef _WIN32
+		bool guarded_end_game_context(CCryAction *framework) noexcept
+		{
+			__try
+			{
+				framework->EndGameContext();
+				return true;
+			}
+			__except (KCD2MP_JOIN_SEH_FILTER(
+			    "join.sandbox.EndGameContext.seh"))
+			{
+				return false;
+			}
+		}
+#endif
+
 		bool normalize(protocol::Quaternion *rotation)
 		{
 			const auto length_squared =
@@ -139,6 +157,13 @@ namespace kcd2mp::kcse
 
 	bool native_runtime::on_frame()
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse.frame.begin",
+		    std::format(
+		        "epoch={} invalidated={} data_loaded={}",
+		        m_epoch.load(std::memory_order_acquire),
+		        m_epoch_invalidated.load(std::memory_order_acquire),
+		        m_data_loaded.load(std::memory_order_acquire)));
 		m_frame_seen.store(true, std::memory_order_release);
 		const auto changed =
 		    m_epoch_invalidated.exchange(false, std::memory_order_acq_rel);
@@ -146,6 +171,9 @@ namespace kcd2mp::kcse
 			invalidate_epoch_on_game_thread();
 		refresh_cached_state();
 		finish_native_unload_if_complete();
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse.frame.complete",
+		    std::format("epoch_changed={}", changed));
 		return changed;
 	}
 
@@ -189,12 +217,22 @@ namespace kcd2mp::kcse
 
 	bool native_runtime::prepare_multiplayer()
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.prepare.precheck",
+		    std::format(
+		        "data_loaded={} frame_seen={} can_start_join={}",
+		        m_data_loaded.load(std::memory_order_acquire),
+		        m_frame_seen.load(std::memory_order_acquire),
+		        can_start_join()));
 		if (!can_start_join())
 		{
 			std::scoped_lock lock(m_cache_mutex);
 			m_diagnostic =
 			    "Load a native save and wait for the local player before "
 			    "connecting.";
+			KCD2MP_JOIN_TRACE(
+			    "join.runtime.prepare.rejected",
+			    m_diagnostic);
 			return false;
 		}
 		m_multiplayer_requested.store(true, std::memory_order_release);
@@ -203,6 +241,11 @@ namespace kcd2mp::kcse
 			m_diagnostic =
 			    "Initializing native multiplayer runtime capabilities.";
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.prepare.requested",
+		    std::format(
+		        "epoch={}",
+		        m_epoch.load(std::memory_order_acquire)));
 		return true;
 	}
 
@@ -233,37 +276,170 @@ namespace kcd2mp::kcse
 	sandbox_start_result native_runtime::begin_sandbox(
 	    const protocol::ServerBootstrap &bootstrap)
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.native.begin",
+		    std::format(
+		        "session_id=\"{}\" requested_level=\"{}\" mode={} "
+		        "profile={} spawn_valid={} profile_transform_valid={} "
+		        "profile_has_transform={} current_level=\"{}\" "
+		        "capabilities=0x{:X}",
+		        bootstrap.session_id(),
+		        bootstrap.level_id(),
+		        static_cast<int>(bootstrap.mode()),
+		        bootstrap.has_profile(),
+		        bootstrap.spawn_valid(),
+		        bootstrap.has_profile()
+		            && bootstrap.profile().transform_valid(),
+		        bootstrap.has_profile()
+		            && bootstrap.profile().has_last_transform(),
+		        current_level_id(),
+		        descriptor().capabilities));
 		std::unique_lock lock(m_cache_mutex);
 		if (!m_local_transform)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.native.rejected",
+			    "local transform is nil");
 			return {false, "Native player is not ready."};
+		}
 		if (bootstrap.level_id().empty() || bootstrap.level_id() != m_level_id)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.native.rejected",
+			    std::format(
+			        "level mismatch requested=\"{}\" current=\"{}\"",
+			        bootstrap.level_id(),
+			        m_level_id));
 			return {false, "Loaded native save does not match the server level."};
+		}
 		if ((m_capabilities & runtime_capability_profile_apply) == 0
 		    || !bootstrap.has_profile())
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.native.rejected",
+			    std::format(
+			        "profile_apply_capability={} bootstrap_profile={}",
+			        (m_capabilities & runtime_capability_profile_apply) != 0,
+			        bootstrap.has_profile()));
 			return {
 			    false,
 			    "Native profile application or authoritative server profile "
 			    "is unavailable."};
 		}
-		auto *framework = CCryAction::GetInstance();
-		if (!framework)
-			return {false, "CCryAction is unavailable."};
-		framework->AllowSave(false);
-		framework->AllowLoad(false);
-		m_save_load_locked = true;
-		const auto spawn = bootstrap.profile().transform_valid()
-		    ? bootstrap.profile().last_transform()
-		    : bootstrap.spawn();
+
+		const auto selected_spawn =
+		    select_sandbox_spawn(bootstrap, m_local_transform);
+		if (!selected_spawn.transform)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.spawn-selection.failed",
+			    std::format(
+			        "mode={} profile_transform_valid={} "
+			        "profile_has_transform={} spawn_valid={} has_spawn={} "
+			        "local_transform={}",
+			        static_cast<int>(bootstrap.mode()),
+			        bootstrap.profile().transform_valid(),
+			        bootstrap.profile().has_last_transform(),
+			        bootstrap.spawn_valid(),
+			        bootstrap.has_spawn(),
+			        m_local_transform.has_value()));
+			return {
+			    false,
+			    "Server bootstrap contains no usable spawn transform."};
+		}
+		const auto &spawn = *selected_spawn.transform;
+		const auto spawn_source = to_string(selected_spawn.source);
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.spawn-selection.ok",
+		    std::format(
+		        "source={} position=({:.6f},{:.6f},{:.6f}) "
+		        "rotation=({:.6f},{:.6f},{:.6f},{:.6f})",
+		        spawn_source,
+		        spawn.position().x(),
+		        spawn.position().y(),
+		        spawn.position().z(),
+		        spawn.rotation().x(),
+		        spawn.rotation().y(),
+		        spawn.rotation().z(),
+		        spawn.rotation().w()));
+		if (!is_finite_transform(spawn))
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.spawn-selection.invalid",
+			    std::format("source={}", spawn_source));
+			return {
+			    false,
+			    "Selected sandbox spawn transform is invalid."};
+		}
+
 		auto target = bootstrap.profile();
 		target.set_transform_valid(true);
 		*target.mutable_last_transform() = spawn;
+		if (!is_valid_profile(target))
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.target-profile.invalid",
+			    std::format(
+			        "source={} player_id={} revision={} level=\"{}\" "
+			        "stats={} skills={} inventory={} avatar={} "
+			        "transform_valid={} has_transform={}",
+			        spawn_source,
+			        target.player_id(),
+			        target.revision(),
+			        target.level_id(),
+			        target.stats_size(),
+			        target.skills_size(),
+			        target.inventory_size(),
+			        target.has_avatar(),
+			        target.transform_valid(),
+			        target.has_last_transform()));
+			return {
+			    false,
+			    "Authoritative target profile is invalid after spawn "
+			    "selection."};
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.target-profile.valid",
+		    std::format(
+		        "player_id={} revision={} source={}",
+		        target.player_id(),
+		        target.revision(),
+		        spawn_source));
+
+		auto *framework = CCryAction::GetInstance();
+		if (!framework)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.native.rejected",
+			    "CCryAction=nil");
+			return {false, "CCryAction is unavailable."};
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.save-load-lock.begin",
+		    std::format(
+		        "framework={}",
+		        static_cast<void *>(framework)));
+		framework->AllowSave(false);
+		framework->AllowLoad(false);
+		m_save_load_locked = true;
 		m_profiles.set_wire_identity(target);
 		const auto applied = reconcile_profile(m_profiles, target);
+		KCD2MP_JOIN_TRACE(
+		    applied.success
+		        ? "join.sandbox.profile-apply.ok"
+		        : "join.sandbox.profile-apply.failed",
+		    std::format(
+		        "success={} rollback_attempted={} rollback_succeeded={} "
+		        "requires_world_unload={} error=\"{}\"",
+		        applied.success,
+		        applied.rollback_attempted,
+		        applied.rollback_succeeded,
+		        profile_failure_requires_world_unload(applied),
+		        applied.error));
 		if (!applied.success)
 		{
 			m_profiles.reset();
-			if (!applied.rollback_succeeded)
+			if (profile_failure_requires_world_unload(applied))
 			{
 				lock.unlock();
 				begin_native_unload(
@@ -281,6 +457,13 @@ namespace kcd2mp::kcse
 		m_sandbox_active = true;
 		m_sandbox_progress.phase = sandbox_phase::ready;
 		m_sandbox_progress.initial_spawn = spawn;
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.native.ready",
+		    std::format(
+		        "spawn=({:.6f},{:.6f},{:.6f})",
+		        spawn.position().x(),
+		        spawn.position().y(),
+		        spawn.position().z()));
 		return {true, {}};
 	}
 
@@ -385,9 +568,29 @@ namespace kcd2mp::kcse
 	remote_avatar_sync_result native_runtime::sync_remote_players(
 	    std::span<const remote_avatar_snapshot> players)
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-sync.begin",
+		    std::format(
+		        "players={} epoch={}",
+		        players.size(),
+		        m_epoch.load(std::memory_order_acquire)));
 		m_remote_backend.set_epoch(
 		    m_epoch.load(std::memory_order_acquire));
-		return m_remote_avatars.sync(players);
+		auto result = m_remote_avatars.sync(players);
+		KCD2MP_JOIN_TRACE(
+		    result.success ? "join.remote-sync.complete"
+		                   : "join.remote-sync.failed",
+		    std::format(
+		        "success={} degraded={} spawned={} updated={} removed={} "
+		        "error=\"{}\" diagnostic=\"{}\"",
+		        result.success,
+		        result.degraded,
+		        result.spawned,
+		        result.updated,
+		        result.removed,
+		        result.error,
+		        result.diagnostic));
+		return result;
 	}
 
 	std::uint64_t native_runtime::epoch() const noexcept
@@ -438,6 +641,16 @@ namespace kcd2mp::kcse
 		auto *framework_actor =
 		    framework ? framework->GetClientActor() : nullptr;
 		auto *context_actor = native_player.actor;
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.cached-state.precheck",
+		    std::format(
+		        "multiplayer_requested={} framework={} entity={} "
+		        "framework_actor={} context_actor={}",
+		        multiplayer_requested,
+		        static_cast<void *>(framework),
+		        static_cast<void *>(entity),
+		        static_cast<void *>(framework_actor),
+		        static_cast<void *>(context_actor)));
 		if (entity && framework_actor && context_actor)
 		{
 			capabilities |= runtime_capability_local_player;
@@ -462,6 +675,20 @@ namespace kcd2mp::kcse
 		const auto avatar_ready = multiplayer_requested
 		    && (capabilities & runtime_capability_local_player) != 0
 		    && m_remote_backend.available();
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.capability-components",
+		    std::format(
+		        "transform_ready={} profile_ready={} avatar_ready={} "
+		        "probe_started={} probe_transform_verified={} "
+		        "probe_complete={} probe_failed={} frame={}",
+		        transform.has_value(),
+		        profile_ready,
+		        avatar_ready,
+		        m_preparation_active,
+		        m_probe_transform_verified,
+		        m_probe_complete,
+		        m_probe_failed.load(std::memory_order_acquire),
+		        m_preparation_frames));
 		if (multiplayer_requested && !m_preparation_active)
 		{
 			m_remote_backend.reset_active_probe();
@@ -487,11 +714,17 @@ namespace kcd2mp::kcse
 					m_probe_error =
 					    "active identical SetWorldTM probe failed: "
 					    + probe_error;
+					KCD2MP_JOIN_TRACE(
+					    "join.runtime.probe.identical-transform.failed",
+					    m_probe_error);
 				}
 				else
 				{
 					m_probe_transform_verified = true;
 					m_transform_sequence = 0;
+					KCD2MP_JOIN_TRACE(
+					    "join.runtime.probe.identical-transform.ok",
+					    "SetWorldTM write/readback verified");
 				}
 			}
 			if (m_probe_transform_verified && !m_probe_failed)
@@ -504,6 +737,9 @@ namespace kcd2mp::kcse
 				case native_remote_avatar_backend::active_probe_result::
 				    succeeded:
 					m_probe_complete = true;
+					KCD2MP_JOIN_TRACE(
+					    "join.runtime.probe.remote-avatar.ok",
+					    "Actor/Soul/Inventory/Equipment probe succeeded");
 					break;
 				case native_remote_avatar_backend::active_probe_result::
 				    failed:
@@ -512,6 +748,9 @@ namespace kcd2mp::kcse
 					    "active native Actor/Soul/Inventory/Equipment "
 					    "probe failed: "
 					    + probe_error;
+					KCD2MP_JOIN_TRACE(
+					    "join.runtime.probe.remote-avatar.failed",
+					    m_probe_error);
 					break;
 				case native_remote_avatar_backend::active_probe_result::
 				    pending:
@@ -549,6 +788,18 @@ namespace kcd2mp::kcse
 		}
 
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.entity-system.state",
+		    std::format(
+		        "environment={} entity_system={} console={} local_entity={}",
+		        static_cast<void *>(environment),
+		        environment
+		            ? static_cast<void *>(environment->pEntitySystem)
+		            : nullptr,
+		        environment
+		            ? static_cast<void *>(environment->pConsole)
+		            : nullptr,
+		        static_cast<void *>(entity)));
 		if (entity && environment && environment->pConsole)
 		{
 			if (auto *level_cvar =
@@ -565,6 +816,15 @@ namespace kcd2mp::kcse
 		m_local_transform = std::move(transform);
 		m_level_id = std::move(level);
 		m_capabilities = capabilities;
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.capabilities.updated",
+		    std::format(
+		        "capabilities=0x{:X} required=0x{:X} missing=0x{:X} "
+		        "level=\"{}\"",
+		        capabilities,
+		        required_client_runtime_capabilities,
+		        required_client_runtime_capabilities & ~capabilities,
+		        m_level_id));
 		if ((capabilities & runtime_capability_local_player) == 0)
 		{
 			m_diagnostic =
@@ -618,6 +878,15 @@ namespace kcd2mp::kcse
 	void native_runtime::begin_native_unload(std::string_view reason)
 	{
 		auto *framework = CCryAction::GetInstance();
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.unload.begin",
+		    std::format(
+		        "reason=\"{}\" framework={} game_context={}",
+		        reason,
+		        static_cast<void *>(framework),
+		        framework
+		            ? static_cast<void *>(framework->m_pGameContext)
+		            : nullptr));
 		{
 			std::scoped_lock lock(m_cache_mutex);
 			m_unload_pending = true;
@@ -626,7 +895,36 @@ namespace kcd2mp::kcse
 			m_sandbox_progress.error = std::string(reason);
 		}
 		if (framework && framework->m_pGameContext)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.EndGameContext.begin",
+			    std::format(
+			        "framework={} game_context={}",
+			        static_cast<void *>(framework),
+			        static_cast<void *>(framework->m_pGameContext)));
+#ifdef _WIN32
+			if (!guarded_end_game_context(framework))
+			{
+				KCD2MP_JOIN_TRACE(
+				    "join.sandbox.EndGameContext.failed",
+				    "SEH caught; native world remains unload-pending");
+				return;
+			}
+#else
 			framework->EndGameContext();
+#endif
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.EndGameContext.returned",
+			    std::format(
+			        "game_context={}",
+			        static_cast<void *>(framework->m_pGameContext)));
+		}
+		else
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.EndGameContext.skipped",
+			    "framework or game context is nil");
+		}
 		finish_native_unload_if_complete();
 	}
 

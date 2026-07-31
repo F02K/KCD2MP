@@ -1,4 +1,5 @@
 #include "kcse/native_remote_avatar_backend.hpp"
+#include "kcse/join_trace.hpp"
 
 #include "npc/equipment_catalog.hpp"
 
@@ -15,6 +16,7 @@
 #include <crysystem/SSystemGlobalEnvironment.h>
 #include <Offsets/vtables/IEntity.h>
 #include <Offsets/vtables/IEntitySystem.h>
+#include <Offsets/vtables/IActor.h>
 
 #include <algorithm>
 #include <chrono>
@@ -119,6 +121,42 @@ namespace kcd2mp::kcse
 				return protocol::AVATAR_WEAPON_CLASS_NONE;
 			}
 			return protocol::AVATAR_WEAPON_CLASS_NONE;
+		}
+
+		Offsets::IActor *guarded_create_actor(
+		    Offsets::IActorSystem *actor_system,
+		    const char *name,
+		    const Vec3 *position,
+		    const Quat *rotation,
+		    const Vec3 *scale) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return actor_system->CreateActor(
+				    0,
+				    name,
+				    "NPC",
+				    position,
+				    rotation,
+				    scale,
+				    0);
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER(
+			    "join.remote-spawn.CreateActor.seh"))
+			{
+				return nullptr;
+			}
+#else
+			return actor_system->CreateActor(
+			    0,
+			    name,
+			    "NPC",
+			    position,
+			    rotation,
+			    scale,
+			    0);
+#endif
 		}
 	}
 
@@ -305,12 +343,30 @@ namespace kcd2mp::kcse
 	{
 		auto *context = wh::game::S_GameContext::GetInstance();
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-backend.precheck",
+		    std::format(
+		        "game_context={} actor_system={} environment={} "
+		        "entity_system={} soul_list={}",
+		        static_cast<void *>(context),
+		        context
+		            ? static_cast<void *>(context->m_pActorSystem)
+		            : nullptr,
+		        static_cast<void *>(environment),
+		        environment
+		            ? static_cast<void *>(environment->pEntitySystem)
+		            : nullptr,
+		        static_cast<void *>(
+		            wh::rpgmodule::C_SoulList::GetInstance())));
 		if (!context || !context->m_pActorSystem || !environment
 		    || !environment->pEntitySystem
 		    || !wh::rpgmodule::C_SoulList::GetInstance())
 		{
 			m_diagnostic =
 			    "native ActorSystem, EntitySystem, or SoulList is unavailable";
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-backend.unavailable",
+			    m_diagnostic);
 			return false;
 		}
 		std::string error;
@@ -318,6 +374,9 @@ namespace kcd2mp::kcse
 		    || !npc::initialize_runtime_equipment_catalog(error))
 		{
 			m_diagnostic = std::move(error);
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-backend.catalog-failed",
+			    m_diagnostic);
 			return false;
 		}
 		m_diagnostic.clear();
@@ -335,12 +394,67 @@ namespace kcd2mp::kcse
 	native_remote_avatar_backend::spawn(
 	    const remote_avatar_snapshot &player)
 	{
-		if (!available() || !player.has_transform || !player.has_avatar
-		    || !npc::runtime_catalog().contains(
+		const auto existing = std::ranges::count_if(
+		    m_avatars,
+		    [&](const auto &pair)
+		    {
+			    return pair.second.player == player.id;
+		    });
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.request",
+		    std::format(
+		        "player_id={} display_name=\"{}\" existing_puppets={} "
+		        "has_transform={} has_avatar={} soul=\"{}\"",
+		        player.id,
+		        player.display_name,
+		        existing,
+		        player.has_transform,
+		        player.has_avatar,
+		        player.avatar.archetype_id()));
+		if (existing != 0)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-spawn.duplicate-detected",
+			    std::format(
+			        "player_id={} existing_puppets={} "
+			        "spawn_is_not_a_silent_overwrite",
+			        player.id,
+			        existing));
+		}
+		if (!available())
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-spawn.rejected",
+			    m_diagnostic);
+			return std::nullopt;
+		}
+		if (!player.has_transform)
+		{
+			m_diagnostic = "remote avatar has no transform";
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-spawn.rejected",
+			    m_diagnostic);
+			return std::nullopt;
+		}
+		if (!player.has_avatar)
+		{
+			m_diagnostic = "remote avatar has no avatar descriptor";
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-spawn.rejected",
+			    m_diagnostic);
+			return std::nullopt;
+		}
+		if (!npc::runtime_catalog().contains(
 		        player.avatar.archetype_id()))
 		{
 			m_diagnostic =
 			    "remote avatar references an unknown native Soul";
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-spawn.rejected",
+			    std::format(
+			        "soul=\"{}\" error=\"{}\"",
+			        player.avatar.archetype_id(),
+			        m_diagnostic));
 			return std::nullopt;
 		}
 		auto *context = wh::game::S_GameContext::GetInstance();
@@ -353,43 +467,179 @@ namespace kcd2mp::kcse
 		    m_epoch,
 		    player.id,
 		    handle);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.engine-call.begin",
+		    std::format(
+		        "api=IActorSystem::CreateActor channel=0 name=\"{}\" "
+		        "class=\"NPC\" template=<not-used-by-CreateActor> "
+		        "soul=\"{}\" position=({:.6f},{:.6f},{:.6f}) "
+		        "rotation=({:.6f},{:.6f},{:.6f},{:.6f}) "
+		        "scale=(1,1,1) requested_entity_id=0 "
+		        "actor_system={} entity_system={}",
+		        name,
+		        player.avatar.archetype_id(),
+		        position.x,
+		        position.y,
+		        position.z,
+		        rotation.v.x,
+		        rotation.v.y,
+		        rotation.v.z,
+		        rotation.w,
+		        static_cast<void *>(context->m_pActorSystem),
+		        SSystemGlobalEnvironment::GetInstance()
+		                ? static_cast<void *>(
+		                      SSystemGlobalEnvironment::GetInstance()
+		                          ->pEntitySystem)
+		                : nullptr));
 		m_entities.begin_player_spawn();
-		auto *actor_interface = context->m_pActorSystem->CreateActor(
-		    0,
+		auto *actor_interface = guarded_create_actor(
+		    context->m_pActorSystem,
 		    name.c_str(),
-		    "NPC",
 		    &position,
 		    &rotation,
-		    &scale,
-		    0);
+		    &scale);
 		m_entities.end_player_spawn();
+		KCD2MP_JOIN_TRACE(
+		    actor_interface
+		        ? "join.remote-spawn.engine-call.returned"
+		        : "join.remote-spawn.engine-call.nil",
+		    std::format(
+		        "api=IActorSystem::CreateActor actor={}",
+		        static_cast<void *>(actor_interface)));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.GetEntity.begin",
+		    std::format(
+		        "actor={}",
+		        static_cast<void *>(actor_interface)));
 		auto *entity =
 		    actor_interface ? actor_interface->GetEntity() : nullptr;
+		KCD2MP_JOIN_TRACE(
+		    entity ? "join.remote-spawn.entity.resolved"
+		           : "join.remote-spawn.entity.nil",
+		    std::format(
+		        "actor={} entity={}",
+		        static_cast<void *>(actor_interface),
+		        static_cast<void *>(entity)));
 		if (!actor_interface || !entity)
 		{
 			m_diagnostic = "IActorSystem::CreateActor(NPC) failed";
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-spawn.failed",
+			    m_diagnostic);
 			return std::nullopt;
 		}
 
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.GetId.begin",
+		    std::format("entity={}", static_cast<void *>(entity)));
 		const auto id = entity->GetId();
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.GetId.returned",
+		    std::format("entity_id={}", id));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.entity.configure.begin",
+		    std::format(
+		        "player_id={} handle={} entity_id={} entity={}",
+		        player.id,
+		        handle,
+		        id,
+		        static_cast<void *>(entity)));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.register-player-entity.begin",
+		    std::format("entity_id={}", id));
 		m_entities.register_player_entity(id);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.register-player-entity.returned",
+		    std::format("entity_id={}", id));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.GetFlags.begin",
+		    std::format("entity_id={}", id));
 		auto flags = entity->GetFlags();
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.GetFlags.returned",
+		    std::format("entity_id={} flags=0x{:08X}", id, flags));
 		flags &= ~(entity_flag_calc_physics | entity_flag_has_ai
 		    | entity_flag_trigger_areas);
 		flags |= entity_flag_no_save | entity_flag_clientside_state
 		    | entity_flag_no_proximity;
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.SetFlags.begin",
+		    std::format("entity_id={} flags=0x{:08X}", id, flags));
 		entity->SetFlags(flags);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.SetFlags.returned",
+		    std::format("entity_id={}", id));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.SetAIObjectID.begin",
+		    std::format("entity_id={} ai_object_id=0", id));
 		entity->SetAIObjectID(0);
-		reinterpret_cast<CEntity *>(entity)->EnablePhysics(false);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.SetAIObjectID.returned",
+		    std::format("entity_id={}", id));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.EnablePhysics.begin",
+		    std::format(
+		        "entity_id={} entity={} enabled=false "
+		        "api=fork:CEntity::EnablePhysics",
+		        id,
+		        static_cast<void *>(entity)));
+		const auto physics_result =
+		    reinterpret_cast<CEntity *>(entity)->EnablePhysics(false);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.EnablePhysics.returned",
+		    std::format(
+		        "entity_id={} result={}",
+		        id,
+		        physics_result));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.Hide.begin",
+		    std::format("entity_id={} hidden=false", id));
 		entity->Hide(false);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.Hide.returned",
+		    std::format("entity_id={}", id));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.Activate.begin",
+		    std::format("entity_id={} active=true", id));
 		entity->Activate(true);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.Activate.returned",
+		    std::format("entity_id={}", id));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-spawn.entity.configure.complete",
+		    std::format(
+		        "entity_id={} flags=0x{:08X} ai_object_id=0 "
+		        "physics=false hidden=false active=true",
+		        id,
+		        flags));
 
-		m_avatars.emplace(
+		const auto [iterator, inserted] = m_avatars.emplace(
 		    handle,
 		    entry{
+		        .player = player.id,
 		        .entity_id = id,
 		        .epoch = m_epoch,
 		        .shared_soul_guid = player.avatar.archetype_id()});
+		(void)iterator;
+		KCD2MP_JOIN_TRACE(
+		    inserted ? "join.remote-spawn.success"
+		             : "join.remote-spawn.handle-collision",
+		    std::format(
+		        "player_id={} handle={} entity_id={} actor={} entity={}",
+		        player.id,
+		        handle,
+		        id,
+		        static_cast<void *>(actor_interface),
+		        static_cast<void *>(entity)));
+		if (!inserted)
+		{
+			m_diagnostic = "remote avatar handle collision";
+			m_entities.unregister_player_entity(id);
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (environment && environment->pEntitySystem)
+				environment->pEntitySystem->RemoveEntity(id, true);
+			return std::nullopt;
+		}
 		return handle;
 	}
 
@@ -397,6 +647,14 @@ namespace kcd2mp::kcse
 	    remote_avatar_handle avatar) const
 	{
 		auto *value = const_cast<entry *>(find(avatar));
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-status.begin",
+		    std::format(
+		        "handle={} entry={} epoch={} current_epoch={}",
+		        avatar,
+		        static_cast<void *>(value),
+		        value ? value->epoch : 0,
+		        m_epoch));
 		if (!value)
 			return {
 			    remote_avatar_state::failed,
@@ -410,11 +668,27 @@ namespace kcd2mp::kcse
 
 		auto *entity = resolve_entity(value->entity_id);
 		auto *actor = resolve_actor(value->entity_id);
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-status.pointer-state",
+		    std::format(
+		        "player_id={} entity_id={} entity={} actor={}",
+		        value->player,
+		        value->entity_id,
+		        static_cast<void *>(entity),
+		        static_cast<void *>(actor)));
 		if (!entity || !actor)
 			return {
 			    remote_avatar_state::failed,
 			    "remote avatar entity was destroyed externally"};
 		auto *soul = actor->m_pSoul;
+		KCD2MP_JOIN_TRACE(
+		    soul ? "join.remote-status.soul.ready"
+		         : "join.remote-status.soul.pending",
+		    std::format(
+		        "player_id={} entity_id={} soul={}",
+		        value->player,
+		        value->entity_id,
+		        static_cast<void *>(soul)));
 		if (!soul)
 			return {
 			    remote_avatar_state::pending,
@@ -423,6 +697,16 @@ namespace kcd2mp::kcse
 		{
 			CryGUID guid{};
 			auto *souls = wh::rpgmodule::C_SoulList::GetInstance();
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-status.ApplySharedSoul.begin",
+			    std::format(
+			        "player_id={} entity_id={} soul={} soul_list={} "
+			        "shared_soul_guid=\"{}\" api=fork:C_SoulList::ApplySharedSoul",
+			        value->player,
+			        value->entity_id,
+			        static_cast<void *>(soul),
+			        static_cast<void *>(souls),
+			        value->shared_soul_guid));
 			if (!souls
 			    || !wh::ParseGuid(
 			        value->shared_soul_guid.c_str(),
@@ -437,9 +721,25 @@ namespace kcd2mp::kcse
 				    value->failure};
 			}
 			value->shared_soul_applied = true;
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-status.ApplySharedSoul.returned",
+			    std::format(
+			        "player_id={} entity_id={} result=true",
+			        value->player,
+			        value->entity_id));
 		}
-		if (!soul->m_inventorySoul.GetInventory()
-		    || !soul->m_inventorySoul.GetEquipmentManager())
+		auto *inventory = soul->m_inventorySoul.GetInventory();
+		auto *equipment =
+		    soul->m_inventorySoul.GetEquipmentManager();
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-status.inventory-state",
+		    std::format(
+		        "player_id={} entity_id={} inventory={} equipment_manager={}",
+		        value->player,
+		        value->entity_id,
+		        static_cast<void *>(inventory),
+		        static_cast<void *>(equipment)));
+		if (!inventory || !equipment)
 		{
 			return {
 			    remote_avatar_state::pending,
@@ -459,13 +759,46 @@ namespace kcd2mp::kcse
 		    ? resolve_entity(value->entity_id)
 		    : nullptr;
 		if (!value || !entity || value->failed)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-update.rejected",
+			    std::format(
+			        "handle={} entry={} entity={} failed={}",
+			        avatar,
+			        static_cast<void *>(value),
+			        static_cast<void *>(entity),
+			        value ? value->failed : false));
 			return false;
+		}
 		std::string error;
+		if (!value->first_transform_logged)
+		{
+			value->first_transform_logged = true;
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-update.first-transform",
+			    std::format(
+			        "player_id={} handle={} entity_id={} "
+			        "api=IEntity::SetWorldTM position=({:.6f},{:.6f},{:.6f})",
+			        value->player,
+			        avatar,
+			        value->entity_id,
+			        player.transform.position().x(),
+			        player.transform.position().y(),
+			        player.transform.position().z()));
+		}
 		if (!m_entities.write_transform(entity, player.transform, error)
 		    || !drive_motion(*value, player, error))
 		{
 			value->failed = true;
 			value->failure = std::move(error);
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-update.failed",
+			    std::format(
+			        "player_id={} handle={} entity_id={} error=\"{}\"",
+			        value->player,
+			        avatar,
+			        value->entity_id,
+			        value->failure));
 			return false;
 		}
 
@@ -587,6 +920,18 @@ namespace kcd2mp::kcse
 		auto *inventory =
 		    soul ? soul->m_inventorySoul.GetInventory() : nullptr;
 		auto *database = wh::entitymodule::C_ItemDatabase::GetInstance();
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-appearance.precheck",
+		    std::format(
+		        "player_id={} entity_id={} actor={} soul={} inventory={} "
+		        "item_database={} equipment_count={}",
+		        avatar.player,
+		        avatar.entity_id,
+		        static_cast<void *>(actor),
+		        static_cast<void *>(soul),
+		        static_cast<void *>(inventory),
+		        static_cast<void *>(database),
+		        appearance.equipment_size()));
 		if (!actor || !soul || !inventory || !database)
 		{
 			error = "remote Human/Soul/Inventory readiness was lost";
@@ -631,18 +976,57 @@ namespace kcd2mp::kcse
 
 		for (const auto &item : desired)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-appearance.CreateItem.begin",
+			    std::format(
+			        "player_id={} entity_id={} definition=\"{}\" "
+			        "slot=\"{}\" api=fork:C_InventoryBase::CreateItem",
+			        avatar.player,
+			        avatar.entity_id,
+			        item.wire->definition_id(),
+			        item.wire->equipped_slot()));
 			auto *created =
 			    inventory->CreateItem(item.guid, 1.0F, 1);
+			KCD2MP_JOIN_TRACE(
+			    created ? "join.remote-appearance.CreateItem.returned"
+			            : "join.remote-appearance.CreateItem.nil",
+			    std::format(
+			        "player_id={} entity_id={} item={}",
+			        avatar.player,
+			        avatar.entity_id,
+			        static_cast<void *>(created)));
 			if (!created)
 			{
 				error = "remote native item creation failed";
 				return false;
 			}
 			const auto instance = make_instance_guid();
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-appearance.SetInstanceGuid.begin",
+			    std::format(
+			        "player_id={} entity_id={} item={}",
+			        avatar.player,
+			        avatar.entity_id,
+			        static_cast<void *>(created)));
 			created->SetInstanceGuid(instance);
 			const auto instance_text = wh::FormatGuid(instance);
 			avatar.item_instances.push_back(instance_text);
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-appearance.EquipItem.begin",
+			    std::format(
+			        "player_id={} entity_id={} item={} instance=\"{}\"",
+			        avatar.player,
+			        avatar.entity_id,
+			        static_cast<void *>(created),
+			        instance_text));
 			soul->m_inventorySoul.EquipItem(created, true);
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-appearance.EquipItem.returned",
+			    std::format(
+			        "player_id={} entity_id={} item_flags=0x{:08X}",
+			        avatar.player,
+			        avatar.entity_id,
+			        created->m_flags));
 			if ((created->m_flags & item_equipped) == 0)
 			{
 				error =
@@ -656,13 +1040,41 @@ namespace kcd2mp::kcse
 		const bool should_draw = appearance.weapon_drawn()
 		    && appearance.weapon_class()
 		        != protocol::AVATAR_WEAPON_CLASS_NONE;
-		if (human->IsWeaponDrawn() != should_draw
-		    && !human->SetWeaponDrawn(should_draw))
+		if (human->IsWeaponDrawn() != should_draw)
 		{
-			error = should_draw
-			    ? "native DrawWeapon failed"
-			    : "native HolsterWeapon failed";
-			return false;
+			if (!avatar.first_weapon_action_logged)
+			{
+				avatar.first_weapon_action_logged = true;
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-animation.first-weapon-action",
+				    std::format(
+				        "player_id={} entity_id={} requested_drawn={} "
+				        "weapon_class={} api=C_Human::SetWeaponDrawn",
+				        avatar.player,
+				        avatar.entity_id,
+				        should_draw,
+				        static_cast<int>(appearance.weapon_class())));
+			}
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-animation.weapon-action.begin",
+			    std::format(
+			        "player_id={} entity_id={} requested_drawn={}",
+			        avatar.player,
+			        avatar.entity_id,
+			        should_draw));
+			if (!human->SetWeaponDrawn(should_draw))
+			{
+				error = should_draw
+				    ? "native DrawWeapon failed"
+				    : "native HolsterWeapon failed";
+				return false;
+			}
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-animation.weapon-action.returned",
+			    std::format(
+			        "player_id={} entity_id={} result=true",
+			        avatar.player,
+			        avatar.entity_id));
 		}
 		return true;
 	}
@@ -675,6 +1087,20 @@ namespace kcd2mp::kcse
 		auto *actor = resolve_actor(avatar.entity_id);
 		auto *controller =
 		    actor ? actor->m_pMovementController : nullptr;
+		if (!avatar.first_motion_logged)
+		{
+			avatar.first_motion_logged = true;
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-animation.first-locomotion",
+			    std::format(
+			        "player_id={} entity_id={} actor={} controller={} "
+			        "movement_mode={} api=C_Actor::RequestLocomotion",
+			        avatar.player,
+			        avatar.entity_id,
+			        static_cast<void *>(actor),
+			        static_cast<void *>(controller),
+			        static_cast<int>(player.movement_mode)));
+		}
 		if (!actor || !controller)
 		{
 			// Controller construction is part of the asynchronous readiness
@@ -717,6 +1143,14 @@ namespace kcd2mp::kcse
 		        speed))
 		{
 			error = "native MovementController rejected locomotion request";
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-animation.locomotion-failed",
+			    std::format(
+			        "player_id={} entity_id={} speed={} error=\"{}\"",
+			        avatar.player,
+			        avatar.entity_id,
+			        speed,
+			        error));
 			return false;
 		}
 		return true;

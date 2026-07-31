@@ -37,6 +37,7 @@ namespace kcd2mp
 		    std::string &error) = 0;
 		[[nodiscard]] virtual bool set_money(
 		    std::int64_t money,
+		    std::uint32_t subunits,
 		    std::string &error) = 0;
 		[[nodiscard]] virtual bool set_rpg_value(
 		    bool skill,
@@ -61,6 +62,13 @@ namespace kcd2mp
 		bool rollback_succeeded{};
 		std::string error;
 	};
+
+	[[nodiscard]] inline bool profile_failure_requires_world_unload(
+	    const profile_apply_result &result) noexcept
+	{
+		return !result.success && result.rollback_attempted
+		    && !result.rollback_succeeded;
+	}
 
 	namespace detail
 	{
@@ -98,6 +106,7 @@ namespace kcd2mp
 			    || left.display_name() != right.display_name()
 			    || left.level_id() != right.level_id()
 			    || left.money() != right.money()
+			    || left.money_subunits() != right.money_subunits()
 			    || left.transform_valid() != right.transform_valid()
 			    || left.avatar().SerializeAsString()
 			        != right.avatar().SerializeAsString()
@@ -204,7 +213,10 @@ namespace kcd2mp
 					return false;
 			}
 
-			if (!backend.set_money(target.money(), error))
+			if (!backend.set_money(
+			        target.money(),
+			        target.money_subunits(),
+			        error))
 				return false;
 			for (const auto &value : target.stats())
 				if (!backend.set_rpg_value(false, value, error))

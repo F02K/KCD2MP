@@ -1,4 +1,5 @@
 #include "kcse/client_api.hpp"
+#include "kcse/join_trace.hpp"
 #include "kcse/native_runtime.hpp"
 #include "multiplayer/client.hpp"
 #include "multiplayer/protocol.hpp"
@@ -7,6 +8,8 @@
 
 #include <algorithm>
 #include <cstring>
+#include <exception>
+#include <format>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -40,27 +43,66 @@ namespace
 
 	void queue_frame();
 
-	void run_frame()
+	void run_frame_impl()
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse-post-update.enter",
+		    std::format(
+		        "runtime={} client={} task_interface={}",
+		        static_cast<void *>(g_runtime),
+		        static_cast<void *>(g_client),
+		        static_cast<void *>(g_tasks)));
 		if (!g_runtime || !g_client || !g_tasks)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.skipped",
+			    "runtime, client, or task interface is nil");
 			return;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse-post-update.runtime-frame.begin",
+		    "calling native_runtime::on_frame");
 		if (g_runtime->on_frame())
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.epoch-changed",
+			    "notifying multiplayer client");
 			g_client->runtime_epoch_changed();
+		}
 
 		auto client_status = g_client->status();
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse-post-update.client-state",
+		    std::format(
+		        "state={} sandbox_active={} game_queue={}",
+		        static_cast<int>(client_status.state),
+		        g_runtime->sandbox_active(),
+		        client_status.game_queue_size));
 		if (client_status.state != kcd2mp::client_state::disconnected)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.game-tick.begin",
+			    "draining network envelopes on KCSE PostUpdate thread");
 			g_client->game_tick(
 			    g_runtime->local_transform(),
 			    g_runtime->local_avatar_visual(),
 			    g_runtime->current_level_id());
 			client_status = g_client->status();
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.game-tick.complete",
+			    std::format(
+			        "state={} game_queue={}",
+			        static_cast<int>(client_status.state),
+			        client_status.game_queue_size));
 		}
 
 		if (client_status.state != kcd2mp::client_state::disconnected
 		    && g_runtime->sandbox_active())
 		{
 			const auto players = g_client->remote_players();
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.remote-sync.prepare",
+			    std::format("remote_players={}", players.size()));
 			std::vector<kcd2mp::remote_avatar_snapshot> snapshots;
 			snapshots.reserve(players.size());
 			for (const auto &player : players)
@@ -78,9 +120,14 @@ namespace
 			const auto synchronized =
 			    g_runtime->sync_remote_players(snapshots);
 			if (!synchronized.success)
+			{
+				KCD2MP_JOIN_TRACE(
+				    "join.kcse-post-update.remote-sync.failed",
+				    synchronized.error);
 				g_client->fail(
 				    "Native remote-avatar synchronization failed: "
 				    + synchronized.error);
+			}
 		}
 
 		if (const auto correction = g_client->take_local_correction())
@@ -100,6 +147,68 @@ namespace
 				g_runtime->cancel_multiplayer_preparation();
 		}
 		queue_frame();
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse-post-update.complete",
+		    "next KCSE PostUpdate task queued");
+	}
+
+	void run_frame_with_cpp_exceptions()
+	{
+		try
+		{
+			run_frame_impl();
+		}
+		catch (const std::exception &exception)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.exception",
+			    std::format(
+			        "type=std::exception what=\"{}\"",
+			        exception.what()));
+			if (g_client)
+				g_client->fail(
+				    std::string("KCSE PostUpdate exception: ")
+				    + exception.what());
+			queue_frame();
+		}
+		catch (...)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.kcse-post-update.exception",
+			    "type=unknown");
+			if (g_client)
+				g_client->fail(
+				    "Unknown exception on KCSE PostUpdate thread");
+			queue_frame();
+		}
+	}
+
+	void recover_from_frame_seh()
+	{
+		if (g_client)
+			g_client->fail(
+			    "SEH exception on KCSE PostUpdate thread; see "
+			    "KCD2MP-join.log");
+		queue_frame();
+	}
+
+	void run_frame()
+	{
+		kcd2mp::kcse::join_trace::set_thread_role(
+		    kcd2mp::kcse::join_trace::thread_role::kcse_post_update);
+#ifdef _WIN32
+		__try
+		{
+			run_frame_with_cpp_exceptions();
+		}
+		__except(KCD2MP_JOIN_SEH_FILTER(
+		    "join.kcse-post-update.seh"))
+		{
+			recover_from_frame_seh();
+		}
+#else
+		run_frame_with_cpp_exceptions();
+#endif
 	}
 
 	void queue_frame()
@@ -111,6 +220,13 @@ namespace
 
 	void on_kcse_message(KCSE::Message *message)
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.kcse.lifecycle",
+		    std::format(
+		        "message={} sender=\"{}\" data_length={}",
+		        message ? message->type : 0,
+		        message && message->sender ? message->sender : "",
+		        message ? message->dataLen : 0));
 		if (message && g_runtime)
 			g_runtime->on_lifecycle(message->type);
 	}
@@ -140,6 +256,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-get-runtime-status.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}
@@ -147,6 +266,8 @@ namespace
 	std::uint32_t __cdecl abi_connect(
 	    const kcd2mp::kcse::connect_request *request) noexcept
 	{
+		kcd2mp::kcse::join_trace::set_thread_role(
+		    kcd2mp::kcse::join_trace::thread_role::abi);
 		try
 		{
 			if (!request
@@ -157,7 +278,35 @@ namespace
 			    || !valid_text(request->password)
 			    || !valid_text(request->content_hash)
 			    || !valid_text(request->claim_code) || !g_client)
+			{
+				const auto trace_id =
+				    kcd2mp::kcse::join_trace::begin_join(
+				        request && valid_text(request->address)
+				            ? std::string_view(request->address)
+				            : std::string_view("<invalid-request>"));
+				KCD2MP_JOIN_TRACE(
+				    "join.abi-connect.rejected",
+				    std::format(
+				        "trace={} request={} struct_size={} expected_size={} "
+				        "client={}",
+				        trace_id,
+				        static_cast<const void *>(request),
+				        request ? request->struct_size : 0,
+				        sizeof(kcd2mp::kcse::connect_request),
+				        static_cast<void *>(g_client)));
+				kcd2mp::kcse::join_trace::finish_join(
+				    "ABI connect request validation failed");
 				return 0;
+			}
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-connect.accepted",
+			    std::format(
+			        "request={} target=\"{}\" display_name_length={}",
+			        static_cast<const void *>(request),
+			        request->address,
+			        strnlen_s(
+			            request->display_name,
+			            kcd2mp::kcse::text_capacity)));
 			kcd2mp::client_options options;
 			options.address = request->address;
 			options.display_name = request->display_name;
@@ -166,8 +315,23 @@ namespace
 			options.claim_code = request->claim_code;
 			return g_client->connect(std::move(options)) ? 1U : 0U;
 		}
+		catch (const std::exception &exception)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-connect.exception",
+			    std::format(
+			        "type=std::exception what=\"{}\"",
+			        exception.what()));
+			kcd2mp::kcse::join_trace::finish_join(exception.what());
+			return 0;
+		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-connect.exception",
+			    "type=unknown");
+			kcd2mp::kcse::join_trace::finish_join(
+			    "unknown ABI connect exception");
 			return 0;
 		}
 	}
@@ -181,6 +345,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-disconnect.exception",
+			    "type=unknown");
 		}
 	}
 
@@ -197,6 +364,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-send-chat.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}
@@ -221,6 +391,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-select-avatar.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}
@@ -256,6 +429,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-get-status.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}
@@ -290,6 +466,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-copy-players.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}
@@ -322,6 +501,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-copy-chat.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}
@@ -353,6 +535,9 @@ namespace
 		}
 		catch (...)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.abi-copy-avatar-archetypes.exception",
+			    "type=unknown");
 			return 0;
 		}
 	}

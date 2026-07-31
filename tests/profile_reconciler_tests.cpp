@@ -1,4 +1,5 @@
 #include "multiplayer/profile_reconciler.hpp"
+#include "multiplayer/runtime.hpp"
 #include "server/starter_profile.hpp"
 
 #include <cassert>
@@ -100,11 +101,15 @@ namespace
 				}
 			return true;
 		}
-		bool set_money(std::int64_t value, std::string &error) override
+		bool set_money(
+		    std::int64_t value,
+		    std::uint32_t subunits,
+		    std::string &error) override
 		{
 			if (!perform("money", error))
 				return false;
 			profile.set_money(value);
+			profile.set_money_subunits(subunits);
 			return true;
 		}
 		bool set_rpg_value(
@@ -172,6 +177,7 @@ int main()
 
 	auto target = baseline;
 	target.set_money(250);
+	target.set_money_subunits(7);
 	target.mutable_stats(0)->set_level(7);
 	target.mutable_inventory(0)->set_count(5);
 
@@ -181,6 +187,7 @@ int main()
 	const auto applied = reconcile_profile(success, target);
 	assert(applied.success);
 	assert(success.profile.money() == 250);
+	assert(success.profile.money_subunits() == 7);
 	assert(success.profile.stats(0).level() == 7);
 	assert(success.profile.inventory(0).count() == 5);
 
@@ -194,5 +201,47 @@ int main()
 	assert(failed.rollback_succeeded);
 	assert(rollback.profile.money() == baseline.money());
 	assert(rollback.profile.stats(0).level() == baseline.stats(0).level());
+
+	fake_backend invalid;
+	invalid.profile = baseline;
+	auto invalid_target = target;
+	invalid_target.set_transform_valid(true);
+	invalid_target.mutable_last_transform()->mutable_rotation()->Clear();
+	const auto rejected = reconcile_profile(invalid, invalid_target);
+	assert(!rejected.success);
+	assert(!rejected.rollback_attempted);
+	assert(!rejected.rollback_succeeded);
+	assert(!profile_failure_requires_world_unload(rejected));
+	assert(rejected.error == "target profile is invalid");
+	assert(invalid.operations.empty());
+
+	profile_apply_result unrecoverable;
+	unrecoverable.rollback_attempted = true;
+	assert(profile_failure_requires_world_unload(unrecoverable));
+	unrecoverable.rollback_succeeded = true;
+	assert(!profile_failure_requires_world_unload(unrecoverable));
+
+	protocol::ServerBootstrap initializer;
+	initializer.set_mode(protocol::BOOTSTRAP_MODE_INITIALIZE);
+	*initializer.mutable_profile() = baseline;
+	initializer.mutable_profile()->set_transform_valid(false);
+	initializer.mutable_profile()->clear_last_transform();
+	protocol::TransformState local_spawn;
+	local_spawn.mutable_position()->set_x(123.0F);
+	local_spawn.mutable_rotation()->set_w(1.0F);
+	local_spawn.mutable_velocity();
+	const auto initializer_spawn =
+	    select_sandbox_spawn(initializer, local_spawn);
+	assert(initializer_spawn.transform);
+	assert(
+	    initializer_spawn.source
+	    == sandbox_spawn_source::local_engine_default);
+	assert(initializer_spawn.transform->position().x() == 123.0F);
+
+	initializer.set_mode(protocol::BOOTSTRAP_MODE_LOAD);
+	const auto missing_load_spawn =
+	    select_sandbox_spawn(initializer, local_spawn);
+	assert(!missing_load_spawn.transform);
+	assert(missing_load_spawn.source == sandbox_spawn_source::none);
 	return 0;
 }

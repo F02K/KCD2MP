@@ -368,6 +368,7 @@ int main()
 		auto *profile = profile_update->mutable_profile();
 		*profile = enrolled_profile;
 		profile->set_money(profile->money() + 1);
+		profile->set_money_subunits(7);
 		core.on_message(1, update, start + 4ms);
 		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
@@ -400,6 +401,7 @@ int main()
 		const auto reclaimed = find_bootstrap(outbound, 3);
 		assert(!reclaimed.issued_identity_token().empty());
 		assert(reclaimed.profile().revision() == 2);
+		assert(reclaimed.profile().money_subunits() == 7);
 		identity_token = reclaimed.issued_identity_token();
 	}
 
@@ -416,6 +418,7 @@ int main()
 		const auto bootstrap = find_bootstrap(outbound, 10);
 		assert(bootstrap.profile().player_id() == persistent_id);
 		assert(bootstrap.profile().revision() == 2);
+		assert(bootstrap.profile().money_subunits() == 7);
 		restarted.on_message(10, ready(bootstrap), start + 1002ms);
 		(void)restarted.take_outbound();
 		restarted.on_message(

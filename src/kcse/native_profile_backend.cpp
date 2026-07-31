@@ -1,5 +1,6 @@
 #include "kcse/native_profile_backend.hpp"
 
+#include "kcse/join_trace.hpp"
 #include "multiplayer/avatar_visual.hpp"
 #include "npc/equipment_catalog.hpp"
 
@@ -17,6 +18,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
 #include <limits>
 #include <ranges>
 #include <unordered_map>
@@ -28,7 +30,6 @@ namespace kcd2mp::kcse
 	{
 		constexpr std::uint32_t item_equipped = 1U;
 		constexpr std::uint32_t item_change_attributes = 0x4000U;
-		constexpr std::int64_t money_units_per_groschen = 10;
 
 		protocol::AvatarWeaponClass protocol_weapon(npc::weapon_class value)
 		{
@@ -159,6 +160,7 @@ namespace kcd2mp::kcse
 		}
 
 		std::int64_t native_money{};
+		std::size_t native_money_stacks{};
 		for (const auto *item : native->inventory->m_items)
 		{
 			if (!item || !item->m_pClassData || item->m_amount <= 0)
@@ -166,6 +168,7 @@ namespace kcd2mp::kcse
 			if (item->IsOfType(wh::entitymodule::E_ItemType::Money))
 			{
 				native_money += item->m_amount;
+				++native_money_stacks;
 				continue;
 			}
 			auto *wire = result.add_inventory();
@@ -188,14 +191,17 @@ namespace kcd2mp::kcse
 				wire->set_equipped_slot(definition->equipped_slot);
 			}
 		}
-		if (native_money % money_units_per_groschen != 0)
-		{
-			error =
-			    "native money contains fractional groschen that protocol v4 "
-			    "cannot represent";
-			return std::nullopt;
-		}
-		result.set_money(native_money / money_units_per_groschen);
+		result.set_money(native_money / money_subunits_per_groschen);
+		result.set_money_subunits(static_cast<std::uint32_t>(
+		    native_money % money_subunits_per_groschen));
+		KCD2MP_JOIN_TRACE(
+		    "join.profile.capture.money",
+		    std::format(
+		        "native_units={} groschen={} subunits={} stacks={}",
+		        native_money,
+		        result.money(),
+		        result.money_subunits(),
+		        native_money_stacks));
 
 		auto avatar = m_avatar_state.value_or(result.avatar());
 		avatar.clear_equipment();
@@ -408,11 +414,24 @@ namespace kcd2mp::kcse
 
 	bool native_profile_backend::set_money(
 	    std::int64_t money,
+	    std::uint32_t subunits,
 	    std::string &error)
 	{
 		const auto native = state(error);
-		if (!native || money < 0 || money > max_profile_money)
+		if (!native)
 			return false;
+		if (money < 0 || money > max_profile_money
+		    || subunits >= money_subunits_per_groschen)
+		{
+			error = std::format(
+			    "invalid native money target: groschen={} subunits={}",
+			    money,
+			    subunits);
+			KCD2MP_JOIN_TRACE(
+			    "join.profile.apply-money.rejected",
+			    error);
+			return false;
+		}
 		std::vector<wh::entitymodule::C_Item *> stacks;
 		for (auto *item : native->inventory->m_items)
 			if (item && item->IsOfType(wh::entitymodule::E_ItemType::Money))
@@ -440,7 +459,16 @@ namespace kcd2mp::kcse
 			money_guid = found->first;
 		}
 
-		std::int64_t remaining = money * money_units_per_groschen;
+		std::int64_t remaining =
+		    money * money_subunits_per_groschen + subunits;
+		KCD2MP_JOIN_TRACE(
+		    "join.profile.apply-money.begin",
+		    std::format(
+		        "groschen={} subunits={} native_units={} existing_stacks={}",
+		        money,
+		        subunits,
+		        remaining,
+		        stacks.size()));
 		for (auto *stack : stacks)
 		{
 			const auto amount = static_cast<std::int32_t>(std::min<std::int64_t>(
@@ -477,6 +505,13 @@ namespace kcd2mp::kcse
 			}
 			remaining -= amount;
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.profile.apply-money.complete",
+		    std::format(
+		        "groschen={} subunits={} native_units={}",
+		        money,
+		        subunits,
+		        money * money_subunits_per_groschen + subunits));
 		return true;
 	}
 

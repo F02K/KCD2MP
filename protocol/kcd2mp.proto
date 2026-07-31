@@ -155,6 +155,8 @@ message PlayerProfile {
   repeated RpgValue skills = 9;
   repeated InventoryItem inventory = 10;
   AvatarDescriptor avatar = 11;
+  // Tenths of one Groschen, constrained to 0..9.
+  uint32 money_subunits = 12;
 }
 
 message ServerBootstrap {

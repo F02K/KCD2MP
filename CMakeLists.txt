@@ -376,6 +376,8 @@ if(KCD2MP_BUILD_KCSE)
 
     add_library(KCD2MPKCSEClient SHARED
         "${SRC_DIR}/kcse/client_api.hpp"
+        "${SRC_DIR}/kcse/join_trace.cpp"
+        "${SRC_DIR}/kcse/join_trace.hpp"
         "${SRC_DIR}/kcse/plugin.cpp"
         "${SRC_DIR}/kcse/native_runtime.hpp"
         "${SRC_DIR}/multiplayer/client.cpp"

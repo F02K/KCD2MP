@@ -500,6 +500,7 @@ namespace kcd2mp
 		    || !is_valid_display_name(profile.display_name())
 		    || !valid_identifier(profile.level_id())
 		    || profile.money() < 0 || profile.money() > max_profile_money
+		    || profile.money_subunits() >= money_subunits_per_groschen
 		    || profile.stats_size() != static_cast<int>(profile_stat_count)
 		    || profile.skills_size() != static_cast<int>(profile_skill_count)
 		    || profile.inventory_size()

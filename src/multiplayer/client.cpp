@@ -1,5 +1,6 @@
 #include "multiplayer/client.hpp"
 #include "multiplayer/avatar_visual.hpp"
+#include "kcse/join_trace.hpp"
 
 #include <algorithm>
 #include <array>
@@ -35,6 +36,68 @@ namespace kcd2mp
 			    + std::pow(left.z() - right.z(), 2.0F));
 		}
 
+		const char *state_name(client_state state)
+		{
+			switch (state)
+			{
+			case client_state::disconnected:
+				return "disconnected";
+			case client_state::preflight:
+				return "preflight";
+			case client_state::authenticating:
+				return "authenticating";
+			case client_state::waiting_for_bootstrap:
+				return "waiting-for-bootstrap";
+			case client_state::loading_sandbox:
+				return "loading-sandbox";
+			case client_state::applying_profile:
+				return "applying-profile";
+			case client_state::connected:
+				return "connected";
+			case client_state::reconnecting:
+				return "reconnecting";
+			case client_state::closing:
+				return "closing";
+			}
+			return "unknown";
+		}
+
+		const char *envelope_name(const protocol::Envelope &envelope)
+		{
+			if (envelope.has_server_challenge())
+				return "ServerChallenge";
+			if (envelope.has_server_bootstrap())
+				return "ServerBootstrap";
+			if (envelope.has_server_accepted())
+				return "ServerAccepted";
+			if (envelope.has_server_rejected())
+				return "ServerRejected";
+			if (envelope.has_world_snapshot())
+				return "WorldSnapshot";
+			if (envelope.has_player_joined())
+				return "PlayerJoined";
+			if (envelope.has_player_left())
+				return "PlayerLeft";
+			if (envelope.has_profile_accepted())
+				return "ProfileAccepted";
+			if (envelope.has_profile_rejected())
+				return "ProfileRejected";
+			if (envelope.has_avatar_accepted())
+				return "AvatarAccepted";
+			if (envelope.has_avatar_rejected())
+				return "AvatarRejected";
+			if (envelope.has_player_avatar_updated())
+				return "PlayerAvatarUpdated";
+			if (envelope.has_chat_broadcast())
+				return "ChatBroadcast";
+			if (envelope.has_server_entity_control())
+				return "ServerEntityControl";
+			if (envelope.has_server_shutdown())
+				return "ServerShutdown";
+			if (envelope.has_pong())
+				return "Pong";
+			return "Other";
+		}
 	}
 
 	multiplayer_client::multiplayer_client(client_runtime &runtime) :
@@ -54,24 +117,53 @@ namespace kcd2mp
 
 	bool multiplayer_client::connect(client_options options)
 	{
+		const auto trace_id =
+		    kcse::join_trace::begin_join(options.address);
+		KCD2MP_JOIN_TRACE(
+		    "join.request.validating",
+		    std::format(
+		        "trace={} display_name_length={} content_hash_length={} "
+		        "claim_code_present={}",
+		        trace_id,
+		        options.display_name.size(),
+		        options.content_hash.size(),
+		        !options.claim_code.empty()));
 		if (!is_valid_display_name(options.display_name)
 		    || options.address.empty())
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.request.rejected",
+			    "invalid display name or empty server target");
+			kcse::join_trace::finish_join("request validation failed");
 			return false;
 		}
 		if (!m_runtime.can_start_join())
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.runtime-gate.rejected",
+			    "can_start_join=false");
 			std::scoped_lock lock(m_state_mutex);
 			m_status.error = "Join requires a fully loaded native save.";
+			kcse::join_trace::finish_join(m_status.error);
 			return false;
 		}
 		{
 			std::scoped_lock lock(m_state_mutex);
 			if (m_status.state != client_state::disconnected)
 			{
+				KCD2MP_JOIN_TRACE(
+				    "join.request.rejected",
+				    std::format(
+				        "client_state={}",
+				        state_name(m_status.state)));
+				kcse::join_trace::finish_join(
+				    "client was not disconnected");
 				return false;
 			}
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.prepare.begin",
+		    "calling client_runtime::prepare_multiplayer");
 		if (!m_runtime.prepare_multiplayer())
 		{
 			const auto gate = m_runtime.capability();
@@ -79,8 +171,15 @@ namespace kcd2mp
 			m_status.error = gate.diagnostic.empty()
 			    ? "Multiplayer runtime initialization could not start."
 			    : gate.diagnostic;
+			KCD2MP_JOIN_TRACE(
+			    "join.runtime.prepare.failed",
+			    m_status.error);
+			kcse::join_trace::finish_join(m_status.error);
 			return false;
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.prepare.accepted",
+		    "native capability probe requested");
 		{
 			std::scoped_lock lock(m_state_mutex);
 			m_status = {};
@@ -101,12 +200,21 @@ namespace kcd2mp
 			m_resume_token.clear();
 			m_pending_connect = std::move(options);
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.state.initialized",
+		    "state=preflight; client caches cleared");
 		ensure_network_thread();
+		KCD2MP_JOIN_TRACE(
+		    "join.network-thread.ready",
+		    "connect will be queued after native preflight");
 		return true;
 	}
 
 	void multiplayer_client::disconnect()
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.disconnect.requested",
+		    "client disconnect requested");
 		if (const auto profile = m_runtime.local_profile())
 		{
 			queue_profile_snapshot(*profile);
@@ -125,6 +233,9 @@ namespace kcd2mp
 
 	void multiplayer_client::fail(std::string error)
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.client.fail",
+		    error);
 		{
 			std::scoped_lock lock(m_state_mutex);
 			if (m_status.state == client_state::disconnected
@@ -295,6 +406,13 @@ namespace kcd2mp
 		}
 
 		const auto gate = m_runtime.capability();
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.preflight.poll",
+		    std::format(
+		        "available={} pending={} diagnostic=\"{}\"",
+		        gate.available,
+		        gate.pending,
+		        gate.diagnostic));
 		if (!gate.available)
 		{
 			if (gate.pending)
@@ -308,6 +426,10 @@ namespace kcd2mp
 				    ? "Multiplayer runtime initialization failed."
 				    : gate.diagnostic;
 				m_pending_connect.reset();
+				KCD2MP_JOIN_TRACE(
+				    "join.runtime.preflight.failed",
+				    m_status.error);
+				kcse::join_trace::finish_join(m_status.error);
 			}
 			return;
 		}
@@ -321,13 +443,27 @@ namespace kcd2mp
 			options = std::move(m_pending_connect);
 			m_pending_connect.reset();
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.runtime.preflight.complete",
+		    std::format("target=\"{}\"", options->address));
 		queue_network(connect_command{std::move(*options)});
+		KCD2MP_JOIN_TRACE(
+		    "join.network.connect.queued",
+		    "connect command enqueued for network thread");
 	}
 
 	void multiplayer_client::ensure_network_thread()
 	{
 		if (m_network_thread.joinable())
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.network-thread.reuse",
+			    "existing std::jthread is joinable");
 			return;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.network-thread.create",
+		    "starting std::jthread");
 		m_network_thread = std::jthread(
 		    [this](std::stop_token stop)
 		    {
@@ -373,11 +509,20 @@ namespace kcd2mp
 	void multiplayer_client::network_loop(std::stop_token stop)
 	{
 		using namespace std::chrono_literals;
+		kcse::join_trace::set_thread_role(
+		    kcse::join_trace::thread_role::network);
 		try
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.network-loop.enter",
+			    "GameNetworkingSockets runtime construction begins");
 			net::runtime runtime;
+			KCD2MP_JOIN_TRACE(
+			    "join.network-loop.runtime-ready",
+			    "GameNetworkingSockets runtime constructed");
 			std::optional<net::client_transport> transport;
 			bool transport_needs_reset = false;
+			bool first_world_snapshot_seen = false;
 			client_options options;
 			std::size_t reconnect_attempt = 0;
 			auto reconnect_at = std::chrono::steady_clock::time_point{};
@@ -388,20 +533,60 @@ namespace kcd2mp
 			{
 				if (!transport || !transport->has_connection())
 				{
+					KCD2MP_JOIN_TRACE(
+					    "join.network.send.skipped",
+					    std::format(
+					        "message={} reason=no-active-connection",
+					        envelope_name(envelope)));
 					return false;
 				}
 				std::string error;
 				const auto encoded = encode(envelope, delivery, &error);
-				return encoded
-				    && transport->send(encoded->bytes, delivery, &error);
+				if (!encoded)
+				{
+					KCD2MP_JOIN_TRACE(
+					    "join.network.encode.failed",
+					    std::format(
+					        "message={} error=\"{}\"",
+					        envelope_name(envelope),
+					        error));
+					return false;
+				}
+				KCD2MP_JOIN_TRACE(
+				    "join.network.send.begin",
+				    std::format(
+				        "message={} bytes={} reliability={}",
+				        envelope_name(envelope),
+				        encoded->bytes.size(),
+				        delivery == reliability::reliable
+				            ? "reliable"
+				            : "unreliable"));
+				const auto sent =
+				    transport->send(encoded->bytes, delivery, &error);
+				KCD2MP_JOIN_TRACE(
+				    sent ? "join.network.send.ok"
+				         : "join.network.send.failed",
+				    std::format(
+				        "message={} error=\"{}\"",
+				        envelope_name(envelope),
+				        error));
+				return sent;
 			};
 
 			auto create_transport = [&]
 			{
+				KCD2MP_JOIN_TRACE(
+				    "join.transport.create.begin",
+				    "constructing client transport and callbacks");
 				transport.emplace(net::client_callbacks{
 				    .connected =
 				        [&]
 				        {
+					        KCD2MP_JOIN_TRACE(
+					            "join.transport.connected",
+					            std::format(
+					                "target=\"{}\"; building ClientHello",
+					                options.address));
 					        set_state(client_state::preflight);
 					        protocol::Envelope envelope;
 					        auto *hello = envelope.mutable_client_hello();
@@ -422,6 +607,18 @@ namespace kcd2mp
 					        runtime_info->set_runtime_epoch(runtime.epoch);
 					        runtime_info->set_address_library(
 					            runtime.address_library);
+					        KCD2MP_JOIN_TRACE(
+					            "join.handshake.client-hello.ready",
+					            std::format(
+					                "protocol={} client={} game={} release={} "
+					                "epoch={} capabilities=0x{:X} addresslib=\"{}\"",
+					                protocol_version,
+					                version_string,
+					                runtime.game_version,
+					                runtime.release_index,
+					                runtime.epoch,
+					                runtime.capabilities,
+					                runtime.address_library));
 					        if (!send_envelope(envelope, reliability::reliable))
 					        {
 						        set_state(
@@ -432,6 +629,13 @@ namespace kcd2mp
 				    .disconnected =
 				        [&](bool retry, std::string reason)
 				        {
+					        KCD2MP_JOIN_TRACE(
+					            "join.transport.disconnected",
+					            std::format(
+					                "retry={} attempt={} reason=\"{}\"",
+					                retry,
+					                reconnect_attempt,
+					                reason));
 					        transport_needs_reset = true;
 					        if (retry
 					            && reconnect_attempt < reconnect_delays.size())
@@ -448,10 +652,16 @@ namespace kcd2mp
 				    .message =
 				        [&](std::span<const std::byte> bytes)
 				        {
+					        KCD2MP_JOIN_TRACE(
+					            "join.network.receive.begin",
+					            std::format("bytes={}", bytes.size()));
 					        std::string error;
 					        const auto envelope = decode(bytes, &error);
 					        if (!envelope)
 					        {
+						        KCD2MP_JOIN_TRACE(
+						            "join.network.decode.failed",
+						            error);
 						        set_state(
 						            client_state::disconnected,
 						            "server sent malformed data");
@@ -462,6 +672,13 @@ namespace kcd2mp
 						        }
 						        return;
 					        }
+					        KCD2MP_JOIN_TRACE(
+					            "join.network.receive.decoded",
+					            std::format(
+					                "message={}",
+					                envelope_name(*envelope)));
+					        const auto *message_kind =
+					            envelope_name(*envelope);
 					        if (envelope->has_server_accepted())
 					        {
 						        const auto &accepted =
@@ -480,12 +697,26 @@ namespace kcd2mp
 							                .profile_snapshot_interval_seconds();
 							        m_resume_token = accepted.resume_token();
 						        }
+						        KCD2MP_JOIN_TRACE(
+						            "join.handshake.server-accepted",
+						            std::format(
+						                "player_id={} server=\"{}\" level=\"{}\" "
+						                "initial_players={}",
+						                accepted.player_id(),
+						                accepted.server_name(),
+						                accepted.level_id(),
+						                accepted.players_size()));
 						        reconnect_attempt = 0;
 					        }
 					        else if (envelope->has_server_challenge())
 					        {
 						        const auto server_id =
 						            envelope->server_challenge().server_id();
+						        KCD2MP_JOIN_TRACE(
+						            "join.handshake.server-challenge",
+						            std::format(
+						                "server_id=\"{}\"",
+						                server_id));
 						        {
 							        std::scoped_lock lock(m_state_mutex);
 							        m_server_id = server_id;
@@ -498,15 +729,24 @@ namespace kcd2mp
 						        if (!options.claim_code.empty())
 						        {
 							        message->set_claim_code(options.claim_code);
+							        KCD2MP_JOIN_TRACE(
+							            "join.handshake.auth.method",
+							            "claim-code");
 						        }
 						        else if (const auto token =
 						                     m_identities.token_for(server_id))
 						        {
 							        message->set_identity_token(*token);
+							        KCD2MP_JOIN_TRACE(
+							            "join.handshake.auth.method",
+							            "stored-identity-token");
 						        }
 						        else
 						        {
 							        message->set_enroll(true);
+							        KCD2MP_JOIN_TRACE(
+							            "join.handshake.auth.method",
+							            "enrollment");
 						        }
 						        {
 							        std::scoped_lock lock(m_state_mutex);
@@ -525,6 +765,27 @@ namespace kcd2mp
 					        {
 						        const auto &bootstrap =
 						            envelope->server_bootstrap();
+						        KCD2MP_JOIN_TRACE(
+						            "join.handshake.server-bootstrap",
+						            std::format(
+						                "server_id=\"{}\" session_id=\"{}\" "
+						                "level=\"{}\" mode={} profile={} "
+						                "spawn_valid={} has_spawn={} "
+						                "profile_transform_valid={} "
+						                "profile_has_transform={} "
+						                "identity_token_issued={}",
+						                bootstrap.server_id(),
+						                bootstrap.session_id(),
+						                bootstrap.level_id(),
+						                static_cast<int>(bootstrap.mode()),
+						                bootstrap.has_profile(),
+						                bootstrap.spawn_valid(),
+						                bootstrap.has_spawn(),
+						                bootstrap.has_profile()
+						                    && bootstrap.profile().transform_valid(),
+						                bootstrap.has_profile()
+						                    && bootstrap.profile().has_last_transform(),
+						                !bootstrap.issued_identity_token().empty()));
 						        if (!bootstrap.issued_identity_token().empty())
 						        {
 							        m_identities.store(
@@ -545,6 +806,9 @@ namespace kcd2mp
 					        }
 					        else if (envelope->has_server_rejected())
 					        {
+						        KCD2MP_JOIN_TRACE(
+						            "join.handshake.server-rejected",
+						            envelope->server_rejected().message());
 						        set_state(
 						            client_state::disconnected,
 						            envelope->server_rejected().message());
@@ -554,6 +818,17 @@ namespace kcd2mp
 							            "server rejected connection");
 						        }
 					        }
+					        else if (envelope->has_world_snapshot()
+					            && !first_world_snapshot_seen)
+					        {
+						        first_world_snapshot_seen = true;
+						        KCD2MP_JOIN_TRACE(
+						            "join.snapshot.first-received",
+						            std::format(
+						                "players={} server_time_ms={}",
+						                envelope->world_snapshot().players_size(),
+						                envelope->world_snapshot().server_time_ms()));
+					        }
 
 					        const bool reliable =
 					            !envelope->has_world_snapshot();
@@ -562,6 +837,11 @@ namespace kcd2mp
 					                reliable)
 					            && reliable)
 					        {
+						        KCD2MP_JOIN_TRACE(
+						            "join.game-queue.push.failed",
+						            std::format(
+						                "message={} reliable=true",
+						                message_kind));
 						        set_state(
 						            client_state::disconnected,
 						            "game-thread queue overflow");
@@ -571,7 +851,19 @@ namespace kcd2mp
 							            "client queue overflow");
 						        }
 					        }
+					        else
+					        {
+						        KCD2MP_JOIN_TRACE(
+						            "join.game-queue.push.ok",
+						            std::format(
+						                "message={} reliable={}",
+						                message_kind,
+						                reliable));
+					        }
 				        }});
+				KCD2MP_JOIN_TRACE(
+				    "join.transport.create.ok",
+				    "client transport callbacks installed");
 			};
 
 			while (!stop.stop_requested())
@@ -591,8 +883,19 @@ namespace kcd2mp
 						    {
 							    options = std::move(typed.options);
 							    reconnect_attempt = 0;
+							    first_world_snapshot_seen = false;
+							    KCD2MP_JOIN_TRACE(
+							        "join.transport.connect.begin",
+							        std::format(
+							            "target=\"{}\"",
+							            options.address));
 							    create_transport();
 							    transport->connect(options.address);
+							    KCD2MP_JOIN_TRACE(
+							        "join.transport.connect.started",
+							        std::format(
+							            "target=\"{}\"",
+							            options.address));
 						    }
 						    else if constexpr (
 						        std::is_same_v<type, disconnect_command>)
@@ -673,8 +976,19 @@ namespace kcd2mp
 				    && reconnect_at != std::chrono::steady_clock::time_point{}
 				    && std::chrono::steady_clock::now() >= reconnect_at)
 				{
+					KCD2MP_JOIN_TRACE(
+					    "join.transport.reconnect.begin",
+					    std::format(
+					        "target=\"{}\" attempt={}",
+					        options.address,
+					        reconnect_attempt));
 					create_transport();
 					transport->connect(options.address);
+					KCD2MP_JOIN_TRACE(
+					    "join.transport.reconnect.started",
+					    std::format(
+					        "target=\"{}\"",
+					        options.address));
 					reconnect_at = {};
 				}
 				if (transport)
@@ -715,7 +1029,21 @@ namespace kcd2mp
 		}
 		catch (const std::exception &exception)
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.network-loop.exception",
+			    std::format(
+			        "type=std::exception what=\"{}\"",
+			        exception.what()));
 			set_state(client_state::disconnected, exception.what());
+		}
+		catch (...)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.network-loop.exception",
+			    "type=unknown");
+			set_state(
+			    client_state::disconnected,
+			    "unknown exception in network loop");
 		}
 	}
 
@@ -723,17 +1051,35 @@ namespace kcd2mp
 	    client_state state,
 	    std::string error)
 	{
-		std::scoped_lock lock(m_state_mutex);
-		m_status.state = state;
-		m_status.error = std::move(error);
-		if (state == client_state::disconnected)
+		client_state previous{};
+		std::string final_error;
+		std::string transition_error;
 		{
-			m_pending_bootstrap.reset();
-			m_pending_connect.reset();
-			m_status.local_player_id = 0;
-			m_status.ping_ms = -1;
-			m_status.packet_loss_percent = 0.0F;
+			std::scoped_lock lock(m_state_mutex);
+			previous = m_status.state;
+			m_status.state = state;
+			m_status.error = std::move(error);
+			transition_error = m_status.error;
+			if (state == client_state::disconnected)
+			{
+				m_pending_bootstrap.reset();
+				m_pending_connect.reset();
+				m_status.local_player_id = 0;
+				m_status.ping_ms = -1;
+				m_status.packet_loss_percent = 0.0F;
+				final_error = m_status.error;
+			}
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.state.transition",
+		    std::format(
+		        "from={} to={} error=\"{}\"",
+		        state_name(previous),
+		        state_name(state),
+		        transition_error));
+		if (state == client_state::disconnected)
+			kcse::join_trace::finish_join(
+			    final_error.empty() ? "disconnected" : final_error);
 	}
 
 	void multiplayer_client::queue_network(network_command command)
@@ -775,6 +1121,9 @@ namespace kcd2mp
 	    const protocol::Envelope &envelope,
 	    std::chrono::steady_clock::time_point now)
 	{
+		KCD2MP_JOIN_TRACE(
+		    "join.game-envelope.begin",
+		    std::format("message={}", envelope_name(envelope)));
 		std::unique_lock lock(m_state_mutex);
 		if (envelope.has_server_accepted())
 		{
@@ -784,10 +1133,31 @@ namespace kcd2mp
 			{
 				accept_snapshot_player(player, now);
 			}
+			KCD2MP_JOIN_TRACE(
+			    "join.game-envelope.server-accepted.applied",
+			    std::format(
+			        "players={}",
+			        envelope.server_accepted().players_size()));
 		}
 		else if (envelope.has_server_bootstrap())
 		{
 			const auto &bootstrap = envelope.server_bootstrap();
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.bootstrap.begin",
+			    std::format(
+			        "session_id=\"{}\" level=\"{}\" mode={} profile={} "
+			        "spawn_valid={} has_spawn={} profile_transform_valid={} "
+			        "profile_has_transform={}",
+			        bootstrap.session_id(),
+			        bootstrap.level_id(),
+			        static_cast<int>(bootstrap.mode()),
+			        bootstrap.has_profile(),
+			        bootstrap.spawn_valid(),
+			        bootstrap.has_spawn(),
+			        bootstrap.has_profile()
+			            && bootstrap.profile().transform_valid(),
+			        bootstrap.has_profile()
+			            && bootstrap.profile().has_last_transform()));
 			if (m_status.state == client_state::disconnected
 			    || m_status.state == client_state::closing)
 			{
@@ -811,6 +1181,11 @@ namespace kcd2mp
 			const auto bootstrap_copy = bootstrap;
 			lock.unlock();
 			const auto result = m_runtime.begin_sandbox(bootstrap_copy);
+			KCD2MP_JOIN_TRACE(
+			    result.started
+			        ? "join.sandbox.bootstrap.started"
+			        : "join.sandbox.bootstrap.failed",
+			    result.error);
 			lock.lock();
 			if (!result.started)
 			{
@@ -840,10 +1215,21 @@ namespace kcd2mp
 		}
 		else if (envelope.has_world_snapshot())
 		{
+			KCD2MP_JOIN_TRACE(
+			    "join.snapshot.apply.begin",
+			    std::format(
+			        "players={} server_time_ms={}",
+			        envelope.world_snapshot().players_size(),
+			        envelope.world_snapshot().server_time_ms()));
 			for (const auto &player : envelope.world_snapshot().players())
 			{
 				accept_snapshot_player(player, now);
 			}
+			KCD2MP_JOIN_TRACE(
+			    "join.snapshot.apply.complete",
+			    std::format(
+			        "tracked_remote_players={}",
+			        m_remote_players.size()));
 		}
 		else if (envelope.has_state_correction())
 		{

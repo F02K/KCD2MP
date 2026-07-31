@@ -209,6 +209,7 @@ namespace kcd2mp::npc
 			}
 
 			std::map<std::string, equipment_definition> parsed;
+			std::map<std::string, std::string> aliases;
 			for (const auto &document : documents)
 			{
 				const auto name = lower(document.source);
@@ -227,6 +228,10 @@ namespace kcd2mp::npc
 					    lower(node.attribute("Id").value());
 					if (id.empty())
 						continue;
+					const std::string source_id =
+					    lower(node.attribute("SourceItemId").value());
+					if (!source_id.empty() && source_id != id)
+						aliases[id] = source_id;
 
 					equipment_definition definition;
 					definition.definition_id = id;
@@ -279,6 +284,25 @@ namespace kcd2mp::npc
 					if (is_player_slot(definition.equipped_slot))
 						parsed[id] = std::move(definition);
 				}
+			}
+
+			for (std::size_t pass = 0; pass < aliases.size(); ++pass)
+			{
+				bool progressed = false;
+				for (const auto &[alias_id, source_id] : aliases)
+				{
+					if (parsed.contains(alias_id))
+						continue;
+					const auto source = parsed.find(source_id);
+					if (source == parsed.end())
+						continue;
+					auto inherited = source->second;
+					inherited.definition_id = alias_id;
+					parsed.emplace(alias_id, std::move(inherited));
+					progressed = true;
+				}
+				if (!progressed)
+					break;
 			}
 
 			output.clear();
