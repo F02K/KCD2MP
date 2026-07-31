@@ -114,6 +114,38 @@ fields back into the exact stack amount. Equality checks, validation, server
 persistence, and rollback all include the subunit field. Starter-profile TOML
 continues to express whole Groschen and therefore defaults to zero subunits.
 
+### Follow-up: starter inventory and native equipment slots
+
+The next initializer reached the profile transaction but failed before the
+money step. The starter profile assigned `quality = 100.0` to
+`kettleFood_wineBarrel`, while native KCD2 item quality is a grade and this
+non-equippable Food item exposes its definition quality instead of mutable
+equippable runtime data. `update_item()` therefore returned `false` during its
+readback check without setting an error. The rollback repeated that failure;
+the resulting emergency `EndGameContext()` call raised the guarded access
+violation.
+
+Starter item quality is now `1.0` and starter templates accept only native
+quality grades `0..4`. `equipped_slot` remains optional: an item without it is
+inventory-only. Before any destructive profile mutation, the native backend now
+verifies that every slotted item is equippable and that its catalog slot matches
+the requested slot. Readback failures include the item instance and actual versus
+expected count, condition, and quality. Persisted revision-1 profiles whose
+initial world bootstrap never completed are refreshed from the corrected starter
+template on their next authentication.
+
+### Follow-up: first skill during profile apply
+
+After inventory and money reconciliation succeeded, the transaction completed
+all ten stat writes and raised an access violation on the first skill
+(`stealth`). `dispatch_xp()` constructed the skill XP event through address
+library ID `66741`, which resolves to the `C_StatXPEffect` constructor at Steam
+RVA `0xC67268`. The stat and skill effects are both 0x40 bytes but have different
+field layouts, so dispatching the incorrectly constructed event crashed inside
+native code. Skill XP events now use ID `66710`, the verified
+`C_SkillXPEffect` constructor at Steam RVA `0xC65AD0`. Per-value begin, complete,
+and failure trace entries identify the exact RPG value in future join logs.
+
 ## Fork versus upstream
 
 ### Spawn and bindings

@@ -11,6 +11,7 @@ namespace wh::entitymodule
 {
 	class C_Inventory;
 	class C_Item;
+	class C_EquipmentManager;
 }
 
 namespace wh::rpgmodule
@@ -31,8 +32,8 @@ namespace kcd2mp::kcse
 
 		[[nodiscard]] std::optional<protocol::PlayerProfile> capture(
 		    std::string &error) override;
-		[[nodiscard]] bool validate_definition(
-		    std::string_view definition_id,
+		[[nodiscard]] bool validate_item(
+		    const protocol::InventoryItem &item,
 		    std::string &error) override;
 		[[nodiscard]] int slot_layer(std::string_view slot) const override;
 		[[nodiscard]] bool unequip(
@@ -71,6 +72,7 @@ namespace kcd2mp::kcse
 		{
 			wh::rpgmodule::C_Soul *soul{};
 			wh::entitymodule::C_Inventory *inventory{};
+			wh::entitymodule::C_EquipmentManager *equipment{};
 		};
 
 		[[nodiscard]] std::optional<native_state> state(

@@ -24,11 +24,11 @@ namespace
 		{
 			return profile;
 		}
-		bool validate_definition(
-		    std::string_view id,
+		bool validate_item(
+		    const protocol::InventoryItem &item,
 		    std::string &error) override
 		{
-			if (!definitions.contains(std::string(id)))
+			if (!definitions.contains(item.definition_id()))
 			{
 				error = "unknown definition";
 				return false;
@@ -170,6 +170,9 @@ int main()
 	    1,
 	    "Henry",
 	    "sandbox");
+	assert(baseline.inventory_size() == 1);
+	assert(baseline.inventory(0).quality() == 1.0F);
+	assert(!baseline.inventory(0).has_equipped_slot());
 	auto *avatar = baseline.mutable_avatar();
 	avatar->set_archetype_id(
 	    "763db0bb-4469-497d-bdc9-712b3df91b5a");
@@ -190,6 +193,44 @@ int main()
 	assert(success.profile.money_subunits() == 7);
 	assert(success.profile.stats(0).level() == 7);
 	assert(success.profile.inventory(0).count() == 5);
+	assert(std::ranges::none_of(
+	    success.operations,
+	    [](const std::string &operation)
+	    {
+		    return operation.starts_with("equip:");
+	    }));
+
+	auto equipped_target = target;
+	auto *equipped_item = equipped_target.add_inventory();
+	equipped_item->set_instance_id(
+	    "22222222-2222-4222-8222-222222222222");
+	equipped_item->set_definition_id(
+	    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+	equipped_item->set_count(1);
+	equipped_item->set_quality(1.0F);
+	equipped_item->set_condition(1.0F);
+	equipped_item->set_equipped_slot("PrimaryMainHand");
+	auto *visible = equipped_target.mutable_avatar()->add_equipment();
+	visible->set_definition_id(equipped_item->definition_id());
+	visible->set_equipped_slot(equipped_item->equipped_slot());
+	fake_backend equipped;
+	equipped.profile = baseline;
+	equipped.definitions = success.definitions;
+	equipped.definitions.insert(equipped_item->definition_id());
+	const auto equipped_applied = reconcile_profile(equipped, equipped_target);
+	assert(equipped_applied.success);
+	assert(!equipped.profile.inventory(0).has_equipped_slot());
+	assert(equipped.profile.inventory(1).has_equipped_slot());
+	assert(
+	    equipped.profile.inventory(1).equipped_slot()
+	    == "PrimaryMainHand");
+	assert(std::ranges::count_if(
+	           equipped.operations,
+	           [](const std::string &operation)
+	           {
+		           return operation.starts_with("equip:");
+	           })
+	    == 1);
 
 	fake_backend rollback;
 	rollback.profile = baseline;

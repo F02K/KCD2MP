@@ -1,8 +1,10 @@
 #pragma once
 
 #include "kcse/native_entity_backend.hpp"
+#include "kcse/remote_avatar_readiness.hpp"
 #include "multiplayer/remote_avatar.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -23,6 +25,7 @@ namespace kcd2mp::kcse
 
 		explicit native_remote_avatar_backend(native_entity_backend &entities);
 
+		void advance_frame() noexcept;
 		void set_epoch(std::uint64_t epoch);
 		void clear();
 		void reset_active_probe();
@@ -50,6 +53,9 @@ namespace kcd2mp::kcse
 			std::uint64_t epoch{};
 			std::string shared_soul_guid;
 			bool shared_soul_applied{};
+			std::uint64_t shared_soul_applied_frame{};
+			std::chrono::steady_clock::time_point
+			    shared_soul_applied_at{};
 			bool appearance_applied{};
 			bool first_transform_logged{};
 			bool first_motion_logged{};
@@ -79,6 +85,7 @@ namespace kcd2mp::kcse
 		std::optional<remote_avatar_handle> m_probe_avatar;
 		remote_avatar_snapshot m_probe_snapshot;
 		std::uint32_t m_probe_polls{};
+		std::uint64_t m_frame_sequence{};
 		std::uint64_t m_epoch{1};
 		remote_avatar_handle m_next_handle{1};
 		mutable std::string m_diagnostic;

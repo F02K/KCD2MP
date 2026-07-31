@@ -94,7 +94,7 @@ namespace kcd2mp::server
 		result.inventory.push_back({
 		    .definition_id = "da94ed8b-5b3b-4e2f-8c85-34ea3d0090ea",
 		    .count = 2,
-		    .quality = 100.0F,
+		    .quality = 1.0F,
 		    .condition = 1.0F});
 		return result;
 	}
@@ -193,7 +193,7 @@ namespace kcd2mp::server
 			if (!is_uuid(item.definition_id)
 			    || item.count == 0 || item.count > max_profile_item_count
 			    || !std::isfinite(item.quality)
-			    || item.quality < 0.0F || item.quality > 100.0F
+			    || item.quality < 0.0F || item.quality > 4.0F
 			    || !std::isfinite(item.condition)
 			    || item.condition < 0.0F || item.condition > 1.0F
 			    || (item.equipped_slot

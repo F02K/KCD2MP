@@ -409,36 +409,27 @@ namespace kcd2mp
 
 	bool is_valid_avatar_equipment_slot(std::string_view value)
 	{
-		static constexpr std::array slots{
-		    std::string_view{"body_coat"},
-		    std::string_view{"gloves"},
-		    std::string_view{"ring"},
-		    std::string_view{"necklace"},
-		    std::string_view{"collar"},
-		    std::string_view{"head_hood"},
-		    std::string_view{"boot"},
-		    std::string_view{"head_coif"},
-		    std::string_view{"head_coif_padded"},
-		    std::string_view{"head_cap"},
-		    std::string_view{"head_helmet"},
-		    std::string_view{"body_cloth"},
-		    std::string_view{"body_cloth_padded"},
-		    std::string_view{"body_chainmail"},
-		    std::string_view{"body_plate"},
-		    std::string_view{"sleeves"},
-		    std::string_view{"leg_trousers"},
-		    std::string_view{"leg_trousers_padded"},
-		    std::string_view{"leg_armor"},
-		    std::string_view{"spur"},
-		    std::string_view{"belt"},
-		    std::string_view{"pouch"},
-		    std::string_view{"PrimaryMainHand"},
-		    std::string_view{"PrimaryOffHand"},
-		    std::string_view{"SecondaryMainHand"},
-		    std::string_view{"Dagger"},
-		    std::string_view{"Torch"},
-		    std::string_view{"Oversized"}};
-		return std::ranges::find(slots, value) != slots.end();
+		if (value.empty() || value.size() > 64)
+			return false;
+		std::string lowered(value);
+		std::ranges::transform(
+		    lowered,
+		    lowered.begin(),
+		    [](unsigned char character)
+		    {
+			    return static_cast<char>(std::tolower(character));
+		    });
+		if (lowered.starts_with("horse_")
+		    || lowered.starts_with("cattle_"))
+		{
+			return false;
+		}
+		return std::ranges::all_of(
+		    value,
+		    [](unsigned char character)
+		    {
+			    return std::isalnum(character) || character == '_';
+		    });
 	}
 
 	bool is_valid_avatar_descriptor(

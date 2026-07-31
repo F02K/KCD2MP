@@ -51,7 +51,9 @@ gambling = { level = 1, progress = 0.0 }
 houndmaster = { level = 1, progress = 0.0 }
 
 [[items]]
+# equipped_slot is optional. Without it, the item stays in the inventory.
+# For equipment, use its exact native slot, for example "PrimaryMainHand".
 definition_id = "da94ed8b-5b3b-4e2f-8c85-34ea3d0090ea"
 count = 2
-quality = 100.0
+quality = 1.0
 condition = 1.0

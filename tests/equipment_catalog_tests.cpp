@@ -61,10 +61,10 @@ int main(int argc, char **argv)
 	    {
 	        "Libs/Tables/item/equipment_slot.xml",
 	        R"xml(<database><EquipmentSlots>
-<EquipmentSlot Name="body_cloth_padded" BodyLayerTypeId="2" ArmorTypes="GambesonShort"/>
-<EquipmentSlot Name="body_plate" BodyLayerTypeId="5" ArmorTypes="Cuirass"/>
-<EquipmentSlot Name="boot" BodyLayerTypeId="3" ArmorTypes="BootsKnee"/>
-<EquipmentSlot Name="horse_body" BodyLayerTypeId="1" ArmorTypes="HorseBody"/>
+<EquipmentSlot Id="12" Name="body_cloth_padded" BodyLayerTypeId="2" ArmorTypes="GambesonShort"/>
+<EquipmentSlot Id="15" Name="body_plate" BodyLayerTypeId="5" ArmorTypes="Cuirass"/>
+<EquipmentSlot Id="7" Name="boot" BodyLayerTypeId="3" ArmorTypes="BootsKnee"/>
+<EquipmentSlot Id="99" Name="horse_body" BodyLayerTypeId="1" ArmorTypes="HorseBody"/>
 </EquipmentSlots></database>)xml"},
 	    {
 	        "Libs/Tables/item/armor_type.xml",
@@ -90,6 +90,8 @@ int main(int argc, char **argv)
 <MeleeWeapon Id="55555555-5555-5555-5555-555555555555" Class="1"/>
 <ItemAlias Id="b867dd0e-1bfe-40e9-b114-4b126a3ff1b0"
  SourceItemId="55555555-5555-5555-5555-555555555555"/>
+<ItemAlias Id="99999999-9999-4999-8999-999999999999"
+ SourceItemId="b867dd0e-1bfe-40e9-b114-4b126a3ff1b0"/>
 <MissileWeapon Id="66666666-6666-6666-6666-666666666666" Class="2"/>
 <Food Id="77777777-7777-7777-7777-777777777777"/>
 </ItemClasses></database>)xml"}};
@@ -98,7 +100,13 @@ int main(int argc, char **argv)
 	std::string error;
 	assert(catalog.load_documents(documents, error));
 	assert(error.empty());
-	assert(catalog.size() == 6);
+	assert(catalog.size() == 7);
+	const auto *native_padded_slot = catalog.find_slot(12);
+	assert(native_padded_slot);
+	assert(native_padded_slot->name == "body_cloth_padded");
+	assert(native_padded_slot->layer == 2);
+	assert(catalog.layer_for_slot("body_cloth_padded") == 2);
+	assert(!catalog.find_slot(99));
 
 	const auto *padded =
 	    catalog.find("11111111-1111-1111-1111-111111111111");
@@ -122,6 +130,11 @@ int main(int argc, char **argv)
 	assert(sword_alias->equipped_slot == sword->equipped_slot);
 	assert(sword_alias->layer == sword->layer);
 	assert(sword_alias->weapon == sword->weapon);
+	const auto *chained_sword_alias =
+	    catalog.find("99999999-9999-4999-8999-999999999999");
+	assert(chained_sword_alias);
+	assert(chained_sword_alias->equipped_slot == sword->equipped_slot);
+	assert(chained_sword_alias->weapon == sword->weapon);
 
 	const auto *bow =
 	    catalog.find("66666666-6666-6666-6666-666666666666");
@@ -148,7 +161,7 @@ int main(int argc, char **argv)
 	}
 	equipment_catalog active_catalog;
 	assert(active_catalog.load_game_install(installation.path, error));
-	assert(active_catalog.size() == 7);
+	assert(active_catalog.size() == 8);
 	const auto *modded =
 	    active_catalog.find("88888888-8888-4888-8888-888888888888");
 	assert(modded);

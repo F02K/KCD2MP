@@ -655,6 +655,7 @@ namespace kcd2mp::server
 		}
 		std::optional<persisted_profile> profile;
 		bool rotate_identity = false;
+		bool enrolled_profile = false;
 		if (!message.identity_token().empty())
 		{
 			profile = m_store.find_by_token(message.identity_token());
@@ -723,6 +724,7 @@ namespace kcd2mp::server
 			profile = persisted_profile{
 			    hash_token(pending.issued_identity_token),
 			    std::move(created)};
+			enrolled_profile = true;
 			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
 		if (!profile)
@@ -732,6 +734,23 @@ namespace kcd2mp::server
 			    protocol::REJECT_REASON_IDENTITY_REQUIRED,
 			    "identity credentials are required");
 			return;
+		}
+		// Enrollment is persisted before the initializer has applied its native
+		// profile. If that first bootstrap fails, rebuild the untouched revision-1
+		// profile from the current starter template on retry. This also migrates
+		// profiles created with an older, non-native starter-item definition.
+		if (!enrolled_profile && !m_store.manifest().spawn_valid
+		    && profile->profile.revision() == 1
+		    && !profile->profile.transform_valid())
+		{
+			auto refreshed = instantiate_starter_profile(
+			    m_config.starter_profile,
+			    profile->profile.player_id(),
+			    profile->profile.display_name(),
+			    m_store.manifest().level_id);
+			apply_default_avatar(refreshed);
+			profile->profile = std::move(refreshed);
+			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
 		if (!profile->profile.has_avatar()
 		    || !is_valid_avatar_descriptor(profile->profile.avatar()))

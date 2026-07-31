@@ -337,11 +337,13 @@ if(KCD2MP_BUILD_KCSE)
     add_library(KCD2MPKCSENativeRuntime OBJECT
         "${SRC_DIR}/kcse/native_entity_backend.cpp"
         "${SRC_DIR}/kcse/native_entity_backend.hpp"
+		"${SRC_DIR}/kcse/native_equipment.hpp"
         "${SRC_DIR}/kcse/native_profile_backend.cpp"
         "${SRC_DIR}/kcse/native_profile_backend.hpp"
-        "${SRC_DIR}/kcse/native_remote_avatar_backend.cpp"
-        "${SRC_DIR}/kcse/native_remote_avatar_backend.hpp"
-        "${SRC_DIR}/kcse/native_runtime.cpp"
+		"${SRC_DIR}/kcse/native_remote_avatar_backend.cpp"
+		"${SRC_DIR}/kcse/native_remote_avatar_backend.hpp"
+		"${SRC_DIR}/kcse/remote_avatar_readiness.hpp"
+		"${SRC_DIR}/kcse/native_runtime.cpp"
         "${SRC_DIR}/kcse/native_runtime.hpp"
     )
     set_property(TARGET KCD2MPKCSENativeRuntime PROPERTY CXX_STANDARD 23)

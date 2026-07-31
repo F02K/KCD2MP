@@ -165,6 +165,7 @@ namespace kcd2mp::kcse
 		        m_epoch_invalidated.load(std::memory_order_acquire),
 		        m_data_loaded.load(std::memory_order_acquire)));
 		m_frame_seen.store(true, std::memory_order_release);
+		m_remote_backend.advance_frame();
 		const auto changed =
 		    m_epoch_invalidated.exchange(false, std::memory_order_acq_rel);
 		if (changed)

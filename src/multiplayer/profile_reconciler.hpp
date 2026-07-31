@@ -19,8 +19,8 @@ namespace kcd2mp
 		virtual ~profile_backend() = default;
 		[[nodiscard]] virtual std::optional<protocol::PlayerProfile> capture(
 		    std::string &error) = 0;
-		[[nodiscard]] virtual bool validate_definition(
-		    std::string_view definition_id,
+		[[nodiscard]] virtual bool validate_item(
+		    const protocol::InventoryItem &item,
 		    std::string &error) = 0;
 		[[nodiscard]] virtual int slot_layer(std::string_view slot) const = 0;
 		[[nodiscard]] virtual bool unequip(
@@ -172,7 +172,7 @@ namespace kcd2mp
 		{
 			for (const auto &item : target.inventory())
 			{
-				if (!backend.validate_definition(item.definition_id(), error))
+				if (!backend.validate_item(item, error))
 					return false;
 			}
 

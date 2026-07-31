@@ -4,6 +4,7 @@
 #include <array>
 #include <cctype>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -95,12 +96,16 @@ namespace kcd2mp::npc
 		bool parse_documents(
 		    std::span<const catalog_document> documents,
 		    std::vector<equipment_definition> &output,
+		    std::unordered_map<std::uint32_t, equipment_slot_definition> &
+		        output_slots,
 		    std::string &error)
 		{
 			std::unordered_map<std::string, slot_definition> armor_slots;
 			std::unordered_map<std::string, slot_definition> slots_by_name;
 			std::unordered_map<int, std::string> armor_types;
 			std::unordered_map<int, weapon_definition> weapon_types;
+			std::unordered_map<std::uint32_t, equipment_slot_definition>
+			    native_slots;
 
 			for (const auto &document : documents)
 			{
@@ -125,6 +130,22 @@ namespace kcd2mp::npc
 						const int layer =
 						    node.attribute("BodyLayerTypeId").as_int();
 						slots_by_name[slot] = {slot, layer};
+						auto id = node.attribute("Id");
+						if (!id)
+							id = node.attribute("id");
+						if (id)
+						{
+							const auto native_id = id.as_uint(
+							    std::numeric_limits<std::uint32_t>::max());
+							if (native_id
+							    != std::numeric_limits<std::uint32_t>::max())
+							{
+								native_slots[native_id] = {
+								    native_id,
+								    slot,
+								    layer};
+							}
+						}
 						for (auto armor :
 						     split_words(
 						         node.attribute("ArmorTypes").value()))
@@ -317,6 +338,7 @@ namespace kcd2mp::npc
 				error = "Tables.pak contains no visible player equipment";
 				return false;
 			}
+			output_slots = std::move(native_slots);
 			return true;
 		}
 
@@ -568,9 +590,12 @@ namespace kcd2mp::npc
 	    std::string &error)
 	{
 		std::vector<equipment_definition> parsed;
-		if (!parse_documents(documents, parsed, error))
+		std::unordered_map<std::uint32_t, equipment_slot_definition>
+		    parsed_slots;
+		if (!parse_documents(documents, parsed, parsed_slots, error))
 			return false;
 		m_entries = std::move(parsed);
+		m_slots = std::move(parsed_slots);
 		rebuild_index();
 		error.clear();
 		return true;
@@ -581,6 +606,28 @@ namespace kcd2mp::npc
 	{
 		const auto found = m_index.find(lower(definition_id));
 		return found == m_index.end() ? nullptr : &m_entries[found->second];
+	}
+
+	const equipment_slot_definition *equipment_catalog::find_slot(
+	    std::uint32_t native_id) const
+	{
+		const auto found = m_slots.find(native_id);
+		return found == m_slots.end() ? nullptr : &found->second;
+	}
+
+	int equipment_catalog::layer_for_slot(std::string_view slot) const
+	{
+		int result{};
+		for (const auto &[native_id, definition] : m_slots)
+		{
+			(void)native_id;
+			if (definition.name == slot)
+				result = std::max(result, definition.layer);
+		}
+		for (const auto &definition : m_entries)
+			if (definition.equipped_slot == slot)
+				result = std::max(result, definition.layer);
+		return result;
 	}
 
 	const std::vector<equipment_definition> &

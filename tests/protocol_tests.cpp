@@ -203,6 +203,10 @@ int main()
 	auto invalid_slot = *avatar;
 	invalid_slot.mutable_equipment(0)->set_equipped_slot("horse_body");
 	assert(!is_valid_avatar_descriptor(invalid_slot));
+	assert(is_valid_avatar_equipment_slot("SecondaryOffHand"));
+	assert(is_valid_avatar_equipment_slot("OversizedOff"));
+	assert(is_valid_avatar_equipment_slot("dlc_mantle_outer"));
+	assert(!is_valid_avatar_equipment_slot("dlc mantle outer"));
 	auto invalid_weapon_state = *avatar;
 	invalid_weapon_state.set_weapon_class(
 	    protocol::AVATAR_WEAPON_CLASS_NONE);

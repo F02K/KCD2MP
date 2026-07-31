@@ -14,7 +14,7 @@ namespace kcd2mp::server
 	{
 		std::string definition_id;
 		std::uint32_t count{1};
-		float quality{100.0F};
+		float quality{1.0F};
 		float condition{1.0F};
 		std::optional<std::string> equipped_slot;
 	};

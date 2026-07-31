@@ -1,5 +1,6 @@
 #include "kcse/native_profile_backend.hpp"
 
+#include "kcse/native_equipment.hpp"
 #include "kcse/join_trace.hpp"
 #include "multiplayer/avatar_visual.hpp"
 #include "npc/equipment_catalog.hpp"
@@ -59,6 +60,27 @@ namespace kcd2mp::kcse
 			        wh::FormatGuid(item.m_pClassData->m_guid))
 			    : nullptr;
 		}
+
+		protocol::AvatarWeaponClass protocol_weapon_for(
+		    const wh::entitymodule::C_Item &item,
+		    std::string_view equipped_slot)
+		{
+			if (const auto *definition = equipment_for(item);
+			    definition && definition->weapon != npc::weapon_class::none)
+			{
+				return protocol_weapon(definition->weapon);
+			}
+			if (item.IsOfType(wh::entitymodule::E_ItemType::Missile))
+				return protocol::AVATAR_WEAPON_CLASS_BOW;
+			if (item.IsOfType(wh::entitymodule::E_ItemType::Melee))
+			{
+				return equipped_slot == "Oversized"
+				        || equipped_slot == "OversizedOff"
+				    ? protocol::AVATAR_WEAPON_CLASS_TWO_HANDED
+				    : protocol::AVATAR_WEAPON_CLASS_ONE_HANDED;
+			}
+			return protocol::AVATAR_WEAPON_CLASS_NONE;
+		}
 	}
 
 	native_profile_backend::native_profile_backend(
@@ -96,16 +118,33 @@ namespace kcd2mp::kcse
 			    "-> Equipment is incomplete";
 			return std::nullopt;
 		}
-		return native_state{soul, inventory};
+		return native_state{soul, inventory, equipment};
 	}
 
 	bool native_profile_backend::ready(std::string &error) const
 	{
-		if (!state(error))
+		const auto native = state(error);
+		if (!native)
 			return false;
 		if (npc::runtime_equipment_catalog().size() == 0
 		    && !npc::initialize_runtime_equipment_catalog(error))
 			return false;
+		for (const auto *item : native->inventory->m_items)
+		{
+			if (!item || !item->m_pClassData || item->m_amount <= 0
+			    || (item->m_flags & item_equipped) == 0)
+			{
+				continue;
+			}
+			if (!resolved_equipped_slot(*native->equipment, *item))
+			{
+				error =
+				    "equipped native item has no resolvable native slot: "
+				    + wh::FormatGuid(item->m_pClassData->m_guid);
+				return false;
+			}
+		}
+		error.clear();
 		return true;
 	}
 
@@ -180,15 +219,16 @@ namespace kcd2mp::kcse
 			wire->set_condition(item->GetCondition());
 			if ((item->m_flags & item_equipped) != 0)
 			{
-				const auto *definition = equipment_for(*item);
-				if (!definition)
+				const auto equipped_slot =
+				    resolved_equipped_slot(*native->equipment, *item);
+				if (!equipped_slot)
 				{
 					error =
-					    "equipped native item is absent from equipment catalog: "
+					    "equipped native item has no resolvable native slot: "
 					    + wire->definition_id();
 					return std::nullopt;
 				}
-				wire->set_equipped_slot(definition->equipped_slot);
+				wire->set_equipped_slot(*equipped_slot);
 			}
 		}
 		result.set_money(native_money / money_subunits_per_groschen);
@@ -213,10 +253,14 @@ namespace kcd2mp::kcse
 			auto *visible = avatar.add_equipment();
 			visible->set_definition_id(item.definition_id());
 			visible->set_equipped_slot(item.equipped_slot());
-			if (const auto *definition =
-			        npc::runtime_equipment_catalog().find(item.definition_id());
-			    definition && definition->weapon != npc::weapon_class::none)
-				avatar.set_weapon_class(protocol_weapon(definition->weapon));
+			if (const auto *native_item =
+			        find_item(*native->inventory, item.instance_id()))
+			{
+				const auto weapon =
+				    protocol_weapon_for(*native_item, item.equipped_slot());
+				if (weapon != protocol::AVATAR_WEAPON_CLASS_NONE)
+					avatar.set_weapon_class(weapon);
+			}
 		}
 		if (avatar.weapon_class() == protocol::AVATAR_WEAPON_CLASS_NONE)
 			avatar.set_weapon_drawn(false);
@@ -249,30 +293,55 @@ namespace kcd2mp::kcse
 		return result;
 	}
 
-	bool native_profile_backend::validate_definition(
-	    std::string_view definition_id,
+	bool native_profile_backend::validate_item(
+	    const protocol::InventoryItem &item,
 	    std::string &error)
 	{
 		CryGUID guid{};
 		auto *database = wh::entitymodule::C_ItemDatabase::GetInstance();
-		if (!database || !wh::ParseGuid(std::string(definition_id).c_str(), guid)
-		    || !database->FindClassByGuid(guid))
+		auto *class_data = database
+		    && wh::ParseGuid(item.definition_id().c_str(), guid)
+		    ? database->FindClassByGuid(guid)
+		    : nullptr;
+		if (!class_data)
 		{
 			error = "unknown native item definition: "
-			    + std::string(definition_id);
+			    + item.definition_id();
 			return false;
 		}
+		if (!item.has_equipped_slot())
+		{
+			error.clear();
+			return true;
+		}
+
+		const auto *definition =
+		    npc::runtime_equipment_catalog().find(item.definition_id());
+		if (!class_data->IsType(wh::entitymodule::E_ItemType::Equippable)
+		    || !definition)
+		{
+			error = std::format(
+			    "native item {} is not equippable; omit equipped_slot to keep it "
+			    "in inventory",
+			    item.definition_id());
+			return false;
+		}
+		if (definition->equipped_slot != item.equipped_slot())
+		{
+			error = std::format(
+			    "native item {} belongs in slot {}, not {}",
+			    item.definition_id(),
+			    definition->equipped_slot,
+			    item.equipped_slot());
+			return false;
+		}
+		error.clear();
 		return true;
 	}
 
 	int native_profile_backend::slot_layer(std::string_view slot) const
 	{
-		int result{};
-		for (const auto &definition :
-		     npc::runtime_equipment_catalog().entries())
-			if (definition.equipped_slot == slot)
-				result = std::max(result, definition.layer);
-		return result;
+		return npc::runtime_equipment_catalog().layer_for_slot(slot);
 	}
 
 	bool native_profile_backend::unequip(
@@ -331,7 +400,7 @@ namespace kcd2mp::kcse
 	    std::string &error)
 	{
 		const auto native = state(error);
-		if (!native || !validate_definition(item.definition_id(), error))
+		if (!native || !validate_item(item, error))
 			return false;
 		if (find_item(*native->inventory, item.instance_id()))
 		{
@@ -404,12 +473,28 @@ namespace kcd2mp::kcse
 			runtime->m_condition = item.condition();
 			existing->NotifyChanged(item_change_attributes);
 		}
-		return existing->m_amount == desired_count
-		    && std::abs(existing->GetCondition() - item.condition()) <= 0.001F
-		    && std::abs(
-		           static_cast<float>(existing->GetQuality())
-		           - item.quality())
-		        <= 0.01F;
+		const auto actual_count = existing->m_amount;
+		const auto actual_condition = existing->GetCondition();
+		const auto actual_quality = static_cast<float>(existing->GetQuality());
+		if (actual_count != desired_count
+		    || std::abs(actual_condition - item.condition()) > 0.001F
+		    || std::abs(actual_quality - item.quality()) > 0.01F)
+		{
+			error = std::format(
+			    "native item update verification failed for {}: "
+			    "count={}/{} condition={}/{} quality={}/{}",
+			    item.instance_id(),
+			    actual_count,
+			    desired_count,
+			    actual_condition,
+			    item.condition(),
+			    actual_quality,
+			    item.quality());
+			KCD2MP_JOIN_TRACE("join.profile.update-item.failed", error);
+			return false;
+		}
+		error.clear();
+		return true;
 	}
 
 	bool native_profile_backend::set_money(
@@ -550,6 +635,15 @@ namespace kcd2mp::kcse
 		{
 			return false;
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.profile.apply-rpg.begin",
+		    std::format(
+		        "kind={} id={} native_id={} level={} progress={}",
+		        skill ? "skill" : "stat",
+		        value.id(),
+		        id,
+		        value.level(),
+		        value.progress()));
 		const auto applied = skill
 		    ? native->soul->SetSkillAbsolute(
 		        id,
@@ -560,7 +654,22 @@ namespace kcd2mp::kcse
 		        static_cast<std::uint32_t>(value.level()),
 		        value.progress());
 		if (!applied)
+		{
 			error = "native absolute RPG setter rejected " + value.id();
+			KCD2MP_JOIN_TRACE("join.profile.apply-rpg.failed", error);
+		}
+		else
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.profile.apply-rpg.complete",
+			    std::format(
+			        "kind={} id={} native_id={} level={} progress={}",
+			        skill ? "skill" : "stat",
+			        value.id(),
+			        id,
+			        value.level(),
+			        value.progress()));
+		}
 		return applied;
 	}
 
@@ -573,16 +682,24 @@ namespace kcd2mp::kcse
 		if (!native)
 			return false;
 		auto *item = find_item(*native->inventory, instance_id);
-		const auto *definition = item ? equipment_for(*item) : nullptr;
-		if (!item || !definition || definition->equipped_slot != slot)
+		if (!item)
 		{
-			error = "native item cannot be equipped in requested slot";
+			error = "native item to equip does not exist";
 			return false;
 		}
 		native->soul->m_inventorySoul.EquipItem(item, true);
 		if ((item->m_flags & item_equipped) == 0)
 		{
 			error = "native EquipItem did not set equipped state";
+			return false;
+		}
+		const auto actual_slot = native_equipped_slot(*native->equipment, *item);
+		if (!actual_slot || *actual_slot != slot)
+		{
+			native->soul->m_inventorySoul.UnequipItem(item, true);
+			error = actual_slot
+			    ? "native item equipped into a different slot: " + *actual_slot
+			    : "native EquipmentManager did not expose the equipped item slot";
 			return false;
 		}
 		return true;

@@ -1,4 +1,5 @@
 #include "kcse/native_remote_avatar_backend.hpp"
+#include "kcse/native_equipment.hpp"
 #include "kcse/join_trace.hpp"
 
 #include "npc/equipment_catalog.hpp"
@@ -37,6 +38,8 @@ namespace kcd2mp::kcse
 		constexpr std::uint32_t entity_flag_no_save = 1U << 15;
 		constexpr std::uint32_t entity_flag_clientside_state = 1U << 17;
 		constexpr std::uint32_t entity_flag_no_proximity = 1U << 19;
+		constexpr std::string_view probe_equipment_definition_id =
+		    "c164f346-0463-4116-b790-094b11274e5e";
 
 		CryGUID make_instance_guid()
 		{
@@ -166,6 +169,11 @@ namespace kcd2mp::kcse
 	{
 	}
 
+	void native_remote_avatar_backend::advance_frame() noexcept
+	{
+		++m_frame_sequence;
+	}
+
 	void native_remote_avatar_backend::set_epoch(std::uint64_t epoch)
 	{
 		if (m_epoch == epoch)
@@ -217,17 +225,34 @@ namespace kcd2mp::kcse
 				error = "active probe has no native item database";
 				return active_probe_result::failed;
 			}
-			const npc::equipment_definition *probe_equipment{};
-			for (const auto &candidate :
-			     npc::runtime_equipment_catalog().entries())
+			auto &catalog = npc::runtime_equipment_catalog();
+			const npc::equipment_definition *probe_equipment =
+			    catalog.find(probe_equipment_definition_id);
+			auto is_native_item = [database](
+			                          const npc::equipment_definition *candidate)
 			{
+				if (!candidate)
+					return false;
 				CryGUID guid{};
-				if (wh::ParseGuid(candidate.definition_id.c_str(), guid)
-				    && database->FindClassByGuid(guid))
+				return wh::ParseGuid(
+				           candidate->definition_id.c_str(),
+				           guid)
+				    && database->FindClassByGuid(guid);
+			};
+			if (!is_native_item(probe_equipment))
+				probe_equipment = nullptr;
+			if (!probe_equipment)
+			{
+				for (const auto &candidate : catalog.entries())
 				{
-					probe_equipment = &candidate;
-					if (candidate.weapon != npc::weapon_class::none)
+					if (candidate.equipped_slot == "PrimaryMainHand"
+					    && candidate.weapon
+					        == npc::weapon_class::one_handed
+					    && is_native_item(&candidate))
+					{
+						probe_equipment = &candidate;
 						break;
+					}
 				}
 			}
 			if (!probe_equipment)
@@ -236,6 +261,13 @@ namespace kcd2mp::kcse
 				    "active probe found no native equipment definition";
 				return active_probe_result::failed;
 			}
+			KCD2MP_JOIN_TRACE(
+			    "join.native-probe.equipment-selected",
+			    std::format(
+			        "definition_id={} equipped_slot={} weapon_class={}",
+			        probe_equipment->definition_id,
+			        probe_equipment->equipped_slot,
+			        static_cast<int>(probe_equipment->weapon)));
 
 			m_probe_snapshot = {};
 			m_probe_snapshot.id =
@@ -721,12 +753,40 @@ namespace kcd2mp::kcse
 				    value->failure};
 			}
 			value->shared_soul_applied = true;
+			value->shared_soul_applied_frame = m_frame_sequence;
+			value->shared_soul_applied_at =
+			    std::chrono::steady_clock::now();
 			KCD2MP_JOIN_TRACE(
 			    "join.remote-status.ApplySharedSoul.returned",
 			    std::format(
 			        "player_id={} entity_id={} result=true",
 			        value->player,
 			        value->entity_id));
+			return {
+			    remote_avatar_state::pending,
+			    "waiting for native shared-Soul stabilization"};
+		}
+		const auto settled = evaluate_remote_soul_settle(
+		    m_frame_sequence,
+		    value->shared_soul_applied_frame,
+		    std::chrono::steady_clock::now(),
+		    value->shared_soul_applied_at);
+		if (!settled.ready)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-status.soul-settling",
+			    std::format(
+			        "player_id={} entity_id={} elapsed_frames={} "
+			        "elapsed_ms={} required_frames={} required_ms={}",
+			        value->player,
+			        value->entity_id,
+			        settled.elapsed_frames,
+			        settled.elapsed_time.count(),
+			        remote_soul_settle_frames,
+			        remote_soul_settle_time.count()));
+			return {
+			    remote_avatar_state::pending,
+			    "waiting for native shared-Soul stabilization"};
 		}
 		auto *inventory = soul->m_inventorySoul.GetInventory();
 		auto *equipment =
@@ -941,39 +1001,47 @@ namespace kcd2mp::kcse
 		struct desired_item
 		{
 			const protocol::AvatarEquipment *wire{};
-			const npc::equipment_definition *definition{};
 			CryGUID guid{};
+			int layer{};
 		};
 		std::vector<desired_item> desired;
 		desired.reserve(appearance.equipment_size());
 		for (const auto &wire : appearance.equipment())
 		{
 			CryGUID guid{};
-			const auto *definition =
-			    npc::runtime_equipment_catalog().find(
-			        wire.definition_id());
-			if (!definition
-			    || definition->equipped_slot != wire.equipped_slot()
-			    || !wh::ParseGuid(wire.definition_id().c_str(), guid)
-			    || !database->FindClassByGuid(guid))
+			if (!wh::ParseGuid(wire.definition_id().c_str(), guid))
 			{
-				error =
-				    "remote equipment definition/slot is invalid: "
+				error = "remote equipment definition UUID is invalid: "
 				    + wire.definition_id();
 				return false;
 			}
-			desired.push_back({&wire, definition, guid});
+			if (!database->FindClassByGuid(guid))
+			{
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-appearance.item-skipped",
+				    std::format(
+				        "player_id={} definition=\"{}\" slot=\"{}\" "
+				        "reason=native-definition-unavailable",
+				        avatar.player,
+				        wire.definition_id(),
+				        wire.equipped_slot()));
+				continue;
+			}
+			const auto layer =
+			    npc::runtime_equipment_catalog().layer_for_slot(
+			        wire.equipped_slot());
+			desired.push_back({&wire, guid, layer});
 		}
 		std::ranges::sort(
 		    desired,
 		    [](const desired_item &left, const desired_item &right)
 		    {
-			    return left.definition->layer
-			        < right.definition->layer;
-		    });
+			    return left.layer < right.layer;
+			});
 		if (!remove_created_items(avatar, error))
 			return false;
 
+		bool equipped_supported_weapon = false;
 		for (const auto &item : desired)
 		{
 			KCD2MP_JOIN_TRACE(
@@ -997,8 +1065,15 @@ namespace kcd2mp::kcse
 			        static_cast<void *>(created)));
 			if (!created)
 			{
-				error = "remote native item creation failed";
-				return false;
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-appearance.item-skipped",
+				    std::format(
+				        "player_id={} definition=\"{}\" slot=\"{}\" "
+				        "reason=native-item-creation-failed",
+				        avatar.player,
+				        item.wire->definition_id(),
+				        item.wire->equipped_slot()));
+				continue;
 			}
 			const auto instance = make_instance_guid();
 			KCD2MP_JOIN_TRACE(
@@ -1029,17 +1104,72 @@ namespace kcd2mp::kcse
 			        created->m_flags));
 			if ((created->m_flags & item_equipped) == 0)
 			{
-				error =
-				    "remote native EquipItem did not set equipped state";
-				return false;
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-appearance.item-skipped",
+				    std::format(
+				        "player_id={} definition=\"{}\" slot=\"{}\" "
+				        "reason=native-equip-rejected",
+				        avatar.player,
+				        item.wire->definition_id(),
+				        item.wire->equipped_slot()));
+				inventory->RemoveItem(created, 2, 1);
+				if (find_item(*inventory, instance_text))
+				{
+					error =
+					    "remote rejected item cleanup left an inventory instance";
+					return false;
+				}
+				avatar.item_instances.pop_back();
+				continue;
 			}
+
+			auto *equipment =
+			    soul->m_inventorySoul.GetEquipmentManager();
+			const auto actual_slot = equipment
+			    ? native_equipped_slot(*equipment, *created)
+			    : std::nullopt;
+			if (!actual_slot || *actual_slot != item.wire->equipped_slot())
+			{
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-appearance.item-skipped",
+				    std::format(
+				        "player_id={} definition=\"{}\" requested_slot=\"{}\" "
+				        "actual_slot=\"{}\" reason=native-slot-mismatch",
+				        avatar.player,
+				        item.wire->definition_id(),
+				        item.wire->equipped_slot(),
+				        actual_slot.value_or("")));
+				soul->m_inventorySoul.UnequipItem(created, true);
+				if ((created->m_flags & item_equipped) != 0)
+				{
+					error =
+					    "remote mismatched item could not be unequipped";
+					return false;
+				}
+				inventory->RemoveItem(created, 2, 1);
+				if (find_item(*inventory, instance_text))
+				{
+					error =
+					    "remote mismatched item cleanup left an inventory instance";
+					return false;
+				}
+				avatar.item_instances.pop_back();
+				continue;
+			}
+			const auto fixed_weapon = std::ranges::find(
+			    native_weapon_equipment_slots,
+			    *actual_slot);
+			equipped_supported_weapon = equipped_supported_weapon
+			    || (fixed_weapon != native_weapon_equipment_slots.end()
+			        && *actual_slot != "Torch");
 		}
 
 		auto *human =
 		    reinterpret_cast<wh::entitymodule::C_Human *>(actor);
 		const bool should_draw = appearance.weapon_drawn()
 		    && appearance.weapon_class()
-		        != protocol::AVATAR_WEAPON_CLASS_NONE;
+		        != protocol::AVATAR_WEAPON_CLASS_NONE
+		    && equipped_supported_weapon;
 		if (human->IsWeaponDrawn() != should_draw)
 		{
 			if (!avatar.first_weapon_action_logged)

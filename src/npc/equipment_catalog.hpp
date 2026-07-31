@@ -3,6 +3,7 @@
 #include "npc/catalog.hpp"
 #include "npc/npc.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <span>
 #include <string>
@@ -24,6 +25,17 @@ namespace kcd2mp::npc
 		    const equipment_definition &) = default;
 	};
 
+	struct equipment_slot_definition
+	{
+		std::uint32_t native_id{};
+		std::string name;
+		int layer{};
+
+		friend bool operator==(
+		    const equipment_slot_definition &,
+		    const equipment_slot_definition &) = default;
+	};
+
 	class equipment_catalog
 	{
 	public:
@@ -39,6 +51,9 @@ namespace kcd2mp::npc
 
 		[[nodiscard]] const equipment_definition *find(
 		    std::string_view definition_id) const;
+		[[nodiscard]] const equipment_slot_definition *find_slot(
+		    std::uint32_t native_id) const;
+		[[nodiscard]] int layer_for_slot(std::string_view slot) const;
 		[[nodiscard]] const std::vector<equipment_definition> &entries() const;
 		[[nodiscard]] std::size_t size() const;
 
@@ -47,6 +62,7 @@ namespace kcd2mp::npc
 
 		std::vector<equipment_definition> m_entries;
 		std::unordered_map<std::string, std::size_t> m_index;
+		std::unordered_map<std::uint32_t, equipment_slot_definition> m_slots;
 	};
 
 	[[nodiscard]] equipment_catalog &runtime_equipment_catalog();

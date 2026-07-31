@@ -1,3 +1,4 @@
+#include "kcse/remote_avatar_readiness.hpp"
 #include "multiplayer/remote_avatar.hpp"
 
 #include <array>
@@ -118,6 +119,32 @@ namespace
 int main()
 {
 	using namespace kcd2mp;
+	using namespace std::chrono_literals;
+	const auto soul_applied_at = std::chrono::steady_clock::now();
+	assert(!kcse::evaluate_remote_soul_settle(
+	             10,
+	             10,
+	             soul_applied_at,
+	             soul_applied_at)
+	             .ready);
+	assert(!kcse::evaluate_remote_soul_settle(
+	             13,
+	             10,
+	             soul_applied_at + 249ms,
+	             soul_applied_at)
+	             .ready);
+	assert(!kcse::evaluate_remote_soul_settle(
+	             12,
+	             10,
+	             soul_applied_at + 250ms,
+	             soul_applied_at)
+	             .ready);
+	assert(kcse::evaluate_remote_soul_settle(
+	           13,
+	           10,
+	           soul_applied_at + 250ms,
+	           soul_applied_at)
+	           .ready);
 	fake_backend backend;
 	remote_avatar_manager manager(backend);
 	std::vector players{
@@ -162,7 +189,6 @@ int main()
 	assert(result.error == "avatar backend unavailable");
 	assert(manager.size() == 0);
 
-	using namespace std::chrono_literals;
 	fake_backend fallback_backend;
 	fallback_backend.desired_spawns_succeed = false;
 	remote_avatar_manager fallback_manager(fallback_backend);
