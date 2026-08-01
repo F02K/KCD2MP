@@ -81,6 +81,10 @@ class BuildApp(App[None]):
         width: 22;
     }
 
+    #update-address-library {
+        width: 27;
+    }
+
     #build {
         width: 20;
     }
@@ -108,6 +112,7 @@ class BuildApp(App[None]):
     BINDINGS = [
         ("q", "quit", "Quit"),
         ("ctrl+a", "audit", "Audit signatures"),
+        ("ctrl+l", "update_address_library", "Update Address Library"),
         ("ctrl+b", "build", "Build"),
         ("ctrl+d", "build_deploy", "Build & Deploy"),
     ]
@@ -145,6 +150,7 @@ class BuildApp(App[None]):
                 with Horizontal(id="path-actions"):
                     yield Button("Save path", id="save-path")
                     yield Button("Use Steam auto-detection", id="auto-detect")
+                    yield Button("Update Address Library", id="update-address-library")
                 with Horizontal(id="build-actions"):
                     yield Button("Audit signatures", id="audit")
                     yield Button("Build", id="build", variant="primary")
@@ -191,9 +197,14 @@ class BuildApp(App[None]):
             self._start_build(True)
         elif button_id == "audit":
             self._start_audit()
+        elif button_id == "update-address-library":
+            self._start_address_library_update()
 
     def action_audit(self) -> None:
         self._start_audit()
+
+    def action_update_address_library(self) -> None:
+        self._start_address_library_update()
 
     def action_build(self) -> None:
         self._start_build(False)
@@ -292,6 +303,42 @@ class BuildApp(App[None]):
         self._set_busy(True)
         self._set_status("Auditing installed WHGame.dll... Live output is shown below.")
         self._execute_audit(profile, game_root)
+
+    def _start_address_library_update(self) -> None:
+        if self._busy:
+            return
+        log = self.query_one("#log", RichLog)
+        log.clear()
+        log.border_title = "Address Library update"
+        log.write("=== Checking Address Library upstream ===")
+        self._set_busy(True)
+        self._set_status("Checking and validating the latest Address Library...")
+        self._execute_address_library_update()
+
+    @work(thread=True, exclusive=True, group="build")
+    def _execute_address_library_update(self) -> None:
+        def write_log(message: str) -> None:
+            self.call_from_thread(self._write_log, message)
+
+        try:
+            commit = self.service.update_address_library(write_log)
+            self.call_from_thread(
+                self._finish_operation,
+                True,
+                "Address Library ready at {}. Commit the updated submodule pointer after testing.".format(
+                    commit[:12]
+                ),
+            )
+        except BuildToolError as exc:
+            write_log("ERROR: {}".format(exc))
+            self.call_from_thread(self._finish_operation, False, str(exc))
+        except Exception as exc:
+            write_log("UNEXPECTED ERROR: {}".format(exc))
+            self.call_from_thread(
+                self._finish_operation,
+                False,
+                "Unexpected build-tool error: {}".format(exc),
+            )
 
     @work(thread=True, exclusive=True, group="build")
     def _execute_audit(self, profile: BuildProfile, game_root: Path) -> None:

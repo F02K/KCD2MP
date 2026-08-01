@@ -7,7 +7,9 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +26,15 @@ VCPKG_BASELINE = "908da3a305a0a8028d9602ab241b433652b3df69"
 VCPKG_REPOSITORY = "https://github.com/microsoft/vcpkg.git"
 VCPKG_TRIPLET = "x64-windows-static"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
+ADDRESS_LIBRARY_SUBMODULE = Path("vendor") / "Address-Library-For-KCSE"
+ADDRESS_LIBRARY_DATA = ADDRESS_LIBRARY_SUBMODULE / "kcd2_address_library"
+ADDRESS_LIBRARY_GLOB = "kcd_addresslib_*.bin"
+ADDRESS_LIBRARY_HEADER = struct.Struct("<4sIII")
+ADDRESS_LIBRARY_RECORD = struct.Struct("<II")
+ADDRESS_LIBRARY_NAME = re.compile(
+    r"^kcd_addresslib_(steam|gog|epic)_(.+)\.bin$", re.IGNORECASE
+)
+ADDRESS_LIBRARY_DISTRIBUTIONS = {"steam": 1, "gog": 2, "epic": 3}
 
 LogCallback = Callable[[str], None]
 
@@ -65,7 +76,7 @@ class BuildResult:
     kcse_loader_pdb_path: Optional[Path] = None
     kcse_client_path: Optional[Path] = None
     kcse_client_pdb_path: Optional[Path] = None
-    address_library_path: Optional[Path] = None
+    address_library_paths: Tuple[Path, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -454,6 +465,48 @@ def _capture_text(command: Sequence[str]) -> str:
         raise BuildToolError("Command failed: {}".format(subprocess.list2cmdline(command))) from exc
 
 
+def discover_address_libraries(directory: Path) -> Tuple[Path, ...]:
+    """Return all valid KASL tables in deterministic order."""
+
+    paths = tuple(sorted(directory.glob(ADDRESS_LIBRARY_GLOB)))
+    if not paths:
+        raise BuildToolError("No Address Library tables were found in {}.".format(directory))
+
+    seen = set()
+    for path in paths:
+        name_match = ADDRESS_LIBRARY_NAME.fullmatch(path.name)
+        if name_match is None:
+            raise BuildToolError("Address Library table has an invalid filename: {}".format(path))
+        try:
+            size = path.stat().st_size
+            with path.open("rb") as stream:
+                header = stream.read(ADDRESS_LIBRARY_HEADER.size)
+        except OSError as exc:
+            raise BuildToolError("Could not read Address Library table {}: {}".format(path, exc)) from exc
+        if len(header) != ADDRESS_LIBRARY_HEADER.size:
+            raise BuildToolError("Address Library table has a truncated header: {}".format(path))
+        magic, format_version, distribution, count = ADDRESS_LIBRARY_HEADER.unpack(header)
+        if magic != b"KASL" or format_version == 0 or distribution not in {1, 2, 3}:
+            raise BuildToolError("Address Library table has an invalid KASL header: {}".format(path))
+        named_distribution = ADDRESS_LIBRARY_DISTRIBUTIONS[name_match.group(1).lower()]
+        if distribution != named_distribution:
+            raise BuildToolError(
+                "Address Library filename/header distribution mismatch: {}".format(path)
+            )
+        expected_size = ADDRESS_LIBRARY_HEADER.size + count * ADDRESS_LIBRARY_RECORD.size
+        if size != expected_size:
+            raise BuildToolError(
+                "Address Library table {} has {} bytes; its header requires {}.".format(
+                    path, size, expected_size
+                )
+            )
+        key = (distribution, name_match.group(2).lower())
+        if key in seen:
+            raise BuildToolError("Duplicate Address Library distribution/build table: {}".format(path))
+        seen.add(key)
+    return paths
+
+
 class BuildService:
     def __init__(
         self,
@@ -464,6 +517,7 @@ class BuildService:
         self._environment_detector = environment_detector
 
     def build(self, profile: BuildProfile, log: LogCallback = print) -> BuildResult:
+        self._ensure_address_library_submodule(log)
         environment = self._environment_detector()
         build_dir = self.project_root / "out" / "build" / profile.key
         self._prepare_build_directory(build_dir, environment, log)
@@ -521,12 +575,8 @@ class BuildService:
             kcse_loader_pdb_path=artifact_dir / "dinput8.pdb",
             kcse_client_path=artifact_dir / "KCD2MPKCSEClient.dll",
             kcse_client_pdb_path=artifact_dir / "KCD2MPKCSEClient.pdb",
-            address_library_path=(
-                self.project_root
-                / "runtime"
-                / "KCSE"
-                / "addresslib"
-                / "kcd_addresslib_steam_release_1_5-15693.bin"
+            address_library_paths=discover_address_libraries(
+                artifact_dir / "KCSE" / "addresslib"
             ),
         )
         missing = [
@@ -540,7 +590,7 @@ class BuildService:
                 result.kcse_loader_pdb_path,
                 result.kcse_client_path,
                 result.kcse_client_pdb_path,
-                result.address_library_path,
+                *result.address_library_paths,
             )
             if path is not None and not path.is_file()
         ]
@@ -551,6 +601,78 @@ class BuildService:
                 )
             )
         return result
+
+    def update_address_library(self, log: LogCallback = print) -> str:
+        """Fast-forward the pinned Address Library submodule to origin's HEAD."""
+
+        self._ensure_address_library_submodule(log)
+        git = shutil.which("git")
+        if not git:
+            raise BuildToolError("Git was not found on PATH.")
+        root = self.project_root / ADDRESS_LIBRARY_SUBMODULE
+        dirty = _capture_text([git, "-C", str(root), "status", "--porcelain"]).strip()
+        if dirty:
+            raise BuildToolError(
+                "The Address Library submodule has local changes. Commit or stash them before updating."
+            )
+
+        current = _capture_text([git, "-C", str(root), "rev-parse", "HEAD"]).strip()
+        self._run([git, "-C", str(root), "fetch", "origin", "HEAD"], log)
+        latest = _capture_text([git, "-C", str(root), "rev-parse", "FETCH_HEAD"]).strip()
+        if current == latest:
+            log("Address Library is already current at {}.".format(current[:12]))
+        else:
+            ancestry = subprocess.run(
+                [git, "-C", str(root), "merge-base", "--is-ancestor", current, latest],
+                check=False,
+                capture_output=True,
+            )
+            if ancestry.returncode != 0:
+                raise BuildToolError(
+                    "Upstream Address Library history is not a fast-forward from the pinned commit; "
+                    "review it manually before updating."
+                )
+            self._run([git, "-C", str(root), "checkout", "--detach", latest], log)
+            log("Updated Address Library {} -> {}.".format(current[:12], latest[:12]))
+
+        discover_address_libraries(root / "kcd2_address_library")
+        self._run(
+            [
+                sys.executable,
+                str(self.project_root / "tools" / "audit_address_library.py"),
+                "--project-root",
+                str(self.project_root),
+            ],
+            log,
+        )
+        return latest
+
+    def _ensure_address_library_submodule(self, log: LogCallback) -> Path:
+        root = self.project_root / ADDRESS_LIBRARY_SUBMODULE
+        data = self.project_root / ADDRESS_LIBRARY_DATA
+        if data.is_dir():
+            return root
+        git = shutil.which("git")
+        if not git:
+            raise BuildToolError(
+                "Address Library is not initialized and Git was not found on PATH."
+            )
+        self._run(
+            [
+                git,
+                "submodule",
+                "update",
+                "--init",
+                "--",
+                ADDRESS_LIBRARY_SUBMODULE.as_posix(),
+            ],
+            log,
+        )
+        if not data.is_dir():
+            raise BuildToolError(
+                "Address Library submodule initialization completed without its data directory."
+            )
+        return root
 
     def audit(
         self,
@@ -867,7 +989,7 @@ def deploy_artifacts(
         result.kcse_loader_pdb_path,
         result.kcse_client_path,
         result.kcse_client_pdb_path,
-        result.address_library_path,
+        *result.address_library_paths,
     ]
     missing = [str(path) for path in artifacts if path is not None and not path.is_file()]
     if missing:
@@ -877,13 +999,9 @@ def deploy_artifacts(
             "{} is running. Close the game before deploying.".format(GAME_EXECUTABLE)
         )
     if result.kcse_loader_path is not None:
-        if (
-            result.address_library_path is None
-            or not result.address_library_path.is_file()
-        ):
+        if not result.address_library_paths:
             raise BuildToolError(
-                "KCSE deployment is missing the bundled Steam address library "
-                "for release_1_5-15693."
+                "KCSE deployment is missing the bundled Address Library tables."
             )
 
     targets = [
@@ -905,14 +1023,12 @@ def deploy_artifacts(
         targets.append(
             (result.kcse_client_pdb_path, plugin_destination / "KCD2MPKCSEClient.pdb")
         )
-    if result.address_library_path is not None:
+    if result.address_library_paths:
         address_library_destination = normalized_root / "KCSE" / "addresslib"
         address_library_destination.mkdir(parents=True, exist_ok=True)
-        targets.append(
-            (
-                result.address_library_path,
-                address_library_destination / result.address_library_path.name,
-            )
+        targets.extend(
+            (path, address_library_destination / path.name)
+            for path in result.address_library_paths
         )
     temporary_paths: List[Path] = []
     try:

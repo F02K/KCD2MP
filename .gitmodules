@@ -1,3 +1,6 @@
 [submodule "libKCD2"]
 	path = libKCD2
 	url = https://github.com/F02K/libKCD2.git
+[submodule "vendor/Address-Library-For-KCSE"]
+	path = vendor/Address-Library-For-KCSE
+	url = https://github.com/F02K/Address-Library-For-KCSE.git

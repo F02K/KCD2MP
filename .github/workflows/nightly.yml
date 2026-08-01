@@ -16,6 +16,8 @@ jobs:
     name: Validate ${{ matrix.config }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -42,7 +44,7 @@ jobs:
       - name: Build and test
         shell: pwsh
         run: |
-          cmake --build build-${{ matrix.config }} --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPTests
+          cmake --build build-${{ matrix.config }} --target KCD2MPRuntime KCD2MPServer KCD2MPSignatureAudit KCD2MPTests
           ctest --test-dir build-${{ matrix.config }} -C ${{ matrix.config }} -R "^KCD2MP" --output-on-failure
 
   build_nightly:
@@ -54,6 +56,8 @@ jobs:
       short_sha: ${{ steps.var.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
       
       - name: Setup MSVC environment
         uses: ilammy/msvc-dev-cmd@v1
@@ -94,7 +98,7 @@ jobs:
 
       - name: Build 64bit release DLL
         run: |
-          cmake --build ./build --config RelWithDebInfo --target KCD2MP KCD2MPServer KCD2MPSignatureAudit KCD2MPTests --
+          cmake --build ./build --config RelWithDebInfo --target KCD2MPRuntime KCD2MPServer KCD2MPSignatureAudit KCD2MPTests --
           ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MP" --output-on-failure
           #cmake --build ./build --config Debug --target KCD2MP --
           mv ./build/d3d12_.dll ./build/d3d12.dll
@@ -107,6 +111,11 @@ jobs:
           path: |
             build/d3d12.dll
             build/d3d12.pdb
+            build/RelWithDebInfo/dinput8.dll
+            build/RelWithDebInfo/dinput8.pdb
+            build/KCD2MPKCSEClient.dll
+            build/KCD2MPKCSEClient.pdb
+            build/KCSE/addresslib/*.bin
             build/KCD2MPServer.exe
             build/server.toml.example
       - name: Generate Build Info
@@ -199,3 +208,6 @@ jobs:
             ```
           files: |
             d3d12.dll
+            RelWithDebInfo/dinput8.dll
+            KCD2MPKCSEClient.dll
+            KCSE/addresslib/*.bin

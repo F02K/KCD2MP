@@ -142,6 +142,32 @@ class BuildAppTests(unittest.IsolatedAsyncioTestCase):
                     str(app.query_one("#status").render()),
                 )
 
+    async def test_address_library_update_action(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+
+            class FakeService:
+                def update_address_library(self, log):
+                    log("Updated Address Library")
+                    return "0123456789abcdef"
+
+            app = BuildApp(
+                service=FakeService(),  # type: ignore[arg-type]
+                config_store=ConfigStore(root / "build-tool.json"),
+                location_resolver=lambda: None,
+            )
+            async with app.run_test() as pilot:
+                await pilot.click("#update-address-library")
+                for _ in range(50):
+                    await pilot.pause(0.02)
+                    if "0123456789ab" in str(app.query_one("#status").render()):
+                        break
+
+                self.assertIn(
+                    "0123456789ab",
+                    str(app.query_one("#status").render()),
+                )
+
     async def test_failed_audit_prevents_deployment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

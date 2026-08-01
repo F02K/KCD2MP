@@ -40,9 +40,13 @@ find_package(GameNetworkingSockets CONFIG REQUIRED)
 if(KCD2MP_BUILD_KCSE)
     find_package(spdlog CONFIG REQUIRED)
     find_package(boost_container CONFIG REQUIRED)
+    find_package(Python3 3.9 COMPONENTS Interpreter REQUIRED)
 
     set(KCD2MP_LIBKCD2_ROOT "${PROJECT_SOURCE_DIR}/libKCD2")
     set(KCD2MP_KCSE_ROOT "${KCD2MP_LIBKCD2_ROOT}/Projects/KCSE")
+    set(KCD2MP_ADDRESS_LIBRARY_ROOT
+        "${PROJECT_SOURCE_DIR}/vendor/Address-Library-For-KCSE/kcd2_address_library"
+    )
     if(NOT EXISTS "${KCD2MP_LIBKCD2_ROOT}/.buildenv/PCH.h")
         message(FATAL_ERROR
             "libKCD2 is not initialized. Run "
@@ -55,6 +59,28 @@ if(KCD2MP_BUILD_KCSE)
             "`powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1` "
             "from the repository root.")
     endif()
+    file(GLOB KCD2MP_ADDRESS_LIBRARY_FILES CONFIGURE_DEPENDS
+        "${KCD2MP_ADDRESS_LIBRARY_ROOT}/kcd_addresslib_*.bin"
+    )
+    if(NOT KCD2MP_ADDRESS_LIBRARY_FILES)
+        message(FATAL_ERROR
+            "Address-Library-For-KCSE is not initialized. Run "
+            "`powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1` "
+            "from the repository root.")
+    endif()
+
+    add_custom_target(KCD2MPAddressLibraryAudit
+        COMMAND
+            "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tools/audit_address_library.py"
+            --project-root "${PROJECT_SOURCE_DIR}"
+        DEPENDS
+            "${PROJECT_SOURCE_DIR}/tools/audit_address_library.py"
+            ${KCD2MP_ADDRESS_LIBRARY_FILES}
+        WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"
+        COMMENT "Auditing native REL::ID coverage in the vendored Address Library"
+        VERBATIM
+    )
 
     get_target_property(
         KCD2MP_SPDLOG_INCLUDE_DIRECTORIES
@@ -411,6 +437,21 @@ if(KCD2MP_BUILD_KCSE)
         crypt32
     )
     set_property(TARGET KCD2MPKCSEClient PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_dependencies(KCSE KCD2MPAddressLibraryAudit)
+    add_dependencies(KCD2MPKCSEClient KCD2MPAddressLibraryAudit)
+
+    add_custom_command(TARGET KCD2MPKCSEClient POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "$<TARGET_FILE_DIR:KCD2MPKCSEClient>/KCSE/addresslib"
+        COMMENT "Bundling KCSE Address Library tables"
+    )
+    foreach(KCD2MP_ADDRESS_LIBRARY_FILE IN LISTS KCD2MP_ADDRESS_LIBRARY_FILES)
+        add_custom_command(TARGET KCD2MPKCSEClient POST_BUILD
+            COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${KCD2MP_ADDRESS_LIBRARY_FILE}"
+                "$<TARGET_FILE_DIR:KCD2MPKCSEClient>/KCSE/addresslib"
+        )
+    endforeach()
 
     add_custom_target(KCD2MPRuntime
         DEPENDS KCD2MP KCSE KCD2MPKCSEClient

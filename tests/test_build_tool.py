@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import stat
+import struct
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,6 +19,7 @@ from tools.build_tui.core import (
     ConfigStore,
     deploy_artifacts,
     detect_game_root,
+    discover_address_libraries,
     normalize_game_root,
     parse_vdf,
     resolve_game_location,
@@ -177,12 +179,16 @@ class DeploymentTests(unittest.TestCase):
             kcse_loader_pdb = artifacts / "dinput8.pdb"
             kcse_client = artifacts / "KCD2MPKCSEClient.dll"
             kcse_client_pdb = artifacts / "KCD2MPKCSEClient.pdb"
-            address_library = artifacts / "kcd_addresslib_steam_release_1_5-15693.bin"
             kcse_loader.write_bytes(b"kcse")
             kcse_loader_pdb.write_bytes(b"kcse-pdb")
             kcse_client.write_bytes(b"client")
             kcse_client_pdb.write_bytes(b"client-pdb")
-            address_library.write_bytes(b"db")
+            address_libraries = tuple(
+                artifacts / "kcd_addresslib_{}_release_1_5-15693.bin".format(distribution)
+                for distribution in ("steam", "gog", "epic")
+            )
+            for index, address_library in enumerate(address_libraries, start=1):
+                address_library.write_bytes("db{}".format(index).encode("ascii"))
             result = BuildResult(
                 result.profile,
                 result.build_dir,
@@ -192,7 +198,7 @@ class DeploymentTests(unittest.TestCase):
                 kcse_loader_pdb_path=kcse_loader_pdb,
                 kcse_client_path=kcse_client,
                 kcse_client_pdb_path=kcse_client_pdb,
-                address_library_path=address_library,
+                address_library_paths=address_libraries,
             )
             game_root = _create_game_root(root / "game")
 
@@ -210,7 +216,15 @@ class DeploymentTests(unittest.TestCase):
                     / "addresslib"
                     / "kcd_addresslib_steam_release_1_5-15693.bin"
                 ).read_bytes(),
-                b"db",
+                b"db1",
+            )
+            self.assertEqual(
+                (game_root / "KCSE" / "addresslib" / address_libraries[1].name).read_bytes(),
+                b"db2",
+            )
+            self.assertEqual(
+                (game_root / "KCSE" / "addresslib" / address_libraries[2].name).read_bytes(),
+                b"db3",
             )
 
     def test_kcse_deploy_requires_bundled_address_library(self) -> None:
@@ -230,7 +244,7 @@ class DeploymentTests(unittest.TestCase):
             )
             game_root = _create_game_root(root / "game")
 
-            with self.assertRaisesRegex(BuildToolError, "address library"):
+            with self.assertRaisesRegex(BuildToolError, "Address Library"):
                 deploy_artifacts(result, game_root, lambda: False)
 
     def test_rejects_missing_game_executable(self) -> None:
@@ -274,6 +288,45 @@ class DeploymentTests(unittest.TestCase):
             with mock.patch("tools.build_tui.core.os.replace", side_effect=PermissionError):
                 with self.assertRaisesRegex(BuildToolError, "Windows refused"):
                     deploy_artifacts(result, game_root, lambda: False)
+
+
+class AddressLibraryTests(unittest.TestCase):
+    def test_discovers_and_validates_all_tables(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for distribution, name in enumerate(("steam", "gog", "epic"), start=1):
+                table = root / "kcd_addresslib_{}_release_1_5-15693.bin".format(name)
+                table.write_bytes(
+                    struct.pack("<4sIII", b"KASL", 1, distribution, 1)
+                    + struct.pack("<II", 86408, 0x1234)
+                )
+
+            tables = discover_address_libraries(root)
+
+            self.assertEqual(len(tables), 3)
+            self.assertEqual(
+                {path.name.split("_")[2] for path in tables},
+                {"steam", "gog", "epic"},
+            )
+
+    def test_rejects_truncated_table(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "kcd_addresslib_steam_test.bin").write_bytes(b"KASL")
+
+            with self.assertRaisesRegex(BuildToolError, "truncated header"):
+                discover_address_libraries(root)
+
+    def test_rejects_distribution_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "kcd_addresslib_steam_test.bin").write_bytes(
+                struct.pack("<4sIII", b"KASL", 1, 2, 1)
+                + struct.pack("<II", 86408, 0x1234)
+            )
+
+            with self.assertRaisesRegex(BuildToolError, "distribution mismatch"):
+                discover_address_libraries(root)
 
 
 class ProfileTests(unittest.TestCase):

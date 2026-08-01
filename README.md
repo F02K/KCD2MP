@@ -6,7 +6,9 @@ The project is forked from [KCD2ModLoader](https://github.com/xiaoxiao921/KCD2Mo
 [ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase) as its modding foundation.
 The repository includes the project fork
 [F02K/libKCD2](https://github.com/F02K/libKCD2) as a pinned Git submodule,
-including its nested KCSE runtime.
+including its nested KCSE runtime, and
+[F02K/Address-Library-For-KCSE](https://github.com/F02K/Address-Library-For-KCSE)
+as the pinned source of KCSE's versioned address tables.
 KCD2MP keeps the two loaders separate: `d3d12.dll` hosts the ImGui/modloader
 frontend and `dinput8.dll` hosts the multiplayer client as a KCSE plugin.
 
@@ -40,11 +42,12 @@ The TUI supports:
 - Automatic Kingdom Come: Deliverance II discovery through Steam
 - A persistent game-directory override
 - Native signature auditing with live output
+- An explicit, fast-forward-only Address Library update with coverage validation
 - A pinned vcpkg bootstrap for Protobuf, GameNetworkingSockets 1.5.1, Boost.Container, and spdlog
 - Building and testing `d3d12.dll`, KCSE's `dinput8.dll`, `KCD2MPKCSEClient.dll`,
   `KCD2MPServer.exe`, protocol, server core, and networking
-- Deploying both loaders, the KCSE multiplayer-client plugin, and the pinned
-  Steam Address Library binary
+- Deploying both loaders, the KCSE multiplayer-client plugin, and every pinned
+  Steam/GOG/Epic Address Library table
 
 Debug, RelWithDebInfo, and Release all build the complete native KCSE
 multiplayer client. Runtime engine objects remain isolated behind the copied
@@ -146,10 +149,11 @@ The default Steam destination is:
 KingdomComeDeliverance2\Bin\Win64MasterMasterSteamPGO
 ```
 
-KCSE additionally requires the address-library file matching the installed game build under
-`<game-root>\KCSE\addresslib\`. The build tool refuses to deploy `dinput8.dll` until a
-`kcd_addresslib_*.bin` file is present there, because KCSE intentionally fails closed when it
-cannot resolve its versioned native addresses.
+KCSE additionally requires the address-library file matching the installed distribution and
+game build under `<game-root>\KCSE\addresslib\`. CMake bundles all tables from
+`vendor\Address-Library-For-KCSE\kcd2_address_library`; the build tool deploys them together and
+refuses to deploy `dinput8.dll` without them. KCSE intentionally fails closed when it cannot
+resolve its versioned native addresses.
 
 To uninstall KCD2MP and its KCSE integration, remove or rename `d3d12.dll`, `dinput8.dll`, and
 `mods\KCD2MP\KCSE\Plugins\KCD2MPKCSEClient.dll`.
