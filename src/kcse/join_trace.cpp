@@ -15,7 +15,12 @@ namespace kcd2mp::kcse::join_trace
 		std::atomic_bool g_active{};
 		std::atomic_uint64_t g_session{};
 		std::mutex g_write_mutex;
+		HANDLE g_trace_file{INVALID_HANDLE_VALUE};
+		std::string g_pending_lines;
+		ULONGLONG g_last_write_tick{};
 		thread_local thread_role g_thread_role{thread_role::unknown};
+		constexpr std::size_t trace_buffer_capacity = 32U * 1024U;
+		constexpr ULONGLONG trace_write_interval_ms = 250;
 
 		std::filesystem::path trace_path()
 		{
@@ -51,13 +56,14 @@ namespace kcd2mp::kcse::join_trace
 			    : path.substr(slash + 1);
 		}
 
-		void append(std::string_view line) noexcept
+		bool open_trace_file() noexcept
 		{
+			if (g_trace_file != INVALID_HANDLE_VALUE)
+				return true;
 			try
 			{
-				std::scoped_lock lock(g_write_mutex);
 				const auto path = trace_path();
-				const auto file = CreateFileW(
+				g_trace_file = CreateFileW(
 				    path.c_str(),
 				    FILE_APPEND_DATA,
 				    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -65,20 +71,65 @@ namespace kcd2mp::kcse::join_trace
 				    OPEN_ALWAYS,
 				    FILE_ATTRIBUTE_NORMAL,
 				    nullptr);
-				if (file == INVALID_HANDLE_VALUE)
-				{
-					OutputDebugStringA(std::string(line).c_str());
-					return;
-				}
-				DWORD written{};
-				WriteFile(
-				    file,
-				    line.data(),
-				    static_cast<DWORD>(line.size()),
-				    &written,
-				    nullptr);
-				FlushFileBuffers(file);
-				CloseHandle(file);
+			}
+			catch (...)
+			{
+				g_trace_file = INVALID_HANDLE_VALUE;
+			}
+			return g_trace_file != INVALID_HANDLE_VALUE;
+		}
+
+		void flush_pending_locked(bool durable) noexcept
+		{
+			if (g_pending_lines.empty())
+			{
+				if (durable && g_trace_file != INVALID_HANDLE_VALUE)
+					FlushFileBuffers(g_trace_file);
+				return;
+			}
+			if (!open_trace_file())
+			{
+				OutputDebugStringA(g_pending_lines.c_str());
+				g_pending_lines.clear();
+				return;
+			}
+			DWORD written{};
+			WriteFile(
+			    g_trace_file,
+			    g_pending_lines.data(),
+			    static_cast<DWORD>(g_pending_lines.size()),
+			    &written,
+			    nullptr);
+			g_pending_lines.clear();
+			g_last_write_tick = GetTickCount64();
+			if (durable)
+				FlushFileBuffers(g_trace_file);
+		}
+
+		void append(std::string_view line) noexcept
+		{
+			try
+			{
+				std::scoped_lock lock(g_write_mutex);
+				g_pending_lines.append(line);
+				const auto now = GetTickCount64();
+				if (g_pending_lines.size() >= trace_buffer_capacity
+				    || g_last_write_tick == 0
+				    || now - g_last_write_tick >= trace_write_interval_ms)
+					flush_pending_locked(false);
+			}
+			catch (...)
+			{
+				// Diagnostics must never become a second crash source.
+			}
+		}
+
+		void flush(bool durable) noexcept
+		{
+			try
+			{
+				std::scoped_lock lock(g_write_mutex);
+				flush_pending_locked(durable);
 			}
 			catch (...)
 			{
@@ -141,6 +192,7 @@ namespace kcd2mp::kcse::join_trace
 			return;
 		write("join.finish", outcome, location);
 		g_active.store(false, std::memory_order_release);
+		flush(true);
 	}
 
 	bool active() noexcept
@@ -209,6 +261,7 @@ namespace kcd2mp::kcse::join_trace
 			        record ? record->ExceptionAddress : nullptr,
 			        record ? record->ExceptionFlags : 0),
 			    location);
+			flush(true);
 		}
 		catch (...)
 		{

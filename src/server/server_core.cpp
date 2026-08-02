@@ -56,8 +56,8 @@ namespace kcd2mp::server
 	    m_generate_token(generate_token ? std::move(generate_token) : []
 	        { return random_hex(32); }),
 	    m_store(m_config),
-	    m_non_player_entities_disabled(
-	        m_config.disable_non_player_entities)
+	    m_human_npcs_disabled(m_config.disable_human_npcs),
+	    m_animal_npcs_disabled(m_config.disable_animal_npcs)
 	{
 	}
 
@@ -455,23 +455,35 @@ namespace kcd2mp::server
 		broadcast(std::move(envelope), reliability::reliable);
 	}
 
-	bool server_core::set_non_player_entities_disabled(bool disabled)
+	bool server_core::set_npc_entities_disabled(
+	    bool humans_disabled,
+	    bool animals_disabled)
 	{
-		if (m_non_player_entities_disabled == disabled)
+		if (m_human_npcs_disabled == humans_disabled
+		    && m_animal_npcs_disabled == animals_disabled)
 		{
 			return false;
 		}
-		m_non_player_entities_disabled = disabled;
+		m_human_npcs_disabled = humans_disabled;
+		m_animal_npcs_disabled = animals_disabled;
 		protocol::Envelope envelope;
-		envelope.mutable_server_entity_control()
-		    ->set_non_player_entities_disabled(disabled);
+		auto *control = envelope.mutable_server_entity_control();
+		control->set_non_player_entities_disabled(
+		    humans_disabled && animals_disabled);
+		control->set_human_npcs_disabled(humans_disabled);
+		control->set_animal_npcs_disabled(animals_disabled);
 		broadcast(std::move(envelope), reliability::reliable);
 		return true;
 	}
 
-	bool server_core::non_player_entities_disabled() const
+	bool server_core::human_npcs_disabled() const
 	{
-		return m_non_player_entities_disabled;
+		return m_human_npcs_disabled;
+	}
+
+	bool server_core::animal_npcs_disabled() const
+	{
+		return m_animal_npcs_disabled;
 	}
 
 	void server_core::shutdown(std::string reason)
@@ -588,12 +600,18 @@ namespace kcd2mp::server
 		    || hello.runtime().game_version()
 		        != supported_kcse_game_version
 		    || hello.runtime().release_index()
-		        != supported_kcse_release_index
-		    || hello.runtime().address_library().empty())
+		        != supported_kcse_release_index)
 		{
 			reject_hello(
 			    protocol::REJECT_REASON_GAME_BUILD_MISMATCH,
 			    "KCSE/libKCD2 runtime capabilities are incomplete");
+			return;
+		}
+		if (!is_supported_address_library_identity(hello.runtime()))
+		{
+			reject_hello(
+			    protocol::REJECT_REASON_GAME_BUILD_MISMATCH,
+			    "Address Library identity does not match the server allowlist");
 			return;
 		}
 		if (hello.password() != m_config.password)
@@ -624,7 +642,7 @@ namespace kcd2mp::server
 		pending.stage = pending_stage::authenticate;
 		pending.deadline =
 		    now + std::chrono::seconds(m_config.handshake_timeout_seconds);
-		send_challenge(connection);
+		send_challenge(connection, hello.runtime().features());
 	}
 
 	void server_core::handle_authenticate(
@@ -1248,9 +1266,11 @@ namespace kcd2mp::server
 	void server_core::send_entity_control(connection_id connection)
 	{
 		protocol::Envelope envelope;
-		envelope.mutable_server_entity_control()
-		    ->set_non_player_entities_disabled(
-		        m_non_player_entities_disabled);
+		auto *control = envelope.mutable_server_entity_control();
+		control->set_non_player_entities_disabled(
+		    m_human_npcs_disabled && m_animal_npcs_disabled);
+		control->set_human_npcs_disabled(m_human_npcs_disabled);
+		control->set_animal_npcs_disabled(m_animal_npcs_disabled);
 		queue(connection, std::move(envelope), reliability::reliable);
 	}
 
@@ -1297,11 +1317,17 @@ namespace kcd2mp::server
 		return result;
 	}
 
-	void server_core::send_challenge(connection_id connection)
+	void server_core::send_challenge(
+	    connection_id connection,
+	    std::uint64_t client_features)
 	{
 		protocol::Envelope envelope;
-		envelope.mutable_server_challenge()->set_server_id(
-		    m_store.manifest().server_id);
+		auto *challenge = envelope.mutable_server_challenge();
+		challenge->set_server_id(m_store.manifest().server_id);
+		challenge->set_required_runtime_features(
+		    required_client_runtime_capabilities);
+		challenge->set_negotiated_runtime_features(
+		    negotiate_runtime_capabilities(client_features));
 		queue(connection, std::move(envelope), reliability::reliable);
 	}
 

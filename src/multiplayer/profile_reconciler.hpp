@@ -47,6 +47,9 @@ namespace kcd2mp
 		    std::string_view instance_id,
 		    std::string_view slot,
 		    std::string &error) = 0;
+		[[nodiscard]] virtual bool set_quick_access_slots(
+		    const protocol::PlayerProfile &profile,
+		    std::string &error) = 0;
 		[[nodiscard]] virtual bool set_avatar_state(
 		    const protocol::AvatarDescriptor &avatar,
 		    std::string &error) = 0;
@@ -113,6 +116,8 @@ namespace kcd2mp
 			    || left.stats_size() != right.stats_size()
 			    || left.skills_size() != right.skills_size()
 			    || left.inventory_size() != right.inventory_size()
+			    || left.quick_access_slots_size()
+			        != right.quick_access_slots_size()
 			    || (left.transform_valid()
 			        && !same_transform(
 			            left.last_transform(),
@@ -161,6 +166,20 @@ namespace kcd2mp
 				            != item.equipped_slot()))
 					return false;
 			}
+			for (const auto &slot : left.quick_access_slots())
+			{
+				const auto match = std::ranges::find_if(
+				    right.quick_access_slots(),
+				    [&](const protocol::QuickAccessSlot &candidate)
+				    {
+					    return candidate.outfit() == slot.outfit()
+					        && candidate.type() == slot.type()
+					        && candidate.slot() == slot.slot();
+				    });
+				if (match == right.quick_access_slots().end()
+				    || match->instance_id() != slot.instance_id())
+					return false;
+			}
 			return true;
 		}
 
@@ -175,6 +194,9 @@ namespace kcd2mp
 				if (!backend.validate_item(item, error))
 					return false;
 			}
+			protocol::PlayerProfile cleared_qam;
+			if (!backend.set_quick_access_slots(cleared_qam, error))
+				return false;
 
 			std::vector<const protocol::InventoryItem *> equipped;
 			for (const auto &item : current.inventory())
@@ -242,6 +264,8 @@ namespace kcd2mp
 				        item->equipped_slot(),
 				        error))
 					return false;
+			if (!backend.set_quick_access_slots(target, error))
+				return false;
 			if (!backend.set_avatar_state(target.avatar(), error))
 				return false;
 			if (target.transform_valid()

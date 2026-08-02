@@ -71,8 +71,11 @@ namespace kcd2mp::server
 		    std::string *error = nullptr);
 		[[nodiscard]] bool remove_dummy(player_id id, time_point now);
 		void server_say(std::string text, time_point now);
-		[[nodiscard]] bool set_non_player_entities_disabled(bool disabled);
-		[[nodiscard]] bool non_player_entities_disabled() const;
+		[[nodiscard]] bool set_npc_entities_disabled(
+		    bool humans_disabled,
+		    bool animals_disabled);
+		[[nodiscard]] bool human_npcs_disabled() const;
+		[[nodiscard]] bool animal_npcs_disabled() const;
 		void shutdown(std::string reason);
 		[[nodiscard]] std::optional<std::string> create_profile_claim(
 		    player_id id,
@@ -185,7 +188,9 @@ namespace kcd2mp::server
 		[[nodiscard]] bool avatar_allowed(
 		    const protocol::AvatarDescriptor &avatar) const;
 		[[nodiscard]] protocol::AvatarPolicy avatar_policy() const;
-		void send_challenge(connection_id connection);
+		void send_challenge(
+		    connection_id connection,
+		    std::uint64_t client_features);
 		void send_bootstrap(connection_id connection, protocol::BootstrapMode mode);
 		void release_initializer(connection_id connection);
 		void wake_bootstrap_waiters();
@@ -218,7 +223,8 @@ namespace kcd2mp::server
 		std::unordered_map<player_id, profile_claim> m_claims;
 		std::optional<connection_id> m_initializer;
 		std::uint64_t m_next_dummy_index{1};
-		bool m_non_player_entities_disabled{};
+		bool m_human_npcs_disabled{};
+		bool m_animal_npcs_disabled{};
 		std::vector<outbound_message> m_outbound;
 	};
 }

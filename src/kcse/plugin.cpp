@@ -7,12 +7,15 @@
 #include <KCSE/KCSEAPI.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <exception>
 #include <format>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace
 {
@@ -83,10 +86,15 @@ namespace
 			KCD2MP_JOIN_TRACE(
 			    "join.kcse-post-update.game-tick.begin",
 			    "draining network envelopes on KCSE PostUpdate thread");
+			const auto now = std::chrono::steady_clock::now();
+			std::optional<kcd2mp::protocol::AvatarDescriptor> avatar_visual;
+			if (g_client->reserve_local_avatar_sample(now))
+				avatar_visual = g_runtime->local_avatar_visual();
 			g_client->game_tick(
 			    g_runtime->local_transform(),
-			    g_runtime->local_avatar_visual(),
-			    g_runtime->current_level_id());
+			    std::move(avatar_visual),
+			    g_runtime->current_level_id(),
+			    now);
 			client_status = g_client->status();
 			KCD2MP_JOIN_TRACE(
 			    "join.kcse-post-update.game-tick.complete",

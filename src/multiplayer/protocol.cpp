@@ -69,13 +69,20 @@ namespace kcd2mp
 				        == supported_kcse_game_version
 				    && message.runtime().release_index()
 				        == supported_kcse_release_index
-				    && valid_identifier(
-				        message.runtime().address_library(),
-				        64);
+				    && is_valid_address_library_identity(message.runtime());
 			}
 			if (envelope.has_server_challenge())
 			{
-				return valid_identifier(envelope.server_challenge().server_id());
+				const auto &message = envelope.server_challenge();
+				return valid_identifier(message.server_id())
+				    && message.required_runtime_features()
+				        == required_client_runtime_capabilities
+				    && (message.negotiated_runtime_features()
+				            & ~known_client_runtime_capabilities)
+				        == 0
+				    && (message.negotiated_runtime_features()
+				            & message.required_runtime_features())
+				        == message.required_runtime_features();
 			}
 			if (envelope.has_client_authenticate())
 			{
@@ -485,6 +492,44 @@ namespace kcd2mp
 		return contains_default;
 	}
 
+	bool is_valid_address_library_identity(
+	    const protocol::ClientRuntimeCapabilities &runtime)
+	{
+		return valid_identifier(runtime.address_library(), 64)
+		    && (runtime.address_library_distribution() == "steam"
+		        || runtime.address_library_distribution() == "gog"
+		        || runtime.address_library_distribution() == "epic")
+		    && runtime.address_library_format() != 0
+		    && runtime.address_library_entries() != 0
+		    && runtime.address_library_sha256().size() == 64
+		    && std::ranges::all_of(
+		        runtime.address_library_sha256(),
+		        [](unsigned char value)
+		        {
+			        return (value >= '0' && value <= '9')
+			            || (value >= 'a' && value <= 'f');
+		        });
+	}
+
+	bool is_supported_address_library_identity(
+	    const protocol::ClientRuntimeCapabilities &runtime)
+	{
+		return is_valid_address_library_identity(runtime)
+		    && std::ranges::any_of(
+		        supported_address_libraries,
+		        [&](const address_library_identity &identity)
+		        {
+			        return runtime.address_library_distribution()
+			                == identity.distribution
+			            && runtime.address_library() == identity.build_key
+			            && runtime.address_library_format()
+			                == identity.format_version
+			            && runtime.address_library_entries()
+			                == identity.entry_count
+			            && runtime.address_library_sha256() == identity.sha256;
+		        });
+	}
+
 	bool is_valid_profile(const protocol::PlayerProfile &profile)
 	{
 		if (profile.player_id() == 0 || profile.revision() == 0
@@ -540,6 +585,7 @@ namespace kcd2mp
 			    || item.count() == 0 || item.count() > max_profile_item_count
 			    || !std::isfinite(item.quality())
 			    || item.quality() < 0.0F || item.quality() > 100.0F
+			    || std::floor(item.quality()) != item.quality()
 			    || !std::isfinite(item.condition())
 			    || item.condition() < 0.0F || item.condition() > 1.0F)
 			{
@@ -551,6 +597,32 @@ namespace kcd2mp
 			{
 				return false;
 			}
+		}
+		if (profile.quick_access_slots_size()
+		        > static_cast<int>(max_profile_quick_access_slots))
+		{
+			return false;
+		}
+		std::unordered_set<std::uint32_t> quick_slots;
+		for (const auto &slot : profile.quick_access_slots())
+		{
+			if (slot.outfit() > 2
+			    || !protocol::QuickAccessSlotType_IsValid(
+			        static_cast<int>(slot.type()))
+			    || (slot.type() == protocol::QUICK_ACCESS_SLOT_TYPE_WEAPON
+			            ? slot.slot() > 7
+			            : slot.slot() > 3)
+			    || !instance_ids.contains(slot.instance_id()))
+			{
+				return false;
+			}
+			const auto key = slot.outfit() * 16U
+			    + (slot.type() == protocol::QUICK_ACCESS_SLOT_TYPE_CONSUMABLE
+			            ? 8U
+			            : 0U)
+			    + slot.slot();
+			if (!quick_slots.insert(key).second)
+				return false;
 		}
 		for (const auto &visible : profile.avatar().equipment())
 		{

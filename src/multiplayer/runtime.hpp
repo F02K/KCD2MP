@@ -26,6 +26,10 @@ namespace kcd2mp
 		std::uint32_t release_index{};
 		std::uint64_t epoch{};
 		std::string address_library;
+		std::string address_library_distribution;
+		std::uint32_t address_library_format{};
+		std::uint32_t address_library_entries{};
+		std::string address_library_sha256;
 	};
 
 	struct runtime_gate
@@ -124,7 +128,8 @@ namespace kcd2mp
 		[[nodiscard]] virtual std::string current_level_id() const = 0;
 		[[nodiscard]] virtual std::optional<protocol::PlayerProfile>
 		local_profile() = 0;
-		[[nodiscard]] virtual bool set_non_player_entities_disabled(
-		    bool disabled) = 0;
+		[[nodiscard]] virtual bool set_npc_entities_disabled(
+		    bool humans_disabled,
+		    bool animals_disabled) = 0;
 	};
 }

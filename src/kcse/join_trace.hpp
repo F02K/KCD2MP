@@ -46,10 +46,16 @@ namespace kcd2mp::kcse::join_trace
 }
 
 #define KCD2MP_JOIN_TRACE(event, detail)                                     \
-	::kcd2mp::kcse::join_trace::write(                                       \
-	    (event),                                                             \
-	    (detail),                                                            \
-	    std::source_location::current())
+	do                                                                       \
+	{                                                                        \
+		if (::kcd2mp::kcse::join_trace::active())                              \
+		{                                                                      \
+			::kcd2mp::kcse::join_trace::write(                                  \
+			    (event),                                                        \
+			    (detail),                                                       \
+			    std::source_location::current());                               \
+		}                                                                      \
+	} while (false)
 
 #ifdef _WIN32
 #define KCD2MP_JOIN_SEH_FILTER(event)                                        \

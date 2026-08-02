@@ -102,6 +102,10 @@ message ClientRuntimeCapabilities {
   uint32 release_index = 4;
   uint64 runtime_epoch = 5;
   string address_library = 6;
+  string address_library_distribution = 7;
+  uint32 address_library_format = 8;
+  uint32 address_library_entries = 9;
+  string address_library_sha256 = 10;
 }
 
 message ClientHello {
@@ -119,6 +123,8 @@ message ClientHello {
 
 message ServerChallenge {
   string server_id = 1;
+  uint64 required_runtime_features = 2;
+  uint64 negotiated_runtime_features = 3;
 }
 
 message ClientAuthenticate {
@@ -143,6 +149,18 @@ message InventoryItem {
   optional string equipped_slot = 6;
 }
 
+enum QuickAccessSlotType {
+  QUICK_ACCESS_SLOT_TYPE_WEAPON = 0;
+  QUICK_ACCESS_SLOT_TYPE_CONSUMABLE = 1;
+}
+
+message QuickAccessSlot {
+  uint32 outfit = 1;
+  QuickAccessSlotType type = 2;
+  uint32 slot = 3;
+  string instance_id = 4;
+}
+
 message PlayerProfile {
   uint64 player_id = 1;
   uint64 revision = 2;
@@ -157,6 +175,7 @@ message PlayerProfile {
   AvatarDescriptor avatar = 11;
   // Tenths of one Groschen, constrained to 0..9.
   uint32 money_subunits = 12;
+  repeated QuickAccessSlot quick_access_slots = 13;
 }
 
 message ServerBootstrap {
@@ -275,7 +294,11 @@ message ServerShutdown {
 }
 
 message ServerEntityControl {
+  // Legacy aggregate: true only when both categories are disabled. New peers
+  // use the presence-aware category fields below.
   bool non_player_entities_disabled = 1;
+  optional bool human_npcs_disabled = 2;
+  optional bool animal_npcs_disabled = 3;
 }
 
 message ClientAvatarUpdate {

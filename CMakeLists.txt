@@ -8,7 +8,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
 
-project(KCD2MP VERSION 0.4.0 LANGUAGES CXX C ASM ASM_MASM)
+project(KCD2MP VERSION 0.5.0 LANGUAGES CXX C ASM ASM_MASM)
 
 add_compile_definitions(
     "$<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>"
@@ -26,13 +26,34 @@ include(cmake_scripts/rom.cmake)
 include(cmake_scripts/imguizmo.cmake)
 include(cmake_scripts/zip.cmake)
 
-# The bundled pugixml project overrides CMAKE_MSVC_RUNTIME_LIBRARY for its
-# Debug target. Put it back on the engine-compatible retail CRT ABI.
-if(TARGET pugixml-static)
-    set_property(TARGET pugixml-static PROPERTY
-        MSVC_RUNTIME_LIBRARY "MultiThreaded"
+# FetchContent projects may override CMAKE_MSVC_RUNTIME_LIBRARY or set their
+# target property before returning to us. Every static library linked into a
+# WHGame DLL must nevertheless use the same retail CRT ABI. Apply the rule to
+# all dependency targets that exist at this point; targets created below keep
+# inheriting the project-wide default set above.
+function(kcd2mp_force_retail_msvc_runtime directory)
+    get_property(directory_targets DIRECTORY "${directory}"
+        PROPERTY BUILDSYSTEM_TARGETS
     )
-endif()
+    foreach(target IN LISTS directory_targets)
+        get_target_property(target_type "${target}" TYPE)
+        if(NOT target_type STREQUAL "INTERFACE_LIBRARY"
+            AND NOT target_type STREQUAL "UTILITY"
+        )
+            set_property(TARGET "${target}" PROPERTY
+                MSVC_RUNTIME_LIBRARY "MultiThreaded"
+            )
+        endif()
+    endforeach()
+
+    get_property(subdirectories DIRECTORY "${directory}"
+        PROPERTY SUBDIRECTORIES
+    )
+    foreach(subdirectory IN LISTS subdirectories)
+        kcd2mp_force_retail_msvc_runtime("${subdirectory}")
+    endforeach()
+endfunction()
+kcd2mp_force_retail_msvc_runtime("${CMAKE_CURRENT_SOURCE_DIR}")
 
 find_package(Protobuf CONFIG REQUIRED)
 find_package(GameNetworkingSockets CONFIG REQUIRED)
@@ -72,9 +93,16 @@ if(KCD2MP_BUILD_KCSE)
     add_custom_target(KCD2MPAddressLibraryAudit
         COMMAND
             "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tools/generate_address_library_manifest.py"
+            --project-root "${PROJECT_SOURCE_DIR}"
+            --check
+        COMMAND
+            "${Python3_EXECUTABLE}"
             "${PROJECT_SOURCE_DIR}/tools/audit_address_library.py"
             --project-root "${PROJECT_SOURCE_DIR}"
         DEPENDS
+            "${PROJECT_SOURCE_DIR}/tools/generate_address_library_manifest.py"
+            "${PROJECT_SOURCE_DIR}/src/multiplayer/address_library_manifest.generated.hpp"
             "${PROJECT_SOURCE_DIR}/tools/audit_address_library.py"
             ${KCD2MP_ADDRESS_LIBRARY_FILES}
         WORKING_DIRECTORY "${PROJECT_SOURCE_DIR}"

@@ -73,7 +73,8 @@ required_content_hash = ""
 world_directory = "world"
 bootstrap_timeout_seconds = 180
 profile_snapshot_interval_seconds = 15
-disable_non_player_entities = false
+disable_human_npcs = false
+disable_animal_npcs = false
 
 # Optional:
 # [server.initial_spawn]
@@ -124,15 +125,18 @@ profile contract. The complete two-client retail acceptance matrix remains a rel
 
 ## Server entity isolation and remote avatars
 
-`entities disable`, `entities enable`, and `entities status` control a reliable server-owned
-`ServerEntityControl` state. `disable_non_player_entities` selects the state after server start.
-Accepted clients and late joiners receive the same value.
+`entities <all|humans|animals> <disable|enable>` and `entities status` control a reliable
+server-owned `ServerEntityControl` state. `disable_human_npcs` and `disable_animal_npcs` select
+the state after server start. The legacy `disable_non_player_entities` key remains accepted as a
+fallback for both categories. Accepted clients and late joiners receive the same values.
 
-On the game thread the client isolates every existing and newly spawned non-player Entity. It
+On the game thread the client classifies AI Actors through the verified `C_Human` and `C_Animal`
+RTTI hierarchies and applies the selected category state to existing and newly spawned NPCs. It
 captures flags, AI object ID, activation, visibility, and physics state before applying the exact
-sink-driven isolation mutations. The local player and registered remote-player Entities are
-exceptions. Destroyed or reused Entities are tracked by the audited `IEntitySystemSink` order;
-enable/disconnect restores every surviving Entity symmetrically.
+sink-driven isolation mutations. Unknown Actor subclasses, non-AI engine helpers, the local player,
+and registered remote-player Entities remain active. Destroyed or reused Entities are tracked by
+the audited `IEntitySystemSink` order; enable/disconnect restores every surviving Entity
+symmetrically.
 
 The remote-avatar manager consumes the existing interpolated remote-player views and implements
 the complete spawn/update/remove lifecycle behind a native backend contract. Reconnecting players

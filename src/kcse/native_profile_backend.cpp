@@ -7,7 +7,6 @@
 
 #include <entitymodule/C_Actor.h>
 #include <entitymodule/C_EquipmentManager.h>
-#include <entitymodule/C_EquippableItemRuntimeData.h>
 #include <entitymodule/C_Human.h>
 #include <entitymodule/C_Inventory.h>
 #include <entitymodule/C_Item.h>
@@ -15,6 +14,11 @@
 #include <entitymodule/E_ItemType.h>
 #include <entitymodule/S_ItemClass.h>
 #include <framework/GuidUtils.h>
+#include <playermodule/C_OutfitManager.h>
+#include <playermodule/C_QAMManager.h>
+#include <playermodule/E_OutfitId.h>
+#include <playermodule/E_QAM_FoodSlot.h>
+#include <playermodule/E_QAM_WeaponSlot.h>
 #include <rpgmodule/C_Soul.h>
 
 #include <algorithm>
@@ -30,7 +34,6 @@ namespace kcd2mp::kcse
 	namespace
 	{
 		constexpr std::uint32_t item_equipped = 1U;
-		constexpr std::uint32_t item_change_attributes = 0x4000U;
 
 		protocol::AvatarWeaponClass protocol_weapon(npc::weapon_class value)
 		{
@@ -111,14 +114,17 @@ namespace kcd2mp::kcse
 		    soul ? soul->m_inventorySoul.GetInventory() : nullptr;
 		auto *equipment =
 		    soul ? soul->m_inventorySoul.GetEquipmentManager() : nullptr;
-		if (!local.entity || !local.actor || !soul || !inventory || !equipment)
+		auto *outfits =
+		    soul ? soul->m_inventorySoul.GetOutfitManager() : nullptr;
+		if (!local.entity || !local.actor || !soul || !inventory || !equipment
+		    || !outfits)
 		{
 			error =
 			    "native readiness chain Entity -> Actor -> Soul -> Inventory "
-			    "-> Equipment is incomplete";
+			    "-> Equipment -> Outfit/QAM is incomplete";
 			return std::nullopt;
 		}
-		return native_state{soul, inventory, equipment};
+		return native_state{soul, inventory, equipment, outfits};
 	}
 
 	bool native_profile_backend::ready(std::string &error) const
@@ -146,6 +152,36 @@ namespace kcd2mp::kcse
 		}
 		error.clear();
 		return true;
+	}
+
+	std::optional<protocol::AvatarDescriptor>
+	native_profile_backend::capture_avatar_visual(std::string &error) const
+	{
+		if (!m_avatar_state)
+		{
+			error = "native avatar state has not been initialized";
+			return std::nullopt;
+		}
+		const auto local = m_entities.player();
+		if (!local.actor)
+		{
+			error = "native local Human is unavailable";
+			return std::nullopt;
+		}
+
+		auto avatar = *m_avatar_state;
+		const auto *human =
+		    reinterpret_cast<const wh::entitymodule::C_Human *>(local.actor);
+		const bool weapon_drawn =
+		    avatar.weapon_class() != protocol::AVATAR_WEAPON_CLASS_NONE
+		    && human->IsWeaponDrawn();
+		avatar.set_weapon_drawn(weapon_drawn);
+		avatar.set_stance(
+		    weapon_drawn ? protocol::AVATAR_STANCE_READY
+		                 : protocol::AVATAR_STANCE_RELAXED);
+		canonicalize_avatar_visual(avatar);
+		error.clear();
+		return avatar;
 	}
 
 	wh::entitymodule::C_Item *native_profile_backend::find_item(
@@ -178,6 +214,7 @@ namespace kcd2mp::kcse
 		result.clear_stats();
 		result.clear_skills();
 		result.clear_inventory();
+		result.clear_quick_access_slots();
 
 		for (std::size_t index = 0; index < canonical_stat_ids.size(); ++index)
 		{
@@ -187,6 +224,54 @@ namespace kcd2mp::kcse
 			    native->soul->GetStatLevel(static_cast<std::uint32_t>(index))));
 			value->set_progress(native->soul->GetStatProgress(
 			    static_cast<std::uint32_t>(index)));
+		}
+		for (std::uint32_t outfit = 0; outfit < 3; ++outfit)
+		{
+			const auto outfit_id = static_cast<
+			    wh::playermodule::E_OutfitId::Type>(outfit);
+			auto *weapons = native->outfits->GetWeaponQAMManager(outfit_id);
+			auto *consumables =
+			    native->outfits->GetConsumableQAMManager(outfit_id);
+			if (!weapons || !consumables)
+			{
+				error = "native OutfitManager returned an incomplete QAM set";
+				return std::nullopt;
+			}
+			for (std::uint32_t slot = 0; slot < 8; ++slot)
+			{
+				auto *item = weapons->GetWeaponItem(static_cast<
+				    wh::playermodule::E_QAM_WeaponSlot::Type>(slot));
+				if (!item)
+					continue;
+				if (item->m_pInventory != native->inventory)
+				{
+					error = "weapon QAM references an item outside player inventory";
+					return std::nullopt;
+				}
+				auto *wire = result.add_quick_access_slots();
+				wire->set_outfit(outfit);
+				wire->set_type(protocol::QUICK_ACCESS_SLOT_TYPE_WEAPON);
+				wire->set_slot(slot);
+				wire->set_instance_id(wh::FormatGuid(item->m_instanceGuid));
+			}
+			for (std::uint32_t slot = 0; slot < 4; ++slot)
+			{
+				auto *item = consumables->GetConsumableItem(static_cast<
+				    wh::playermodule::E_QAM_FoodSlot::Type>(slot));
+				if (!item)
+					continue;
+				if (item->m_pInventory != native->inventory)
+				{
+					error =
+					    "consumable QAM references an item outside player inventory";
+					return std::nullopt;
+				}
+				auto *wire = result.add_quick_access_slots();
+				wire->set_outfit(outfit);
+				wire->set_type(protocol::QUICK_ACCESS_SLOT_TYPE_CONSUMABLE);
+				wire->set_slot(slot);
+				wire->set_instance_id(wh::FormatGuid(item->m_instanceGuid));
+			}
 		}
 		for (std::size_t index = 0; index < canonical_skill_ids.size(); ++index)
 		{
@@ -276,6 +361,7 @@ namespace kcd2mp::kcse
 			        : protocol::AVATAR_STANCE_RELAXED);
 		}
 		canonicalize_avatar_visual(avatar);
+		m_avatar_state = avatar;
 		*result.mutable_avatar() = std::move(avatar);
 
 		if (const auto transform =
@@ -457,21 +543,28 @@ namespace kcd2mp::kcse
 			error = "native stack amount mutation was rejected";
 			return false;
 		}
-		existing->SetItemHealth(item.condition());
 		if (existing->IsOfType(wh::entitymodule::E_ItemType::Equippable))
 		{
-			auto *runtime = static_cast<
-			    wh::entitymodule::C_EquippableItemRuntimeData *>(
-			    existing->GetOrCreateRuntimeData());
-			if (!runtime)
+			const auto quality =
+			    static_cast<std::int32_t>(std::lround(item.quality()));
+			if (quality > existing->GetMaxQuality())
 			{
-				error = "equippable item has no runtime data";
+				error = std::format(
+				    "native item quality {} exceeds class maximum {}",
+				    quality,
+				    existing->GetMaxQuality());
 				return false;
 			}
-			runtime->m_quality =
-			    static_cast<std::int32_t>(std::lround(item.quality()));
-			runtime->m_condition = item.condition();
-			existing->NotifyChanged(item_change_attributes);
+			if (!existing->SetQuality(quality))
+			{
+				error = "native semantic item quality mutation failed";
+				return false;
+			}
+		}
+		if (!existing->SetCondition(item.condition()))
+		{
+			error = "native semantic item condition mutation failed";
+			return false;
 		}
 		const auto actual_count = existing->m_amount;
 		const auto actual_condition = existing->GetCondition();
@@ -655,7 +748,20 @@ namespace kcd2mp::kcse
 		        value.progress());
 		if (!applied)
 		{
-			error = "native absolute RPG setter rejected " + value.id();
+			const auto actual_level = skill
+			    ? native->soul->GetSkillLevel(id)
+			    : native->soul->GetStatLevel(id);
+			const auto actual_progress = skill
+			    ? native->soul->GetSkillProgress(id)
+			    : native->soul->GetStatProgress(id);
+			error = std::format(
+			    "native absolute RPG setter rejected {}; requested level={} "
+			    "progress={}, actual level={} progress={}",
+			    value.id(),
+			    value.level(),
+			    value.progress(),
+			    actual_level,
+			    actual_progress);
 			KCD2MP_JOIN_TRACE("join.profile.apply-rpg.failed", error);
 		}
 		else
@@ -702,6 +808,141 @@ namespace kcd2mp::kcse
 			    : "native EquipmentManager did not expose the equipped item slot";
 			return false;
 		}
+		return true;
+	}
+
+	bool native_profile_backend::set_quick_access_slots(
+	    const protocol::PlayerProfile &profile,
+	    std::string &error)
+	{
+		const auto native = state(error);
+		if (!native)
+			return false;
+
+		const auto desired = [&](std::uint32_t outfit,
+		                         protocol::QuickAccessSlotType type,
+		                         std::uint32_t slot)
+		    -> const protocol::QuickAccessSlot *
+		{
+			const auto found = std::ranges::find_if(
+			    profile.quick_access_slots(),
+			    [&](const protocol::QuickAccessSlot &candidate)
+			    {
+				    return candidate.outfit() == outfit
+				        && candidate.type() == type
+				        && candidate.slot() == slot;
+			    });
+			return found == profile.quick_access_slots().end()
+			    ? nullptr
+			    : &*found;
+		};
+
+		for (std::uint32_t outfit = 0; outfit < 3; ++outfit)
+		{
+			const auto outfit_id = static_cast<
+			    wh::playermodule::E_OutfitId::Type>(outfit);
+			auto *weapons = native->outfits->GetWeaponQAMManager(outfit_id);
+			auto *consumables =
+			    native->outfits->GetConsumableQAMManager(outfit_id);
+			if (!weapons || !consumables)
+			{
+				error = "native OutfitManager returned an incomplete QAM set";
+				return false;
+			}
+
+			for (std::uint32_t slot = 0; slot < 8; ++slot)
+			{
+				const auto native_slot = static_cast<
+				    wh::playermodule::E_QAM_WeaponSlot::Type>(slot);
+				auto *current = weapons->GetWeaponItem(native_slot);
+				const auto *target = desired(
+				    outfit, protocol::QUICK_ACCESS_SLOT_TYPE_WEAPON, slot);
+				if (current && (!target
+				    || wh::FormatGuid(current->m_instanceGuid)
+				        != target->instance_id()))
+				{
+					if (!weapons->ClearWeaponItem(current, native_slot))
+					{
+						error = "native weapon QAM clear was rejected";
+						return false;
+					}
+				}
+			}
+			for (std::uint32_t slot = 0; slot < 4; ++slot)
+			{
+				const auto native_slot = static_cast<
+				    wh::playermodule::E_QAM_FoodSlot::Type>(slot);
+				auto *current = consumables->GetConsumableItem(native_slot);
+				const auto *target = desired(
+				    outfit, protocol::QUICK_ACCESS_SLOT_TYPE_CONSUMABLE, slot);
+				if (current && (!target
+				    || wh::FormatGuid(current->m_instanceGuid)
+				        != target->instance_id()))
+				{
+					if (!consumables->ClearItem(current, slot))
+					{
+						error = "native consumable QAM clear was rejected";
+						return false;
+					}
+				}
+			}
+
+			for (std::uint32_t target_slot = 0; target_slot < 8; ++target_slot)
+			{
+				const auto *target = desired(
+				    outfit,
+				    protocol::QUICK_ACCESS_SLOT_TYPE_WEAPON,
+				    target_slot);
+				if (!target)
+					continue;
+				auto *item = find_item(*native->inventory, target->instance_id());
+				if (!item)
+				{
+					error = "QAM target item is missing from player inventory";
+					return false;
+				}
+				const auto slot = static_cast<
+				    wh::playermodule::E_QAM_WeaponSlot::Type>(target_slot);
+				if (weapons->GetWeaponItem(slot) != item)
+					weapons->SetItem(item, target_slot / 2U);
+				if (weapons->GetWeaponItem(slot) != item)
+				{
+					error = std::format(
+					    "native weapon QAM assignment failed for outfit {} slot {}",
+					    outfit,
+					    target_slot);
+					return false;
+				}
+			}
+			for (std::uint32_t target_slot = 0; target_slot < 4; ++target_slot)
+			{
+				const auto *target = desired(
+				    outfit,
+				    protocol::QUICK_ACCESS_SLOT_TYPE_CONSUMABLE,
+				    target_slot);
+				if (!target)
+					continue;
+				auto *item = find_item(*native->inventory, target->instance_id());
+				if (!item)
+				{
+					error = "QAM target item is missing from player inventory";
+					return false;
+				}
+				const auto slot = static_cast<
+				    wh::playermodule::E_QAM_FoodSlot::Type>(target_slot);
+				if (consumables->GetConsumableItem(slot) != item)
+					consumables->SetItem(item, target_slot);
+				if (consumables->GetConsumableItem(slot) != item)
+				{
+					error = std::format(
+					    "native consumable QAM assignment failed for outfit {} slot {}",
+					    outfit,
+					    target_slot);
+					return false;
+				}
+			}
+		}
+		error.clear();
 		return true;
 	}
 

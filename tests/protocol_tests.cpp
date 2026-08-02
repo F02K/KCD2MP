@@ -53,7 +53,12 @@ int main()
 	runtime->set_game_version(0x01050600);
 	runtime->set_release_index(1);
 	runtime->set_runtime_epoch(1);
-	runtime->set_address_library("test-address-library");
+	const auto &address_library = supported_address_libraries.back();
+	runtime->set_address_library(address_library.build_key);
+	runtime->set_address_library_distribution(address_library.distribution);
+	runtime->set_address_library_format(address_library.format_version);
+	runtime->set_address_library_entries(address_library.entry_count);
+	runtime->set_address_library_sha256(address_library.sha256);
 	std::string error;
 	const auto encoded = encode(envelope, reliability::reliable, &error);
 	assert(encoded);
@@ -151,7 +156,19 @@ int main()
 	inventory_item->set_quality(100.0F);
 	inventory_item->set_condition(1.0F);
 	inventory_item->set_equipped_slot(visible_item->equipped_slot());
+	auto *quick_slot = profile->add_quick_access_slots();
+	quick_slot->set_outfit(0);
+	quick_slot->set_type(protocol::QUICK_ACCESS_SLOT_TYPE_WEAPON);
+	quick_slot->set_slot(0);
+	quick_slot->set_instance_id(inventory_item->instance_id());
 	assert(is_valid_profile(*profile));
+	auto invalid_qam_slot = *profile;
+	invalid_qam_slot.mutable_quick_access_slots(0)->set_slot(8);
+	assert(!is_valid_profile(invalid_qam_slot));
+	auto missing_qam_item = *profile;
+	missing_qam_item.mutable_quick_access_slots(0)->set_instance_id(
+	    "22222222-2222-4222-8222-222222222222");
+	assert(!is_valid_profile(missing_qam_item));
 	auto invalid_money_subunits = *profile;
 	invalid_money_subunits.set_money_subunits(
 	    money_subunits_per_groschen);
@@ -170,6 +187,9 @@ int main()
 	assert(encoded_profile);
 	const auto decoded_profile = decode(encoded_profile->bytes, &error);
 	assert(decoded_profile);
+	assert(decoded_profile->client_profile_update()
+	    .profile()
+	    .quick_access_slots_size() == 1);
 	assert(
 	    decoded_profile->client_profile_update()
 	        .profile()
@@ -247,16 +267,28 @@ int main()
 	    &error));
 
 	protocol::Envelope entity_control;
-	entity_control.mutable_server_entity_control()
-	    ->set_non_player_entities_disabled(true);
+	auto *entity_control_message =
+	    entity_control.mutable_server_entity_control();
+	entity_control_message->set_non_player_entities_disabled(false);
+	entity_control_message->set_human_npcs_disabled(true);
+	entity_control_message->set_animal_npcs_disabled(false);
 	const auto encoded_control =
 	    encode(entity_control, reliability::reliable, &error);
 	assert(encoded_control);
 	const auto decoded_control = decode(encoded_control->bytes, &error);
 	assert(decoded_control);
-	assert(decoded_control->server_entity_control()
-	    .non_player_entities_disabled());
-	assert(version_string == "0.4.0");
+	const auto &decoded_entity_control =
+	    decoded_control->server_entity_control();
+	assert(!decoded_entity_control.non_player_entities_disabled());
+	assert(decoded_entity_control.has_human_npcs_disabled());
+	assert(decoded_entity_control.human_npcs_disabled());
+	assert(decoded_entity_control.has_animal_npcs_disabled());
+	assert(!decoded_entity_control.animal_npcs_disabled());
+	assert(version_string == "0.5.0");
+	auto unknown_address_library = *runtime;
+	unknown_address_library.set_address_library_sha256(std::string(64, '0'));
+	assert(is_valid_address_library_identity(unknown_address_library));
+	assert(!is_supported_address_library_identity(unknown_address_library));
 
 	return 0;
 }

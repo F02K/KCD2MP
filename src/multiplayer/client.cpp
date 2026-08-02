@@ -98,6 +98,25 @@ namespace kcd2mp
 				return "Pong";
 			return "Other";
 		}
+
+		bool same_persistent_profile(
+		    protocol::PlayerProfile left,
+		    protocol::PlayerProfile right)
+		{
+			auto normalize = [](protocol::PlayerProfile &profile)
+			{
+				profile.set_player_id(0);
+				profile.set_revision(0);
+				profile.clear_display_name();
+				profile.clear_level_id();
+				profile.clear_last_transform();
+				profile.set_transform_valid(false);
+				profile.clear_avatar();
+			};
+			normalize(left);
+			normalize(right);
+			return left.SerializeAsString() == right.SerializeAsString();
+		}
 	}
 
 	multiplayer_client::multiplayer_client(client_runtime &runtime) :
@@ -188,6 +207,7 @@ namespace kcd2mp
 			m_chat.clear();
 			m_local_correction.reset();
 			m_profile.reset();
+			m_pending_profile.reset();
 			m_local_avatar.reset();
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
@@ -195,7 +215,10 @@ namespace kcd2mp
 			m_pending_bootstrap.reset();
 			m_profile_update_pending = false;
 			m_avatar_update_pending = false;
+			m_last_transform_sent = {};
+			m_last_profile_sent = {};
 			m_last_avatar_sent = {};
+			m_last_avatar_sampled = {};
 			m_profile_snapshot_interval_seconds = 15;
 			m_resume_token.clear();
 			m_pending_connect = std::move(options);
@@ -297,6 +320,7 @@ namespace kcd2mp
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
 			m_profile.reset();
+			m_pending_profile.reset();
 			m_local_avatar.reset();
 			m_profile_update_pending = false;
 			m_avatar_update_pending = false;
@@ -312,6 +336,25 @@ namespace kcd2mp
 			    "commands were invalidated.";
 		}
 		queue_network(disconnect_command{});
+	}
+
+	bool multiplayer_client::reserve_local_avatar_sample(
+	    std::chrono::steady_clock::time_point now)
+	{
+		std::scoped_lock lock(m_state_mutex);
+		if (m_status.state != client_state::connected || !m_local_avatar
+		    || m_avatar_update_pending)
+		{
+			return false;
+		}
+		if (m_last_avatar_sampled
+		        != std::chrono::steady_clock::time_point{}
+		    && now - m_last_avatar_sampled < std::chrono::milliseconds(250))
+		{
+			return false;
+		}
+		m_last_avatar_sampled = now;
+		return true;
 	}
 
 	void multiplayer_client::game_tick(
@@ -341,6 +384,8 @@ namespace kcd2mp
 			        || now - m_last_profile_sent
 			            >= std::chrono::seconds(
 			                m_profile_snapshot_interval_seconds));
+			if (profile_due)
+				m_last_profile_sent = now;
 			m_status.game_queue_size = m_game_commands.size();
 			if (connected && m_local_avatar)
 			{
@@ -607,18 +652,31 @@ namespace kcd2mp
 					        runtime_info->set_runtime_epoch(runtime.epoch);
 					        runtime_info->set_address_library(
 					            runtime.address_library);
+					        runtime_info->set_address_library_distribution(
+					            runtime.address_library_distribution);
+					        runtime_info->set_address_library_format(
+					            runtime.address_library_format);
+					        runtime_info->set_address_library_entries(
+					            runtime.address_library_entries);
+					        runtime_info->set_address_library_sha256(
+					            runtime.address_library_sha256);
 					        KCD2MP_JOIN_TRACE(
 					            "join.handshake.client-hello.ready",
 					            std::format(
 					                "protocol={} client={} game={} release={} "
-					                "epoch={} capabilities=0x{:X} addresslib=\"{}\"",
+					                "epoch={} capabilities=0x{:X} addresslib=\"{}:{}\" "
+					                "format={} entries={} sha256={}",
 					                protocol_version,
 					                version_string,
 					                runtime.game_version,
 					                runtime.release_index,
 					                runtime.epoch,
 					                runtime.capabilities,
-					                runtime.address_library));
+					                runtime.address_library_distribution,
+					                runtime.address_library,
+					                runtime.address_library_format,
+					                runtime.address_library_entries,
+					                runtime.address_library_sha256));
 					        if (!send_envelope(envelope, reliability::reliable))
 					        {
 						        set_state(
@@ -710,13 +768,29 @@ namespace kcd2mp
 					        }
 					        else if (envelope->has_server_challenge())
 					        {
-						        const auto server_id =
-						            envelope->server_challenge().server_id();
+						        const auto &challenge =
+						            envelope->server_challenge();
+						        const auto server_id = challenge.server_id();
+						        const auto runtime = m_runtime.descriptor();
+						        if ((challenge.negotiated_runtime_features()
+						                & ~runtime.capabilities)
+						            != 0)
+						        {
+							        set_state(
+							            client_state::disconnected,
+							            "server negotiated unavailable runtime features");
+							        if (transport)
+								        transport->abort_connection(
+								            "invalid runtime capability negotiation");
+							        return;
+						        }
 						        KCD2MP_JOIN_TRACE(
 						            "join.handshake.server-challenge",
 						            std::format(
-						                "server_id=\"{}\"",
-						                server_id));
+						                "server_id=\"{}\" required=0x{:X} negotiated=0x{:X}",
+						                server_id,
+						                challenge.required_runtime_features(),
+						                challenge.negotiated_runtime_features()));
 						        {
 							        std::scoped_lock lock(m_state_mutex);
 							        m_server_id = server_id;
@@ -1109,10 +1183,12 @@ namespace kcd2mp
 				    "native profile capture returned an invalid profile";
 				return;
 			}
+			if (same_persistent_profile(profile, *m_profile))
+				return;
 			update.set_base_revision(m_profile->revision());
 			*update.mutable_profile() = std::move(profile);
+			m_pending_profile = update.profile();
 			m_profile_update_pending = true;
-			m_last_profile_sent = std::chrono::steady_clock::now();
 		}
 		queue_network(profile_command{std::move(update)});
 	}
@@ -1138,6 +1214,7 @@ namespace kcd2mp
 			    std::format(
 			        "players={}",
 			        envelope.server_accepted().players_size()));
+			kcse::join_trace::finish_join("connected");
 		}
 		else if (envelope.has_server_bootstrap())
 		{
@@ -1238,7 +1315,7 @@ namespace kcd2mp
 		}
 		else if (envelope.has_profile_accepted())
 		{
-			if (!m_profile || !m_profile_update_pending
+			if (!m_profile || !m_pending_profile || !m_profile_update_pending
 			    || envelope.profile_accepted().revision()
 			        != m_profile->revision() + 1)
 			{
@@ -1247,12 +1324,15 @@ namespace kcd2mp
 				queue_network(disconnect_command{});
 				return;
 			}
-			m_profile->set_revision(
+			m_pending_profile->set_revision(
 			    envelope.profile_accepted().revision());
+			m_profile = std::move(m_pending_profile);
+			m_pending_profile.reset();
 			m_profile_update_pending = false;
 		}
 		else if (envelope.has_profile_rejected())
 		{
+			m_pending_profile.reset();
 			m_profile_update_pending = false;
 			m_status.state = client_state::closing;
 			m_status.error = envelope.profile_rejected().reason();
@@ -1325,12 +1405,19 @@ namespace kcd2mp
 		}
 		else if (envelope.has_server_entity_control())
 		{
-			const bool disabled =
-			    envelope.server_entity_control()
-			        .non_player_entities_disabled();
+			const auto &control = envelope.server_entity_control();
+			const bool legacy_disabled =
+			    control.non_player_entities_disabled();
+			const bool humans_disabled = control.has_human_npcs_disabled()
+			    ? control.human_npcs_disabled()
+			    : legacy_disabled;
+			const bool animals_disabled = control.has_animal_npcs_disabled()
+			    ? control.animal_npcs_disabled()
+			    : legacy_disabled;
 			lock.unlock();
-			const bool applied =
-			    m_runtime.set_non_player_entities_disabled(disabled);
+			const bool applied = m_runtime.set_npc_entities_disabled(
+			    humans_disabled,
+			    animals_disabled);
 			lock.lock();
 			if (!applied)
 			{
@@ -1421,6 +1508,7 @@ namespace kcd2mp
 			m_pending_bootstrap.reset();
 			m_status.state = client_state::applying_profile;
 			m_profile = bootstrap->profile();
+			m_pending_profile.reset();
 			m_local_avatar = bootstrap->profile().avatar();
 			m_status.avatar_archetype_id =
 			    m_local_avatar->archetype_id();

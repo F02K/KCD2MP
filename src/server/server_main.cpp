@@ -28,7 +28,8 @@ namespace
 		    << "Commands: status, players, kick <player_id> [reason], "
 		       "say <text>, profile claim <player_id>, "
 		       "dummy spawn [name], dummy remove <player_id>, "
-		       "entities <disable|enable|status>, stop, help\n";
+		       "entities <all|humans|animals> <disable|enable>, "
+		       "entities status, stop, help\n";
 	}
 
 	int close_reason(kcd2mp::server::close_kind kind)
@@ -153,8 +154,12 @@ int main(int argc, char **argv)
 					          << '/' << config.max_players
 					          << " pending=" << core.pending_connection_count()
 					          << " tick=" << core.server_tick()
-					          << " non_player_entities="
-					          << (core.non_player_entities_disabled()
+					          << " human_npcs="
+					          << (core.human_npcs_disabled()
+					                  ? "disabled"
+					                  : "enabled")
+					          << " animal_npcs="
+					          << (core.animal_npcs_disabled()
 					                  ? "disabled"
 					                  : "enabled")
 					          << '\n';
@@ -253,29 +258,54 @@ int main(int argc, char **argv)
 				}
 				else if (command == "entities")
 				{
-					std::string action;
-					input >> action;
-					if (action == "disable" || action == "enable")
+					std::string target;
+					input >> target;
+					if (target == "status")
 					{
-						const bool disabled = action == "disable";
-						const bool changed =
-						    core.set_non_player_entities_disabled(disabled);
-						std::cout << "non-player entities "
-						          << (disabled ? "disabled" : "enabled")
-						          << (changed ? "" : " (unchanged)") << '\n';
-					}
-					else if (action == "status")
-					{
-						std::cout << "non-player entities are "
-						          << (core.non_player_entities_disabled()
+						std::cout << "human NPCs are "
+						          << (core.human_npcs_disabled()
+						                  ? "disabled"
+						                  : "enabled")
+						          << "; animal NPCs are "
+						          << (core.animal_npcs_disabled()
 						                  ? "disabled"
 						                  : "enabled")
 						          << '\n';
 					}
 					else
 					{
-						std::cout
-						    << "usage: entities <disable|enable|status>\n";
+						std::string action;
+						if (target == "disable" || target == "enable")
+						{
+							action = target;
+							target = "all";
+						}
+						else
+						{
+							input >> action;
+						}
+						if ((target != "all" && target != "humans"
+						        && target != "animals")
+						    || (action != "disable" && action != "enable"))
+						{
+							std::cout << "usage: entities "
+							             "<all|humans|animals> <disable|enable> "
+							             "or entities status\n";
+							continue;
+						}
+						const bool disabled = action == "disable";
+						auto humans = core.human_npcs_disabled();
+						auto animals = core.animal_npcs_disabled();
+						if (target == "all" || target == "humans")
+							humans = disabled;
+						if (target == "all" || target == "animals")
+							animals = disabled;
+						const bool changed = core.set_npc_entities_disabled(
+						    humans,
+						    animals);
+						std::cout << target << " NPCs "
+						          << (disabled ? "disabled" : "enabled")
+						          << (changed ? "" : " (unchanged)") << '\n';
 					}
 				}
 				else if (command == "stop")

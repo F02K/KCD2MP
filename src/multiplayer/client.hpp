@@ -91,6 +91,9 @@ namespace kcd2mp
 		[[nodiscard]] bool send_chat(std::string text);
 		[[nodiscard]] bool select_avatar(std::string archetype_id);
 		void runtime_epoch_changed();
+		[[nodiscard]] bool reserve_local_avatar_sample(
+		    std::chrono::steady_clock::time_point now =
+		        std::chrono::steady_clock::now());
 		void game_tick(
 		    std::optional<protocol::TransformState> local_transform,
 		    std::optional<protocol::AvatarDescriptor> local_avatar_visual,
@@ -193,6 +196,7 @@ namespace kcd2mp
 		std::deque<chat_entry> m_chat;
 		std::optional<protocol::TransformState> m_local_correction;
 		std::optional<protocol::PlayerProfile> m_profile;
+		std::optional<protocol::PlayerProfile> m_pending_profile;
 		std::optional<protocol::AvatarDescriptor> m_local_avatar;
 		std::optional<protocol::AvatarDescriptor> m_pending_avatar;
 		std::optional<protocol::AvatarDescriptor> m_desired_avatar;
@@ -210,6 +214,7 @@ namespace kcd2mp
 		std::chrono::steady_clock::time_point m_last_transform_sent{};
 		std::chrono::steady_clock::time_point m_last_profile_sent{};
 		std::chrono::steady_clock::time_point m_last_avatar_sent{};
+		std::chrono::steady_clock::time_point m_last_avatar_sampled{};
 	};
 
 	[[nodiscard]] inline const char *to_string(client_state state)

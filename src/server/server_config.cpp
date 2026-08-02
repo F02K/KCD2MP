@@ -107,9 +107,14 @@ namespace kcd2mp::server
 		    *server,
 		    "profile_snapshot_interval_seconds",
 		    config.profile_snapshot_interval_seconds);
-		config.disable_non_player_entities =
-		    (*server)["disable_non_player_entities"].value_or(
-		        config.disable_non_player_entities);
+		// The aggregate key remains a backwards-compatible fallback. Explicit
+		// category keys override it independently.
+		const auto disable_all_npcs =
+		    (*server)["disable_non_player_entities"].value_or(false);
+		config.disable_human_npcs =
+		    (*server)["disable_human_npcs"].value_or(disable_all_npcs);
+		config.disable_animal_npcs =
+		    (*server)["disable_animal_npcs"].value_or(disable_all_npcs);
 		config.default_avatar_archetype =
 		    (*server)["default_avatar_archetype"].value_or(
 		        config.default_avatar_archetype);

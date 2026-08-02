@@ -39,7 +39,8 @@ namespace kcd2mp::server
 		std::uint32_t reconnect_grace_seconds{30};
 		std::uint32_t bootstrap_timeout_seconds{180};
 		std::uint32_t profile_snapshot_interval_seconds{15};
-		bool disable_non_player_entities{};
+		bool disable_human_npcs{};
+		bool disable_animal_npcs{};
 		std::string default_avatar_archetype{
 		    npc::default_soul_id};
 		std::vector<std::string> allowed_avatar_archetypes{

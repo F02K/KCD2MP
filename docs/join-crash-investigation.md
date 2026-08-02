@@ -138,13 +138,53 @@ template on their next authentication.
 
 After inventory and money reconciliation succeeded, the transaction completed
 all ten stat writes and raised an access violation on the first skill
-(`stealth`). `dispatch_xp()` constructed the skill XP event through address
-library ID `66741`, which resolves to the `C_StatXPEffect` constructor at Steam
-RVA `0xC67268`. The stat and skill effects are both 0x40 bytes but have different
-field layouts, so dispatching the incorrectly constructed event crashed inside
-native code. Skill XP events now use ID `66710`, the verified
-`C_SkillXPEffect` constructor at Steam RVA `0xC65AD0`. Per-value begin, complete,
-and failure trace entries identify the exact RPG value in future join logs.
+(`stealth`). The first correction replaced the stat factory with address-library
+ID `66710`, the raw `C_SkillXPEffect` constructor at Steam RVA `0xC65AD0`. That
+constructor was still called with the return value of event-manager vtable slot
+1 as its storage pointer. The native AddStatXP/AddSkillXP paths use that slot to
+prepare the manager and ignore its return value; their effect factories allocate
+the 0x40-byte cause object themselves. The invalid skill effect later crashed in
+native code at Steam RVA `0x2429DC8`.
+
+Skill XP events now use ID `66709`, the verified self-allocating
+`C_SkillXPEffect` factory at Steam RVA `0xC65A20`, paired with the existing stat
+factory ID `66740`. `dispatch_xp()` mirrors the native prepare, resolve, prepare,
+construct, dispatch, and smart-pointer release sequence. Per-value begin,
+complete, and failure trace entries identify the exact RPG value in future join
+logs.
+
+The next reproduction no longer raised an exception in the skill event, but
+the first `stealth` write was rejected by readback. The absolute-XP calculation
+had the native curves reversed: skills use the generic cumulative curve at ID
+`66688` (Steam RVA `0xC64A4C`), while stats use the ID-specific cumulative curve
+at ID `85622` (Steam RVA `0xFA30DC`). The old skill path also summed cumulative
+totals as though they were per-level costs, which produced zero XP for target
+level 1. Absolute writes now interpolate between the cumulative total for the
+requested level and the next level. The intermediate implementation dispatched
+through the same unmodified-XP factories used by the game's
+`AdvanceToSkillLevel` (ID `129572`) and `AdvanceToStatLevel` (ID `85625`) paths.
+Failed readback traces include both the requested and actual level/progress.
+
+A subsequent trace proved that the skill progression event is not a universal
+snapshot setter: `stealth` and `horse_riding` accepted it, but `fencing` kept its
+live cell at level/progress zero. The second dword of each `S_StatCell` is the XP
+accumulated inside the current level (it is read by the native skill-progress
+getter), not unused padding. Authoritative skill restores therefore write the
+requested level and interpolated within-level XP directly to both the live and
+base/snapshot cells. This covers all 35 stored skill slots, including special and
+obsolete entries, and avoids progression-event side effects on other RPG state.
+Stats continue to use the verified native stat event path.
+
+The following reproduction completed the entire profile transaction and entered
+the multiplayer sandbox. It then stalled while applying `ServerEntityControl`.
+The native isolation loop resolved the local player for every Entity and applied
+AI/physics/visibility mutations without checking whether the Entity was actually
+AI-controlled. This contradicted the server contract and could touch UI, camera,
+particle, equipment, trigger, and other engine-helper Entities. Enumeration also
+used an unbounded `IsEnd()` loop instead of the engine-observed `Next() == null`
+termination. Isolation now caches the local Entity id, filters on the native
+`has-AI` flag, follows the observed `MoveFirst`/`Next` iterator protocol, and is
+strictly bounded by the Entity count captured before mutations begin.
 
 ## Fork versus upstream
 

@@ -76,12 +76,15 @@ hosting beyond the LAN.
 The `world_directory` contains the persistent session manifest and player profiles. Server
 console commands are `status`, `players`, `kick <player_id> [reason]`, `say <text>`,
 `profile claim <player_id>`, `dummy spawn [name]`, `dummy remove <player_id>`,
-`entities <disable|enable|status>`, `stop`, and `help`. Dummy players use the server's
+`entities <all|humans|animals> <disable|enable>`, `entities status`, `stop`, and `help`.
+Dummy players use the server's
 default avatar, spawn two metres beside the first live player (or the configured world spawn),
 occupy a normal player slot, and are not persisted.
-`disable_non_player_entities = true` applies the disabled state to AI-controlled world entities
-on every accepted client and late joiner. UI/Flash helpers, cameras, particles, equipment, and
-other non-AI entities remain active. Passwords, identity tokens, and resume tokens
+`disable_human_npcs` and `disable_animal_npcs` independently apply the disabled state on every
+accepted client and late joiner. Classification uses native `C_Human`/`C_Animal` RTTI; unknown
+Actors, UI/Flash helpers, cameras, particles, equipment, and other non-AI entities remain active.
+The legacy `disable_non_player_entities` setting remains a fallback for both categories.
+Passwords, identity tokens, and resume tokens
 are never written to the log. Recovery claim codes are printed only when explicitly requested.
 
 ## Client

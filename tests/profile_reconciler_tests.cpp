@@ -140,6 +140,15 @@ namespace
 					item.set_equipped_slot(slot);
 			return true;
 		}
+		bool set_quick_access_slots(
+		    const protocol::PlayerProfile &value,
+		    std::string &error) override
+		{
+			if (!perform("qam", error))
+				return false;
+			*profile.mutable_quick_access_slots() = value.quick_access_slots();
+			return true;
+		}
 		bool set_avatar_state(
 		    const protocol::AvatarDescriptor &avatar,
 		    std::string &error) override
@@ -213,6 +222,11 @@ int main()
 	auto *visible = equipped_target.mutable_avatar()->add_equipment();
 	visible->set_definition_id(equipped_item->definition_id());
 	visible->set_equipped_slot(equipped_item->equipped_slot());
+	auto *quick_slot = equipped_target.add_quick_access_slots();
+	quick_slot->set_outfit(0);
+	quick_slot->set_type(protocol::QUICK_ACCESS_SLOT_TYPE_WEAPON);
+	quick_slot->set_slot(0);
+	quick_slot->set_instance_id(equipped_item->instance_id());
 	fake_backend equipped;
 	equipped.profile = baseline;
 	equipped.definitions = success.definitions;
@@ -224,6 +238,9 @@ int main()
 	assert(
 	    equipped.profile.inventory(1).equipped_slot()
 	    == "PrimaryMainHand");
+	assert(equipped.profile.quick_access_slots_size() == 1);
+	assert(equipped.profile.quick_access_slots(0).instance_id()
+	    == equipped_item->instance_id());
 	assert(std::ranges::count_if(
 	           equipped.operations,
 	           [](const std::string &operation)

@@ -645,6 +645,15 @@ class BuildService:
             ],
             log,
         )
+        self._run(
+            [
+                sys.executable,
+                str(self.project_root / "tools" / "generate_address_library_manifest.py"),
+                "--project-root",
+                str(self.project_root),
+            ],
+            log,
+        )
         return latest
 
     def _ensure_address_library_submodule(self, log: LogCallback) -> Path:

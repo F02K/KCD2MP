@@ -3,12 +3,19 @@
 #include "multiplayer/profile_reconciler.hpp"
 
 #include <REL/Module.h>
+#include <REL/ID.h>
 #include <crysystem/CCryAction.h>
 #include <crysystem/SSystemGlobalEnvironment.h>
 #include <game/S_GameContext.h>
+#include <playermodule/C_FastTravel.h>
+#include <playermodule/C_MinigameManager.h>
+#include <playermodule/C_PlayerModule.h>
+#include <playermodule/I_Minigame.h>
 #include <Offsets/vtables/ICVar.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <format>
 #include <string_view>
@@ -109,25 +116,28 @@ namespace kcd2mp::kcse
 			        .count());
 		}
 
-		std::string address_library_key()
-		{
-			auto &module = REL::Module::get();
-			const auto build = module.build_code();
-			if (!build.empty())
-				return std::string(build);
-			const auto release = module.release();
-			return release.empty() ? std::string{"unknown"} :
-			                         std::string(release);
-		}
 	}
 
 	native_runtime::native_runtime(const KCSE::IKCSEInterface &kcse) :
 	    m_kcse(kcse),
-	    m_address_library(address_library_key()),
 	    m_profiles(m_entities),
 	    m_remote_backend(m_entities),
 	    m_remote_avatars(m_remote_backend)
 	{
+		const auto &address_library = REL::IDDatabase::get().metadata();
+		m_address_library = address_library.build_key;
+		m_address_library_distribution = std::string(
+		    REL::to_string(address_library.distribution));
+		std::ranges::transform(
+		    m_address_library_distribution,
+		    m_address_library_distribution.begin(),
+		    [](unsigned char value)
+		    {
+			    return static_cast<char>(std::tolower(value));
+		    });
+		m_address_library_format = address_library.format_version;
+		m_address_library_entries = address_library.entry_count;
+		m_address_library_sha256 = address_library.sha256;
 		std::scoped_lock lock(m_cache_mutex);
 		m_capabilities = runtime_capability_kcse;
 		m_diagnostic =
@@ -165,6 +175,7 @@ namespace kcd2mp::kcse
 		        m_epoch_invalidated.load(std::memory_order_acquire),
 		        m_data_loaded.load(std::memory_order_acquire)));
 		m_frame_seen.store(true, std::memory_order_release);
+		m_entities.process_pending_isolation();
 		m_remote_backend.advance_frame();
 		const auto changed =
 		    m_epoch_invalidated.exchange(false, std::memory_order_acq_rel);
@@ -187,7 +198,11 @@ namespace kcd2mp::kcse
 		    m_kcse.GetGameVersion(),
 		    m_kcse.GetReleaseIndex(),
 		    m_epoch.load(std::memory_order_acquire),
-		    m_address_library};
+		    m_address_library,
+		    m_address_library_distribution,
+		    m_address_library_format,
+		    m_address_library_entries,
+		    m_address_library_sha256};
 	}
 
 	runtime_gate native_runtime::capability() const
@@ -213,7 +228,8 @@ namespace kcd2mp::kcse
 		return m_data_loaded.load(std::memory_order_acquire)
 		    && m_frame_seen.load(std::memory_order_acquire)
 		    && m_local_transform.has_value()
-		    && !m_level_id.empty();
+		    && !m_level_id.empty()
+		    && m_transition_safe;
 	}
 
 	bool native_runtime::prepare_multiplayer()
@@ -228,9 +244,10 @@ namespace kcd2mp::kcse
 		if (!can_start_join())
 		{
 			std::scoped_lock lock(m_cache_mutex);
-			m_diagnostic =
-			    "Load a native save and wait for the local player before "
-			    "connecting.";
+			m_diagnostic = !m_transition_blocker.empty()
+			    ? m_transition_blocker
+			    : "Load a native save and wait for the local player before "
+			      "connecting.";
 			KCD2MP_JOIN_TRACE(
 			    "join.runtime.prepare.rejected",
 			    m_diagnostic);
@@ -265,6 +282,8 @@ namespace kcd2mp::kcse
 		m_probe_complete = false;
 		m_probe_failed = false;
 		m_probe_error.clear();
+		m_transition_safe = false;
+		m_transition_blocker.clear();
 		std::scoped_lock lock(m_cache_mutex);
 		if (!m_sandbox_active && !m_unload_pending)
 		{
@@ -516,11 +535,15 @@ namespace kcd2mp::kcse
 		return result;
 	}
 
-	bool native_runtime::set_non_player_entities_disabled(bool disabled)
+	bool native_runtime::set_npc_entities_disabled(
+	    bool humans_disabled,
+	    bool animals_disabled)
 	{
 		std::string error;
-		const auto result =
-		    m_entities.set_world_isolated(disabled, error);
+		const auto result = m_entities.set_world_isolated(
+		    humans_disabled,
+		    animals_disabled,
+		    error);
 		if (!result)
 		{
 			std::scoped_lock lock(m_cache_mutex);
@@ -540,11 +563,7 @@ namespace kcd2mp::kcse
 	native_runtime::local_avatar_visual() const
 	{
 		std::string error;
-		auto profile =
-		    const_cast<native_profile_backend &>(m_profiles).capture(error);
-		return profile
-		    ? std::optional<protocol::AvatarDescriptor>(profile->avatar())
-		    : std::nullopt;
+		return m_profiles.capture_avatar_visual(error);
 	}
 
 	bool native_runtime::apply_local_correction(
@@ -635,6 +654,8 @@ namespace kcd2mp::kcse
 		    runtime_capability_kcse | runtime_capability_game_thread;
 		std::string level;
 		std::optional<protocol::TransformState> transform;
+		bool transition_safe = false;
+		std::string transition_blocker;
 
 		auto *framework = CCryAction::GetInstance();
 		const auto native_player = m_entities.player();
@@ -642,6 +663,39 @@ namespace kcd2mp::kcse
 		auto *framework_actor =
 		    framework ? framework->GetClientActor() : nullptr;
 		auto *context_actor = native_player.actor;
+		auto *context = wh::game::S_GameContext::GetInstance();
+		auto *player_module = context ? context->m_pPlayerModule : nullptr;
+		if (player_module)
+		{
+			transition_safe = true;
+			if (player_module->m_pFastTravel
+			    && player_module->m_pFastTravel->IsFastTraveling())
+			{
+				transition_safe = false;
+				transition_blocker =
+				    "Finish or cancel fast travel before connecting.";
+			}
+			else if (player_module->m_pMinigameManager)
+			{
+				for (const auto &[user_id, session] :
+				     player_module->m_pMinigameManager->m_sessions)
+				{
+					(void)user_id;
+					if (session && !session->IsFinished())
+					{
+						transition_safe = false;
+						transition_blocker =
+						    "Exit the active minigame before connecting.";
+						break;
+					}
+				}
+			}
+		}
+		else
+		{
+			transition_blocker =
+			    "The native PlayerModule is not ready for multiplayer.";
+		}
 		KCD2MP_JOIN_TRACE(
 		    "join.runtime.cached-state.precheck",
 		    std::format(
@@ -670,12 +724,26 @@ namespace kcd2mp::kcse
 		}
 
 		std::string profile_error;
-		const auto profile_ready = multiplayer_requested
-		    && (capabilities & runtime_capability_local_player) != 0
-		    && m_profiles.ready(profile_error);
-		const auto avatar_ready = multiplayer_requested
-		    && (capabilities & runtime_capability_local_player) != 0
-		    && m_remote_backend.available();
+		bool profile_ready{};
+		bool avatar_ready{};
+		if (multiplayer_requested
+		    && (capabilities & runtime_capability_local_player) != 0)
+		{
+			if (m_probe_complete)
+			{
+				// The native readiness chain is scoped to the current runtime
+				// epoch. Lifecycle invalidation resets the completed probe, so
+				// repeating inventory/catalog validation every frame adds cost
+				// without providing additional safety.
+				profile_ready = true;
+				avatar_ready = true;
+			}
+			else if (!m_probe_failed.load(std::memory_order_acquire))
+			{
+				profile_ready = m_profiles.ready(profile_error);
+				avatar_ready = m_remote_backend.available();
+			}
+		}
 		KCD2MP_JOIN_TRACE(
 		    "join.runtime.capability-components",
 		    std::format(
@@ -785,7 +853,18 @@ namespace kcd2mp::kcse
 			    | runtime_capability_equipment
 			    | runtime_capability_profile_capture
 			    | runtime_capability_profile_apply
+			    | runtime_capability_profile_qam
 			    | runtime_capability_remote_avatar;
+		}
+		if (player_module)
+			capabilities |= runtime_capability_transition_gate;
+		if (!m_address_library.empty()
+		    && !m_address_library_distribution.empty()
+		    && m_address_library_format != 0
+		    && m_address_library_entries != 0
+		    && m_address_library_sha256.size() == 64)
+		{
+			capabilities |= runtime_capability_address_library_identity;
 		}
 
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
@@ -817,6 +896,8 @@ namespace kcd2mp::kcse
 		m_local_transform = std::move(transform);
 		m_level_id = std::move(level);
 		m_capabilities = capabilities;
+		m_transition_safe = transition_safe;
+		m_transition_blocker = std::move(transition_blocker);
 		KCD2MP_JOIN_TRACE(
 		    "join.runtime.capabilities.updated",
 		    std::format(

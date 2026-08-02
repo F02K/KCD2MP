@@ -84,7 +84,13 @@ namespace
 		runtime->set_game_version(0x01050600);
 		runtime->set_release_index(1);
 		runtime->set_runtime_epoch(1);
-		runtime->set_address_library("test-address-library");
+		const auto &address_library = supported_address_libraries.back();
+		runtime->set_address_library(address_library.build_key);
+		runtime->set_address_library_distribution(
+		    address_library.distribution);
+		runtime->set_address_library_format(address_library.format_version);
+		runtime->set_address_library_entries(address_library.entry_count);
+		runtime->set_address_library_sha256(address_library.sha256);
 		return envelope;
 	}
 
@@ -205,18 +211,25 @@ namespace
 	bool has_entity_control(
 	    const std::vector<outbound_message> &messages,
 	    connection_id connection,
-	    bool disabled)
+	    bool humans_disabled,
+	    bool animals_disabled)
 	{
 		return std::ranges::any_of(
 		    messages,
 		    [&](const outbound_message &message)
-		    {
-			    return message.connection == connection
-			        && message.envelope.has_server_entity_control()
-			        && message.envelope.server_entity_control()
-			               .non_player_entities_disabled()
-			            == disabled;
-		    });
+			{
+				if (message.connection != connection
+				    || !message.envelope.has_server_entity_control())
+					return false;
+				const auto &control =
+				    message.envelope.server_entity_control();
+				return control.has_human_npcs_disabled()
+				    && control.human_npcs_disabled() == humans_disabled
+				    && control.has_animal_npcs_disabled()
+				    && control.animal_npcs_disabled() == animals_disabled
+				    && control.non_player_entities_disabled()
+				        == (humans_disabled && animals_disabled);
+			});
 	}
 
 	std::string connect_new_player(
@@ -247,7 +260,8 @@ namespace
 		assert(has_entity_control(
 		    outbound,
 		    connection,
-		    core.non_player_entities_disabled()));
+		    core.human_npcs_disabled(),
+		    core.animal_npcs_disabled()));
 		return token;
 	}
 }
@@ -289,9 +303,25 @@ int main()
 		       "disable_non_player_entities = true\n";
 		output.close();
 		const auto parsed = load_server_config(path);
-		assert(parsed.disable_non_player_entities);
+		assert(parsed.disable_human_npcs);
+		assert(parsed.disable_animal_npcs);
 		assert(parsed.world_directory
 		    == parsed_config_world.path / "world");
+	}
+	{
+		const auto path = parsed_config_world.path / "split-server.toml";
+		std::ofstream output(path);
+		output
+		    << "[server]\n"
+		       "level_id = \"sandbox\"\n"
+		       "world_directory = \"world\"\n"
+		       "starter_profile = \"starter_profile.toml\"\n"
+		       "disable_non_player_entities = true\n"
+		       "disable_animal_npcs = false\n";
+		output.close();
+		const auto parsed = load_server_config(path);
+		assert(parsed.disable_human_npcs);
+		assert(!parsed.disable_animal_npcs);
 	}
 
 	temporary_world invalid_config_world;
@@ -325,6 +355,18 @@ int main()
 		assert(has_rejection(
 		    outbound,
 		    90,
+		    protocol::REJECT_REASON_GAME_BUILD_MISMATCH));
+
+		core.on_transport_connected(92, start);
+		auto wrong_address_library = hello();
+		wrong_address_library.mutable_client_hello()
+		    ->mutable_runtime()
+		    ->set_address_library_sha256(std::string(64, '0'));
+		core.on_message(92, wrong_address_library, start);
+		outbound = core.take_outbound();
+		assert(has_rejection(
+		    outbound,
+		    92,
 		    protocol::REJECT_REASON_GAME_BUILD_MISMATCH));
 
 		core.on_transport_connected(91, start);
@@ -491,19 +533,22 @@ int main()
 	temporary_world entity_control_world;
 	{
 		auto config = config_for(entity_control_world.path);
-		config.disable_non_player_entities = true;
+		config.disable_human_npcs = true;
+		config.disable_animal_npcs = false;
 		server_core core(config);
-		assert(core.non_player_entities_disabled());
+		assert(core.human_npcs_disabled());
+		assert(!core.animal_npcs_disabled());
 		(void)connect_new_player(core, 35, start, 1);
 
-		assert(!core.set_non_player_entities_disabled(true));
+		assert(!core.set_npc_entities_disabled(true, false));
 		assert(core.take_outbound().empty());
-		assert(core.set_non_player_entities_disabled(false));
+		assert(core.set_npc_entities_disabled(false, true));
 		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
-		assert(has_entity_control(outbound, 35, false));
-		assert(!core.non_player_entities_disabled());
-		assert(!core.set_non_player_entities_disabled(false));
+		assert(has_entity_control(outbound, 35, false, true));
+		assert(!core.human_npcs_disabled());
+		assert(core.animal_npcs_disabled());
+		assert(!core.set_npc_entities_disabled(false, true));
 		assert(core.take_outbound().empty());
 	}
 

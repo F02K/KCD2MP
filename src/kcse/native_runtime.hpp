@@ -38,8 +38,9 @@ namespace kcd2mp::kcse
 		[[nodiscard]] std::string current_level_id() const override;
 		[[nodiscard]] std::optional<protocol::PlayerProfile>
 		local_profile() override;
-		[[nodiscard]] bool set_non_player_entities_disabled(
-		    bool disabled) override;
+		[[nodiscard]] bool set_npc_entities_disabled(
+		    bool humans_disabled,
+		    bool animals_disabled) override;
 
 		[[nodiscard]] std::optional<protocol::TransformState>
 		local_transform() const;
@@ -61,6 +62,10 @@ namespace kcd2mp::kcse
 
 		const KCSE::IKCSEInterface &m_kcse;
 		std::string m_address_library;
+		std::string m_address_library_distribution;
+		std::uint32_t m_address_library_format{};
+		std::uint32_t m_address_library_entries{};
+		std::string m_address_library_sha256;
 		std::atomic<std::uint64_t> m_epoch{1};
 		std::atomic<bool> m_epoch_invalidated{};
 		std::atomic<bool> m_data_loaded{};
@@ -73,6 +78,8 @@ namespace kcd2mp::kcse
 		std::optional<protocol::TransformState> m_local_transform;
 		std::uint64_t m_transform_sequence{};
 		std::string m_diagnostic;
+		bool m_transition_safe{};
+		std::string m_transition_blocker;
 		bool m_sandbox_active{};
 		sandbox_poll_result m_sandbox_progress;
 		bool m_save_load_locked{};

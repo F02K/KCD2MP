@@ -19,6 +19,11 @@ namespace wh::rpgmodule
 	class C_Soul;
 }
 
+namespace wh::playermodule
+{
+	class C_OutfitManager;
+}
+
 namespace kcd2mp::kcse
 {
 	class native_profile_backend final : public profile_backend
@@ -29,6 +34,8 @@ namespace kcd2mp::kcse
 		void set_wire_identity(const protocol::PlayerProfile &profile);
 		void reset();
 		[[nodiscard]] bool ready(std::string &error) const;
+		[[nodiscard]] std::optional<protocol::AvatarDescriptor>
+		capture_avatar_visual(std::string &error) const;
 
 		[[nodiscard]] std::optional<protocol::PlayerProfile> capture(
 		    std::string &error) override;
@@ -60,6 +67,9 @@ namespace kcd2mp::kcse
 		    std::string_view instance_id,
 		    std::string_view slot,
 		    std::string &error) override;
+		[[nodiscard]] bool set_quick_access_slots(
+		    const protocol::PlayerProfile &profile,
+		    std::string &error) override;
 		[[nodiscard]] bool set_avatar_state(
 		    const protocol::AvatarDescriptor &avatar,
 		    std::string &error) override;
@@ -73,6 +83,7 @@ namespace kcd2mp::kcse
 			wh::rpgmodule::C_Soul *soul{};
 			wh::entitymodule::C_Inventory *inventory{};
 			wh::entitymodule::C_EquipmentManager *equipment{};
+			wh::playermodule::C_OutfitManager *outfits{};
 		};
 
 		[[nodiscard]] std::optional<native_state> state(
