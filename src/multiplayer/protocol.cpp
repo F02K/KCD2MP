@@ -44,6 +44,21 @@ namespace kcd2mp
 			return valid_utf8_with_codepoint_count(value, 1, maximum);
 		}
 
+		bool valid_inventory_item(
+		    const protocol::InventoryItem &item,
+		    bool allow_equipped_slot)
+		{
+			return is_uuid(item.instance_id())
+			    && is_uuid(item.definition_id())
+			    && item.count() > 0 && item.count() <= max_profile_item_count
+			    && std::isfinite(item.quality())
+			    && item.quality() >= 0.0F && item.quality() <= 100.0F
+			    && std::floor(item.quality()) == item.quality()
+			    && std::isfinite(item.condition())
+			    && item.condition() >= 0.0F && item.condition() <= 1.0F
+			    && (allow_equipped_slot || !item.has_equipped_slot());
+		}
+
 		bool valid_envelope(const protocol::Envelope &envelope)
 		{
 			if (envelope.has_client_hello())
@@ -112,7 +127,13 @@ namespace kcd2mp
 				            && is_finite_transform(message.spawn())))
 				    && (!message.has_profile()
 				        || is_valid_profile(message.profile()))
-				    && message.issued_identity_token().size() <= 128;
+				    && message.issued_identity_token().size() <= 128
+				    && message.world_objects_size()
+				        <= static_cast<int>(max_world_objects)
+				    && std::ranges::all_of(
+				        message.world_objects(),
+				        [](const protocol::WorldObjectState &state)
+				        { return is_valid_world_object_state(state); });
 			}
 			if (envelope.has_client_world_ready())
 			{
@@ -147,8 +168,38 @@ namespace kcd2mp
 			if (envelope.has_profile_rejected())
 			{
 				return envelope.profile_rejected().authoritative_revision() > 0
+				    && envelope.profile_rejected().has_authoritative_profile()
+				    && is_valid_profile(
+				        envelope.profile_rejected().authoritative_profile())
 				    && valid_utf8_with_codepoint_count(
 				        envelope.profile_rejected().reason(), 1, 512);
+			}
+			if (envelope.has_client_world_object_update())
+			{
+				const auto &message = envelope.client_world_object_update();
+				return message.has_state()
+				    && is_valid_world_object_state(message.state(), false)
+				    && message.state().revision() == message.base_revision();
+			}
+			if (envelope.has_world_object_accepted())
+			{
+				return envelope.world_object_accepted().entity_guid() != 0
+				    && envelope.world_object_accepted().revision() > 0;
+			}
+			if (envelope.has_world_object_rejected())
+			{
+				const auto &message = envelope.world_object_rejected();
+				return message.has_authoritative_state()
+				    && is_valid_world_object_state(
+				        message.authoritative_state())
+				    && valid_utf8_with_codepoint_count(
+				        message.reason(), 1, 512);
+			}
+			if (envelope.has_world_object_updated())
+			{
+				return envelope.world_object_updated().has_state()
+				    && is_valid_world_object_state(
+				        envelope.world_object_updated().state());
 			}
 			if (envelope.has_client_avatar_update())
 			{
@@ -579,15 +630,8 @@ namespace kcd2mp
 		std::unordered_set<std::string> equipped_slots;
 		for (const auto &item : profile.inventory())
 		{
-			if (!is_uuid(item.instance_id())
-			    || !instance_ids.insert(item.instance_id()).second
-			    || !is_uuid(item.definition_id())
-			    || item.count() == 0 || item.count() > max_profile_item_count
-			    || !std::isfinite(item.quality())
-			    || item.quality() < 0.0F || item.quality() > 100.0F
-			    || std::floor(item.quality()) != item.quality()
-			    || !std::isfinite(item.condition())
-			    || item.condition() < 0.0F || item.condition() > 1.0F)
+			if (!valid_inventory_item(item, true)
+			    || !instance_ids.insert(item.instance_id()).second)
 			{
 				return false;
 			}
@@ -638,6 +682,33 @@ namespace kcd2mp
 				return false;
 		}
 		return true;
+	}
+
+	bool is_valid_world_object_state(
+	    const protocol::WorldObjectState &state,
+	    bool require_revision)
+	{
+		if (state.entity_guid() == 0
+		    || !protocol::WorldObjectKind_IsValid(
+		        static_cast<int>(state.kind()))
+		    || state.kind() == protocol::WORLD_OBJECT_KIND_UNSPECIFIED
+		    || (require_revision && state.revision() == 0)
+		    || state.inventory_size()
+		        > static_cast<int>(max_world_object_inventory_items)
+		    || (state.kind() == protocol::WORLD_OBJECT_KIND_DOOR
+		        && (state.has_inventory() || state.inventory_size() != 0))
+		    || (!state.has_inventory() && state.inventory_size() != 0))
+		{
+			return false;
+		}
+		std::unordered_set<std::string> instances;
+		return std::ranges::all_of(
+		    state.inventory(),
+		    [&](const protocol::InventoryItem &item)
+		    {
+			    return valid_inventory_item(item, false)
+			        && instances.insert(item.instance_id()).second;
+		    });
 	}
 
 	bool is_finite_transform(const protocol::TransformState &transform)

@@ -3,28 +3,192 @@
 #include "multiplayer/protocol.hpp"
 
 #include <crysystem/CCryAction.h>
-#include <crysystem/CEntity.h>
 #include <crysystem/SSystemGlobalEnvironment.h>
 #include <entitymodule/C_Actor.h>
+#include <entitymodule/C_Inventory.h>
+#include <entitymodule/C_InventoryManager.h>
+#include <entitymodule/C_Item.h>
+#include <entitymodule/C_ItemDatabase.h>
+#include <entitymodule/S_ItemClass.h>
+#include <framework/GuidUtils.h>
+#include <crysystem/ScriptAnyValue.h>
 #include <game/S_GameContext.h>
 #include <Offsets/vtables/IEntity.h>
 #include <Offsets/vtables/IEntityIt.h>
 #include <Offsets/vtables/IEntitySystem.h>
+#include <Offsets/vtables/IScriptSystem.h>
 
 #include <chrono>
 #include <cmath>
+#include <cstring>
 #include <format>
+#include <unordered_set>
 
 namespace kcd2mp::kcse
 {
 	namespace
 	{
-		constexpr std::uint32_t entity_flag_calc_physics = 1U << 7;
 		constexpr std::uint16_t spawn_fallback_delay_frames = 3;
 		constexpr std::uint16_t max_actor_registration_wait_frames = 60;
 		constexpr std::uint32_t isolation_maintenance_interval_frames = 15;
 		constexpr std::size_t game_object_system_add_sink_slot = 16;
 		constexpr std::size_t game_object_system_remove_sink_slot = 17;
+		constexpr int entity_event_init = 3;
+		constexpr int entity_event_script = 18;
+		constexpr std::uint32_t world_inventory_poll_interval_frames = 6;
+
+		struct native_entity_event
+		{
+			std::int32_t event{};
+			std::int32_t padding{};
+			std::intptr_t parameters[4]{};
+			float floats[2]{};
+		};
+
+		enum class world_script_event
+		{
+			none,
+			open,
+			close
+		};
+
+		world_script_event guarded_world_script_event(
+		    const char *name) noexcept
+		{
+			if (!name)
+				return world_script_event::none;
+#ifdef _WIN32
+			__try
+			{
+				if (std::strcmp(name, "Open") == 0)
+					return world_script_event::open;
+				if (std::strcmp(name, "Close") == 0)
+					return world_script_event::close;
+				return world_script_event::none;
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return world_script_event::none;
+			}
+#else
+			if (std::strcmp(name, "Open") == 0)
+				return world_script_event::open;
+			if (std::strcmp(name, "Close") == 0)
+				return world_script_event::close;
+			return world_script_event::none;
+#endif
+		}
+
+		bool execute_script(std::string_view script) noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pScriptSystem)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+				return environment->pScriptSystem->ExecuteBuffer(
+				    script.data(),
+				    script.size(),
+				    "KCD2MP world sync",
+				    nullptr);
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#else
+			return environment->pScriptSystem->ExecuteBuffer(
+			    script.data(), script.size(), "KCD2MP world sync", nullptr);
+#endif
+		}
+
+		bool read_script_global(
+		    const char *name,
+		    ScriptAnyValue &value) noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pScriptSystem)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+				return environment->pScriptSystem->GetGlobalAny(name, value);
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#else
+			return environment->pScriptSystem->GetGlobalAny(name, value);
+#endif
+		}
+
+		struct script_world_view
+		{
+			protocol::WorldObjectKind kind{
+			    protocol::WORLD_OBJECT_KIND_UNSPECIFIED};
+			bool opened{};
+			std::uint64_t inventory_wuid{};
+		};
+
+		std::optional<script_world_view> inspect_world_entity(
+		    Offsets::IEntity *entity)
+		{
+			if (!entity || entity->GetId() == 0 || entity->GetGuid() == 0)
+				return std::nullopt;
+			const auto script = std::format(
+			    "KCD2MP_world_kind=0 KCD2MP_world_open=false "
+			    "KCD2MP_world_inventory=nil local e=System.GetEntity({}) "
+			    "if e then if e.GetInventoryToOpen~=nil then "
+			    "KCD2MP_world_kind=2 KCD2MP_world_inventory=e:GetInventoryToOpen() "
+			    "elseif e.LockType=='door' then KCD2MP_world_kind=1 end "
+			    "KCD2MP_world_open=(e.bOpened==1 or e.nDirection==1) end",
+			    entity->GetId());
+			if (!execute_script(script))
+				return std::nullopt;
+			ScriptAnyValue kind;
+			ScriptAnyValue opened;
+			if (!read_script_global("KCD2MP_world_kind", kind)
+			    || kind.type != ANY_TNUMBER || kind.number < 1.0F
+			    || kind.number > 2.0F
+			    || !read_script_global("KCD2MP_world_open", opened)
+			    || opened.type != ANY_TBOOLEAN)
+			{
+				return std::nullopt;
+			}
+			script_world_view result;
+			result.kind = static_cast<protocol::WorldObjectKind>(
+			    static_cast<int>(kind.number));
+			result.opened = opened.b;
+			if (result.kind == protocol::WORLD_OBJECT_KIND_CONTAINER)
+			{
+				ScriptAnyValue inventory;
+				if (!read_script_global("KCD2MP_world_inventory", inventory)
+				    || inventory.type != ANY_THANDLE
+				    || inventory.nHandle == 0)
+				{
+					return std::nullopt;
+				}
+				result.inventory_wuid =
+				    static_cast<std::uint64_t>(inventory.nHandle);
+			}
+			return result;
+		}
+
+		protocol::InventoryItem wire_item(
+		    const wh::entitymodule::C_Item &item)
+		{
+			protocol::InventoryItem result;
+			result.set_instance_id(wh::FormatGuid(item.m_instanceGuid));
+			if (item.m_pClassData)
+				result.set_definition_id(wh::FormatGuid(item.m_pClassData->m_guid));
+			result.set_count(static_cast<std::uint32_t>(
+			    std::max(item.m_amount, 0)));
+			result.set_quality(static_cast<float>(item.GetQuality()));
+			result.set_condition(item.GetCondition());
+			return result;
+		}
 
 		std::uint64_t now_ms()
 		{
@@ -116,13 +280,83 @@ namespace kcd2mp::kcse
 #endif
 		}
 
+		actor_type_match guarded_actor_is_player(
+		    wh::entitymodule::C_Actor *actor) noexcept
+		{
+			if (!actor)
+				return actor_type_match::no;
+#ifdef _WIN32
+			__try
+			{
+				return actor->IsPlayer()
+				    ? actor_type_match::yes
+				    : actor_type_match::no;
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return actor_type_match::failed;
+			}
+#else
+			return actor->IsPlayer()
+			    ? actor_type_match::yes
+			    : actor_type_match::no;
+#endif
+		}
+
+		actor_type_match guarded_actor_owns_entity(
+		    wh::entitymodule::C_Actor *actor,
+		    Offsets::IEntity *entity) noexcept
+		{
+			if (!actor || !entity)
+				return actor_type_match::no;
+#ifdef _WIN32
+			__try
+			{
+				return static_cast<void *>(actor->GetEntity())
+				        == static_cast<void *>(entity)
+				    ? actor_type_match::yes
+				    : actor_type_match::no;
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return actor_type_match::failed;
+			}
+#else
+			return static_cast<void *>(actor->GetEntity())
+			        == static_cast<void *>(entity)
+			    ? actor_type_match::yes
+			    : actor_type_match::no;
+#endif
+		}
+
+		actor_type_match guarded_entity_has_ai(
+		    Offsets::IEntity *entity) noexcept
+		{
+			if (!entity)
+				return actor_type_match::no;
+#ifdef _WIN32
+			__try
+			{
+				return entity->HasAI()
+				    ? actor_type_match::yes
+				    : actor_type_match::no;
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return actor_type_match::failed;
+			}
+#else
+			return entity->HasAI()
+			    ? actor_type_match::yes
+			    : actor_type_match::no;
+#endif
+		}
+
 		bool guarded_apply_entity_isolation(Offsets::IEntity *entity) noexcept
 		{
 #ifdef _WIN32
 			__try
 			{
-				reinterpret_cast<CEntity *>(entity)->EnablePhysics(false);
-				entity->Activate(false);
 				entity->Hide(true);
 				return true;
 			}
@@ -131,8 +365,6 @@ namespace kcd2mp::kcse
 				return false;
 			}
 #else
-			reinterpret_cast<CEntity *>(entity)->EnablePhysics(false);
-			entity->Activate(false);
 			entity->Hide(true);
 			return true;
 #endif
@@ -140,17 +372,12 @@ namespace kcd2mp::kcse
 
 		bool guarded_restore_entity(
 		    Offsets::IEntity *entity,
-		    std::uint32_t flags,
-		    bool active,
 		    bool hidden) noexcept
 		{
 #ifdef _WIN32
 			__try
 			{
-				reinterpret_cast<CEntity *>(entity)->EnablePhysics(
-				    (flags & entity_flag_calc_physics) != 0);
 				entity->Hide(hidden);
-				entity->Activate(active);
 				return true;
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER)
@@ -158,27 +385,24 @@ namespace kcd2mp::kcse
 				return false;
 			}
 #else
-			reinterpret_cast<CEntity *>(entity)->EnablePhysics(
-			    (flags & entity_flag_calc_physics) != 0);
 			entity->Hide(hidden);
-			entity->Activate(active);
 			return true;
 #endif
 		}
 
-		bool guarded_entity_reactivated(Offsets::IEntity *entity) noexcept
+		bool guarded_entity_visible(Offsets::IEntity *entity) noexcept
 		{
 #ifdef _WIN32
 			__try
 			{
-				return entity->IsActive() || !entity->IsHidden();
+				return !entity->IsHidden();
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER)
 			{
 				return false;
 			}
 #else
-			return entity->IsActive() || !entity->IsHidden();
+			return !entity->IsHidden();
 #endif
 		}
 
@@ -316,11 +540,9 @@ namespace kcd2mp::kcse
 
 	void native_entity_backend::isolation_sink::OnEvent(
 	    Offsets::IEntity *entity,
-	    void *)
+	    void *event)
 	{
-		// This sink subscribes only to ENTITY_EVENT_INIT. Pooled and streamed
-		// actors can reach this path without a new OnSpawn callback.
-		m_owner->queue_entity_for_isolation(entity, true, false);
+		m_owner->entity_event(entity, event);
 	}
 
 	void native_entity_backend::isolation_sink::GetMemoryUsage(void *) const
@@ -624,8 +846,6 @@ namespace kcd2mp::kcse
 					{
 						(void)guarded_restore_entity(
 						    entity,
-						    it->second.flags,
-						    it->second.active,
 						    it->second.hidden);
 					}
 				}
@@ -653,14 +873,52 @@ namespace kcd2mp::kcse
 
 	void native_entity_backend::process_pending_isolation()
 	{
-		if (!m_isolation_active || m_player_spawn_depth != 0)
-		{
-			return;
-		}
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
 		auto *system = environment ? environment->pEntitySystem : nullptr;
 		if (!system)
 			return;
+		if (!m_deferred_world_states.empty())
+		{
+			std::vector<protocol::WorldObjectState> ready;
+			for (const auto &[guid, state] : m_deferred_world_states)
+			{
+				if (system->FindEntityByGuid(guid) != 0)
+					ready.push_back(state);
+			}
+			for (const auto &state : ready)
+			{
+				std::string ignored;
+				if (apply_world_object_state(state, ignored))
+					m_deferred_world_states.erase(state.entity_guid());
+			}
+		}
+		if (++m_world_poll_frame % world_inventory_poll_interval_frames == 0)
+		{
+			for (const auto guid : m_open_world_containers)
+			{
+				const auto id = system->FindEntityByGuid(guid);
+				if (auto *entity = id ? system->GetEntity(id) : nullptr)
+				{
+					if (auto state = capture_world_object(entity))
+					{
+						state->set_revision(0);
+						const auto previous =
+						    m_last_world_observations.find(guid);
+						if (previous == m_last_world_observations.end()
+						    || previous->second.SerializeAsString()
+						        != state->SerializeAsString())
+						{
+							m_last_world_observations.insert_or_assign(
+							    guid, *state);
+							m_world_updates.push_back(std::move(*state));
+						}
+					}
+				}
+			}
+		}
+		if (!m_isolation_active || m_player_spawn_depth != 0)
+			return;
+		refresh_local_player_exclusion(*system);
 		++m_isolation_maintenance_frame;
 		if (m_isolation_maintenance_frame
 		        % isolation_maintenance_interval_frames
@@ -717,8 +975,237 @@ namespace kcd2mp::kcse
 		}
 	}
 
+	bool native_entity_backend::begin_world_sync(std::string &error)
+	{
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		auto *system = environment ? environment->pEntitySystem : nullptr;
+		if (!system)
+		{
+			error = "world interaction sync requires the entity system";
+			return false;
+		}
+		ensure_sink_registered(*system);
+		reset_world_sync();
+		error.clear();
+		return true;
+	}
+
+	std::vector<protocol::WorldObjectState>
+	native_entity_backend::poll_world_object_updates()
+	{
+		std::vector<protocol::WorldObjectState> result;
+		result.reserve(m_world_updates.size());
+		while (!m_world_updates.empty())
+		{
+			result.push_back(std::move(m_world_updates.front()));
+			m_world_updates.pop_front();
+		}
+		return result;
+	}
+
+	std::optional<protocol::WorldObjectState>
+	native_entity_backend::capture_world_object(Offsets::IEntity *entity) const
+	{
+		const auto inspected = inspect_world_entity(entity);
+		if (!inspected)
+			return std::nullopt;
+		protocol::WorldObjectState state;
+		state.set_entity_guid(entity->GetGuid());
+		state.set_kind(inspected->kind);
+		state.set_opened(inspected->opened);
+		state.set_revision(0);
+		if (inspected->kind == protocol::WORLD_OBJECT_KIND_CONTAINER)
+		{
+			auto *manager = wh::entitymodule::C_InventoryManager::GetInstance();
+			const wh::framework::WUID wuid{inspected->inventory_wuid};
+			auto *inventory = manager ? manager->LookupByWUID(wuid) : nullptr;
+			if (!inventory)
+				return std::nullopt;
+			state.set_has_inventory(true);
+			for (const auto *item : inventory->m_items)
+			{
+				if (!item || !item->m_pClassData || item->m_amount <= 0)
+					continue;
+				*state.add_inventory() = wire_item(*item);
+			}
+			std::ranges::sort(
+			    *state.mutable_inventory(),
+			    {},
+			    &protocol::InventoryItem::instance_id);
+		}
+		return is_valid_world_object_state(state, false)
+		    ? std::optional{std::move(state)}
+		    : std::nullopt;
+	}
+
+	bool native_entity_backend::apply_world_inventory(
+	    Offsets::IEntity *entity,
+	    const protocol::WorldObjectState &state,
+	    std::string &error) const
+	{
+		if (!state.has_inventory())
+			return true;
+		const auto inspected = inspect_world_entity(entity);
+		auto *manager = wh::entitymodule::C_InventoryManager::GetInstance();
+		const wh::framework::WUID wuid{
+		    inspected ? inspected->inventory_wuid : 0};
+		auto *inventory = manager && inspected
+		    ? manager->LookupByWUID(wuid)
+		    : nullptr;
+		if (!inventory)
+		{
+			error = "native container inventory is unavailable";
+			return false;
+		}
+		std::unordered_map<std::string, const protocol::InventoryItem *> desired;
+		for (const auto &item : state.inventory())
+			desired.emplace(item.instance_id(), &item);
+		const auto existing = inventory->m_items;
+		for (auto *item : existing)
+		{
+			if (!item)
+				continue;
+			if (!desired.contains(wh::FormatGuid(item->m_instanceGuid)))
+			{
+				inventory->RemoveItem(
+				    item,
+				    2,
+				    static_cast<std::uint32_t>(item->m_amount));
+			}
+		}
+		for (const auto &[instance_id, wire] : desired)
+		{
+			auto found = std::ranges::find_if(
+			    inventory->m_items,
+			    [&](const wh::entitymodule::C_Item *item)
+			    {
+				    return item
+				        && wh::FormatGuid(item->m_instanceGuid) == instance_id;
+			    });
+			wh::entitymodule::C_Item *native = found == inventory->m_items.end()
+			    ? nullptr
+			    : *found;
+			if (native
+			    && (!native->m_pClassData
+			        || wh::FormatGuid(native->m_pClassData->m_guid)
+			            != wire->definition_id()))
+			{
+				error = "native container item definition does not match its instance";
+				return false;
+			}
+			if (!native)
+			{
+				CryGUID definition{};
+				CryGUID instance{};
+				if (!wh::ParseGuid(wire->definition_id().c_str(), definition)
+				    || !wh::ParseGuid(instance_id.c_str(), instance))
+				{
+					error = "container item UUID could not be parsed";
+					return false;
+				}
+				native = inventory->CreateItem(
+				    definition,
+				    wire->condition(),
+				    wire->count());
+				if (!native)
+				{
+					error = "native container item creation failed";
+					return false;
+				}
+				native->SetInstanceGuid(instance);
+			}
+			else if (native->m_amount != static_cast<std::int32_t>(wire->count())
+			    && !inventory->ChangeItemAmount(
+			        native,
+			        static_cast<std::int32_t>(wire->count()) - native->m_amount))
+			{
+				error = "native container stack update failed";
+				return false;
+			}
+			if (!native->SetCondition(wire->condition()))
+			{
+				error = "native container condition update failed";
+				return false;
+			}
+			if (native->IsOfType(wh::entitymodule::E_ItemType::Equippable)
+			    && !native->SetQuality(
+			        static_cast<std::int32_t>(wire->quality())))
+			{
+				error = "native container quality update failed";
+				return false;
+			}
+		}
+		error.clear();
+		return true;
+	}
+
+	bool native_entity_backend::apply_world_object_state(
+	    const protocol::WorldObjectState &state,
+	    std::string &error)
+	{
+		if (!is_valid_world_object_state(state))
+		{
+			error = "authoritative world object state is invalid";
+			return false;
+		}
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		auto *system = environment ? environment->pEntitySystem : nullptr;
+		const auto id = system ? system->FindEntityByGuid(state.entity_guid()) : 0;
+		auto *entity = id && system ? system->GetEntity(id) : nullptr;
+		if (!entity)
+		{
+			// Retain the authoritative revision separately so a streamed-in
+			// object's stale local state cannot be reported back first.
+			m_deferred_world_states.insert_or_assign(
+			    state.entity_guid(), state);
+			error.clear();
+			return true;
+		}
+		m_deferred_world_states.erase(state.entity_guid());
+		m_applying_world_state = true;
+		const auto script = std::format(
+		    "local e=System.GetEntity({}) if e then "
+		    "if e.Unlock~=nil then e:Unlock() end "
+		    "if {} then if e.Event_Open~=nil then e:Event_Open() end "
+		    "else if e.Event_Close~=nil then e:Event_Close() end end end",
+		    id,
+		    state.opened() ? "true" : "false");
+		const bool script_applied = execute_script(script);
+		const bool inventory_applied =
+		    apply_world_inventory(entity, state, error);
+		m_applying_world_state = false;
+		if (!script_applied || !inventory_applied)
+		{
+			if (error.empty())
+				error = "native door/container script update failed";
+			return false;
+		}
+		auto local = state;
+		local.set_revision(0);
+		m_last_world_observations.insert_or_assign(
+		    state.entity_guid(), std::move(local));
+		if (state.kind() == protocol::WORLD_OBJECT_KIND_CONTAINER
+		    && state.opened())
+			m_open_world_containers.insert(state.entity_guid());
+		else
+			m_open_world_containers.erase(state.entity_guid());
+		error.clear();
+		return true;
+	}
+
+	void native_entity_backend::reset_world_sync()
+	{
+		m_applying_world_state = false;
+		m_world_poll_frame = 0;
+		m_open_world_containers.clear();
+		m_last_world_observations.clear();
+		m_deferred_world_states.clear();
+		m_world_updates.clear();
+	}
+
 	void native_entity_backend::restore_world()
 	{
+		reset_world_sync();
 		m_isolation_active = false;
 		m_local_player_entity_id = 0;
 		m_human_npcs_disabled = false;
@@ -736,8 +1223,6 @@ namespace kcd2mp::kcse
 				{
 					(void)guarded_restore_entity(
 					    entity,
-					    state.flags,
-					    state.active,
 					    state.hidden);
 				}
 			}
@@ -817,15 +1302,55 @@ namespace kcd2mp::kcse
 		iterator->Release();
 	}
 
+	void native_entity_backend::refresh_local_player_exclusion(
+	    Offsets::IEntitySystem &system)
+	{
+		auto *framework = CCryAction::GetInstance();
+		auto *entity = framework ? framework->GetClientEntity() : nullptr;
+		if (!entity)
+			return;
+		const auto current_id = entity->GetId();
+		if (current_id == 0)
+			return;
+		m_local_player_entity_id = current_id;
+		m_pending_isolation.erase(current_id);
+		const auto isolated = m_isolated.find(current_id);
+		if (isolated == m_isolated.end())
+			return;
+		if (auto *current = system.GetEntity(current_id))
+		{
+			(void)guarded_restore_entity(
+			    current,
+			    isolated->second.hidden);
+		}
+		m_isolated.erase(isolated);
+	}
+
 	void native_entity_backend::maintain_isolated_entities(
 	    Offsets::IEntitySystem &system)
 	{
-		for (const auto &[id, state] : m_isolated)
+		for (auto iterator = m_isolated.begin();
+		     iterator != m_isolated.end();)
 		{
-			(void)state;
+			const auto id = iterator->first;
+			const auto state = iterator->second;
 			auto *entity = system.GetEntity(id);
-			if (entity && guarded_entity_reactivated(entity))
+			if (id == m_local_player_entity_id
+			    || m_player_entities.contains(id)
+			    || !should_isolate_actor(entity))
+			{
+				if (entity)
+				{
+					(void)guarded_restore_entity(
+					    entity,
+					    state.hidden);
+				}
+				iterator = m_isolated.erase(iterator);
+				continue;
+			}
+			if (entity && guarded_entity_visible(entity))
 				(void)guarded_apply_entity_isolation(entity);
+			++iterator;
 		}
 	}
 
@@ -839,11 +1364,12 @@ namespace kcd2mp::kcse
 		m_sink_system = &system;
 		constexpr std::uint32_t spawn_remove_reuse_subscriptions =
 		    (1U << 1) | (1U << 2) | (1U << 3);
-		constexpr std::uint64_t entity_init_event_subscription = 1ULL << 3;
+		constexpr std::uint64_t entity_event_subscriptions =
+		    (1ULL << entity_event_init) | (1ULL << entity_event_script);
 		system.AddSink(
 		    &m_sink,
 		    spawn_remove_reuse_subscriptions,
-		    entity_init_event_subscription);
+		    entity_event_subscriptions);
 	}
 
 	void native_entity_backend::ensure_game_object_sink_registered(
@@ -873,22 +1399,16 @@ namespace kcd2mp::kcse
 		if (!m_isolation_active || !entity || m_player_spawn_depth != 0)
 			return false;
 		const auto id = entity->GetId();
-		const auto original_flags = entity->GetFlags();
 		if (id == m_local_player_entity_id
 		    || m_player_entities.contains(id)
 		    || m_isolated.contains(id)
-		    || !should_isolate_actor(id))
+		    || !should_isolate_actor(entity))
 			return false;
-		const entity_state state{
-		    original_flags,
-		    entity->IsActive(),
-		    entity->IsHidden()};
+		const entity_state state{entity->IsHidden()};
 		if (!guarded_apply_entity_isolation(entity))
 		{
 			(void)guarded_restore_entity(
 			    entity,
-			    state.flags,
-			    state.active,
 			    state.hidden);
 			return false;
 		}
@@ -897,15 +1417,48 @@ namespace kcd2mp::kcse
 	}
 
 	bool native_entity_backend::should_isolate_actor(
-	    std::uint32_t entity_id) const
+	    Offsets::IEntity *entity) const
 	{
+		if (!entity)
+			return false;
+		const auto entity_id = entity->GetId();
 		auto *context = wh::game::S_GameContext::GetInstance();
 		auto *actor = context ? context->GetActorById(entity_id) : nullptr;
 		if (!actor)
 			return false;
+		// The actor-map entry must own this exact entity. This rejects stale or
+		// reused ids before any runtime-type or AI probe is trusted.
+		if (guarded_actor_owns_entity(actor, entity)
+		    != actor_type_match::yes)
+		{
+			return false;
+		}
+		auto *framework = CCryAction::GetInstance();
+		auto *client_actor = framework ? framework->GetClientActor() : nullptr;
+		if (client_actor
+		    && static_cast<void *>(client_actor)
+		        == static_cast<void *>(actor))
+		{
+			return false;
+		}
+		const auto player = guarded_actor_is_player(actor);
+		if (player != actor_type_match::no)
+		{
+			// A positive result protects every engine-recognized player. A failed
+			// player probe also stays active: NPC isolation must never risk
+			// disabling input, combat, inventory, camera, or player controllers.
+			return false;
+		}
 		const auto human = guarded_actor_type_matches(actor, true);
 		if (human == actor_type_match::yes)
-			return m_human_npcs_disabled;
+		{
+			// C_Human is also the base of C_Player and potentially other human
+			// gameplay actors. A real NPC must additionally own an AI object;
+			// animation, combat and other system actors do not.
+			return m_human_npcs_disabled
+			    && guarded_entity_has_ai(entity)
+			        == actor_type_match::yes;
+		}
 		if (human == actor_type_match::failed)
 			return false;
 
@@ -921,6 +1474,62 @@ namespace kcd2mp::kcse
 		return false;
 	}
 
+	void native_entity_backend::entity_event(
+	    Offsets::IEntity *entity,
+	    void *raw_event)
+	{
+		if (!entity || !raw_event)
+			return;
+		const auto *event = static_cast<const native_entity_event *>(raw_event);
+		const auto deferred = m_deferred_world_states.find(entity->GetGuid());
+		if (deferred != m_deferred_world_states.end()
+		    && (event->event == entity_event_init
+		        || event->event == entity_event_script))
+		{
+			const auto authoritative = deferred->second;
+			std::string ignored;
+			if (apply_world_object_state(authoritative, ignored))
+				m_deferred_world_states.erase(authoritative.entity_guid());
+			if (event->event == entity_event_script)
+				return;
+		}
+		if (event->event == entity_event_init)
+		{
+			queue_entity_for_isolation(entity, true, false);
+			return;
+		}
+		if (event->event != entity_event_script || m_applying_world_state
+		    || event->parameters[0] == 0)
+		{
+			return;
+		}
+		const auto script_event = guarded_world_script_event(
+		    reinterpret_cast<const char *>(event->parameters[0]));
+		if (script_event == world_script_event::none)
+			return;
+		auto state = capture_world_object(entity);
+		if (!state)
+			return;
+		state->set_opened(script_event == world_script_event::open);
+		state->set_revision(0);
+		const auto guid = state->entity_guid();
+		if (state->kind() == protocol::WORLD_OBJECT_KIND_CONTAINER)
+		{
+			if (state->opened())
+				m_open_world_containers.insert(guid);
+			else
+				m_open_world_containers.erase(guid);
+		}
+		const auto previous = m_last_world_observations.find(guid);
+		if (previous != m_last_world_observations.end()
+		    && previous->second.SerializeAsString() == state->SerializeAsString())
+		{
+			return;
+		}
+		m_last_world_observations.insert_or_assign(guid, *state);
+		m_world_updates.push_back(std::move(*state));
+	}
+
 	void native_entity_backend::entity_removed(Offsets::IEntity *entity)
 	{
 		if (!entity)
@@ -929,5 +1538,7 @@ namespace kcd2mp::kcse
 		m_isolated.erase(id);
 		m_player_entities.erase(id);
 		m_pending_isolation.erase(id);
+		const auto guid = entity->GetGuid();
+		m_open_world_containers.erase(guid);
 	}
 }

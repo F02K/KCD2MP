@@ -230,8 +230,16 @@ namespace big
 			    "Display Name",
 			    std::string{"Henry"},
 			    "Last multiplayer display name.");
+			static auto* saved_diagnostic_logging = config::general().bind(
+			    "Multiplayer",
+			    "Diagnostic Logging",
+			    false,
+			    "Write verbose KCD2MP join and performance diagnostics.");
 			static std::string address = saved_address->get_value();
 			static std::string display_name = saved_name->get_value();
+			bool diagnostic_logging =
+			    saved_diagnostic_logging->get_value();
+			client.set_diagnostic_logging(diagnostic_logging);
 			static std::string password;
 			static std::string claim_code;
 			static std::string chat_text;
@@ -291,6 +299,19 @@ namespace big
 				    ImVec4(1.0F, 0.35F, 0.25F, 1.0F),
 				    "%s",
 				    status.error.c_str());
+			}
+			if (ImGui::Checkbox(
+			        "Diagnostic logging",
+			        &diagnostic_logging))
+			{
+				saved_diagnostic_logging->set_value(diagnostic_logging);
+				client.set_diagnostic_logging(diagnostic_logging);
+			}
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip(
+				    "Writes verbose join and performance data to "
+				    "KCD2MP-join.log. Native crash records remain enabled.");
 			}
 
 			ImGui::BeginDisabled(!disconnected);

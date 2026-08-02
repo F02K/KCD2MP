@@ -103,6 +103,12 @@ namespace kcd2mp::kcse
 		return api && api->select_avatar(archetype_id.c_str()) != 0;
 	}
 
+	void ui_client_proxy::set_diagnostic_logging(bool enabled) const
+	{
+		if (const auto *api = load())
+			api->set_diagnostic_logging(enabled ? 1U : 0U);
+	}
+
 	client_status ui_client_proxy::status() const
 	{
 		client_status_view value;

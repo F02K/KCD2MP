@@ -13,6 +13,7 @@ namespace kcd2mp::kcse::join_trace
 	namespace
 	{
 		std::atomic_bool g_active{};
+		std::atomic_bool g_diagnostics_enabled{};
 		std::atomic_uint64_t g_session{};
 		std::mutex g_write_mutex;
 		HANDLE g_trace_file{INVALID_HANDLE_VALUE};
@@ -136,6 +137,43 @@ namespace kcd2mp::kcse::join_trace
 				// Diagnostics must never become a second crash source.
 			}
 		}
+
+		void write_line(
+		    std::string_view event,
+		    std::string_view detail,
+		    std::source_location location) noexcept
+		{
+			try
+			{
+				SYSTEMTIME time{};
+				GetLocalTime(&time);
+				const auto line = std::format(
+				    "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] "
+				    "[join={}] [pid={}] [tid={} role={}] [{}:{} {}] {}{}{}\r\n",
+				    time.wYear,
+				    time.wMonth,
+				    time.wDay,
+				    time.wHour,
+				    time.wMinute,
+				    time.wSecond,
+				    time.wMilliseconds,
+				    g_session.load(std::memory_order_acquire),
+				    GetCurrentProcessId(),
+				    GetCurrentThreadId(),
+				    thread_role_name(g_thread_role),
+				    filename(location.file_name()),
+				    location.line(),
+				    location.function_name(),
+				    event,
+				    detail.empty() ? "" : " | ",
+				    detail);
+				append(line);
+			}
+			catch (...)
+			{
+				// Diagnostics must never become a second crash source.
+			}
+		}
 	}
 
 	void set_thread_role(thread_role role) noexcept
@@ -190,9 +228,12 @@ namespace kcd2mp::kcse::join_trace
 	{
 		if (!active())
 			return;
-		write("join.finish", outcome, location);
+		const auto enabled = diagnostics_enabled();
+		if (enabled)
+			write("join.finish", outcome, location);
 		g_active.store(false, std::memory_order_release);
-		flush(true);
+		if (enabled)
+			flush(true);
 	}
 
 	bool active() noexcept
@@ -205,43 +246,37 @@ namespace kcd2mp::kcse::join_trace
 		return g_session.load(std::memory_order_acquire);
 	}
 
+	void set_diagnostics_enabled(bool enabled) noexcept
+	{
+		const auto was_enabled =
+		    g_diagnostics_enabled.exchange(enabled, std::memory_order_acq_rel);
+		if (was_enabled && !enabled)
+			flush(false);
+	}
+
+	bool diagnostics_enabled() noexcept
+	{
+		return g_diagnostics_enabled.load(std::memory_order_acquire);
+	}
+
 	void write(
 	    std::string_view event,
 	    std::string_view detail,
 	    std::source_location location) noexcept
 	{
-		if (!active())
+		if (!active() || !diagnostics_enabled())
 			return;
-		try
-		{
-			SYSTEMTIME time{};
-			GetLocalTime(&time);
-			const auto line = std::format(
-			    "[{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03}] "
-			    "[join={}] [pid={}] [tid={} role={}] [{}:{} {}] {}{}{}\r\n",
-			    time.wYear,
-			    time.wMonth,
-			    time.wDay,
-			    time.wHour,
-			    time.wMinute,
-			    time.wSecond,
-			    time.wMilliseconds,
-			    session_id(),
-			    GetCurrentProcessId(),
-			    GetCurrentThreadId(),
-			    thread_role_name(current_thread_role()),
-			    filename(location.file_name()),
-			    location.line(),
-			    location.function_name(),
-			    event,
-			    detail.empty() ? "" : " | ",
-			    detail);
-			append(line);
-		}
-		catch (...)
-		{
-			// Diagnostics must never become a second crash source.
-		}
+		write_line(event, detail, location);
+	}
+
+	void write_diagnostic(
+	    std::string_view event,
+	    std::string_view detail,
+	    std::source_location location) noexcept
+	{
+		if (!diagnostics_enabled())
+			return;
+		write_line(event, detail, location);
 	}
 
 #ifdef _WIN32
@@ -253,7 +288,10 @@ namespace kcd2mp::kcse::join_trace
 		try
 		{
 			const auto *record = exception ? exception->ExceptionRecord : nullptr;
-			write(
+			// Native crashes remain available even when verbose diagnostics are
+			// disabled. This path is exceptional and must not depend on a UI or
+			// persisted setting being initialized.
+			write_line(
 			    event,
 			    std::format(
 			        "SEH code=0x{:08X} address={} flags=0x{:08X}",

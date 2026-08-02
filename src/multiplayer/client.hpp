@@ -77,6 +77,12 @@ namespace kcd2mp
 		std::string avatar_archetype_id;
 	};
 
+	struct client_update_rates
+	{
+		std::uint32_t tick_rate{30};
+		std::uint32_t snapshot_rate{20};
+	};
+
 	class multiplayer_client
 	{
 	public:
@@ -102,6 +108,7 @@ namespace kcd2mp
 		        std::chrono::steady_clock::now());
 
 		[[nodiscard]] client_status status() const;
+		[[nodiscard]] client_update_rates update_rates() const;
 		[[nodiscard]] std::vector<remote_player_view> remote_players() const;
 		[[nodiscard]] std::vector<chat_entry> chat_history() const;
 		[[nodiscard]] std::optional<protocol::TransformState> take_local_correction();
@@ -140,6 +147,10 @@ namespace kcd2mp
 		{
 			protocol::ClientAvatarUpdate message;
 		};
+		struct world_object_command
+		{
+			protocol::ClientWorldObjectUpdate message;
+		};
 		using network_command = std::variant<
 		    connect_command,
 		    disconnect_command,
@@ -148,7 +159,8 @@ namespace kcd2mp
 		    world_ready_command,
 		    world_failed_command,
 		    profile_command,
-		    avatar_command>;
+		    avatar_command,
+		    world_object_command>;
 
 		struct timed_transform
 		{
@@ -163,6 +175,8 @@ namespace kcd2mp
 			std::string display_name;
 			std::deque<timed_transform> history;
 			remote_player_view rendered;
+			bool has_transform_sequence{};
+			std::uint64_t last_transform_sequence{};
 		};
 
 		void network_loop(std::stop_token stop);
@@ -171,6 +185,8 @@ namespace kcd2mp
 		void set_state(client_state state, std::string error = {});
 		void queue_network(network_command command);
 		void queue_profile_snapshot(protocol::PlayerProfile profile);
+		void queue_world_object_updates(
+		    std::vector<protocol::WorldObjectState> updates);
 		void handle_game_envelope(
 		    const protocol::Envelope &envelope,
 		    std::chrono::steady_clock::time_point now);
@@ -189,6 +205,7 @@ namespace kcd2mp
 
 		mutable std::mutex m_state_mutex;
 		client_status m_status;
+		client_update_rates m_update_rates;
 		std::string m_resume_token;
 		std::string m_server_id;
 		identity_store m_identities;
@@ -205,6 +222,12 @@ namespace kcd2mp
 		std::optional<protocol::ServerBootstrap> m_pending_bootstrap;
 		std::optional<client_options> m_pending_connect;
 		bool m_profile_update_pending{};
+		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
+		    m_world_objects;
+		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
+		    m_pending_world_objects;
+		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
+		    m_deferred_world_objects;
 		std::uint32_t m_profile_snapshot_interval_seconds{15};
 
 		mutable std::mutex m_network_mutex;

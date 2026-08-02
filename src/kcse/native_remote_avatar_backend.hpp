@@ -56,7 +56,18 @@ namespace kcd2mp::kcse
 			std::uint64_t shared_soul_applied_frame{};
 			std::chrono::steady_clock::time_point
 			    shared_soul_applied_at{};
+			bool lifecycle_ready{};
 			bool appearance_applied{};
+			bool transform_applied{};
+			protocol::TransformState last_transform;
+			bool motion_applied{};
+			protocol::MovementMode last_movement_mode{
+			    protocol::MOVEMENT_MODE_IDLE};
+			protocol::Vec3 last_motion_velocity;
+			std::chrono::steady_clock::time_point
+			    last_motion_request_at{};
+			std::chrono::steady_clock::time_point
+			    last_native_validation_at{};
 			bool first_transform_logged{};
 			bool first_motion_logged{};
 			bool first_weapon_action_logged{};
@@ -68,6 +79,8 @@ namespace kcd2mp::kcse
 
 		[[nodiscard]] entry *find(remote_avatar_handle avatar);
 		[[nodiscard]] const entry *find(remote_avatar_handle avatar) const;
+		[[nodiscard]] remote_avatar_backend_status status_impl(
+		    remote_avatar_handle avatar) const;
 		[[nodiscard]] bool apply_appearance(
 		    entry &avatar,
 		    const protocol::AvatarDescriptor &appearance,
@@ -88,6 +101,7 @@ namespace kcd2mp::kcse
 		std::uint64_t m_frame_sequence{};
 		std::uint64_t m_epoch{1};
 		remote_avatar_handle m_next_handle{1};
+		mutable bool m_catalogs_ready{};
 		mutable std::string m_diagnostic;
 	};
 }

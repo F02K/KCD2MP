@@ -208,6 +208,7 @@ namespace kcd2mp::server
 		std::filesystem::create_directories(m_profiles_directory);
 		load_or_create(config);
 		load_profiles();
+		load_world_objects();
 	}
 
 	const session_manifest &world_store::manifest() const
@@ -218,6 +219,12 @@ namespace kcd2mp::server
 	std::vector<persisted_profile> world_store::profiles() const
 	{
 		return m_profiles;
+	}
+
+	const std::vector<protocol::WorldObjectState> &
+	world_store::world_objects() const
+	{
+		return m_world_objects;
 	}
 
 	std::optional<persisted_profile> world_store::find_by_token(
@@ -294,6 +301,25 @@ namespace kcd2mp::server
 			iterator->profile = profile;
 		}
 		write_profile(*iterator);
+	}
+
+	void world_store::save_world_objects(
+	    std::span<const protocol::WorldObjectState> objects)
+	{
+		protocol::StoredWorldObjects stored;
+		m_world_objects.assign(objects.begin(), objects.end());
+		for (const auto &object : m_world_objects)
+		{
+			if (!is_valid_world_object_state(object))
+				throw std::invalid_argument("persistent world object is invalid");
+			*stored.add_objects() = object;
+		}
+		std::string bytes;
+		if (!stored.SerializeToString(&bytes))
+			throw std::runtime_error("could not serialize persistent world objects");
+		atomic_replace(
+		    m_root / "world_objects.pb",
+		    {reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()});
 	}
 
 	void world_store::load_or_create(const server_config &config)
@@ -407,6 +433,29 @@ namespace kcd2mp::server
 			    reinterpret_cast<char *>(profile.identity_hash.data()));
 			profile.profile = std::move(*stored.mutable_profile());
 			m_profiles.push_back(std::move(profile));
+		}
+	}
+
+	void world_store::load_world_objects()
+	{
+		const auto path = m_root / "world_objects.pb";
+		if (!std::filesystem::exists(path))
+			return;
+		std::ifstream input(path, std::ios::binary);
+		const std::string bytes{
+		    std::istreambuf_iterator<char>(input),
+		    std::istreambuf_iterator<char>()};
+		protocol::StoredWorldObjects stored;
+		if ((!input && !input.eof()) || !stored.ParseFromString(bytes)
+		    || stored.objects_size() > static_cast<int>(max_world_objects))
+		{
+			throw std::runtime_error("invalid persistent world object state");
+		}
+		for (auto &object : *stored.mutable_objects())
+		{
+			if (!is_valid_world_object_state(object))
+				throw std::runtime_error("invalid persistent world object entry");
+			m_world_objects.push_back(std::move(object));
 		}
 	}
 

@@ -31,8 +31,14 @@ namespace kcd2mp::kcse::join_trace
 	    std::source_location location = std::source_location::current()) noexcept;
 	[[nodiscard]] bool active() noexcept;
 	[[nodiscard]] std::uint64_t session_id() noexcept;
+	void set_diagnostics_enabled(bool enabled) noexcept;
+	[[nodiscard]] bool diagnostics_enabled() noexcept;
 
 	void write(
+	    std::string_view event,
+	    std::string_view detail = {},
+	    std::source_location location = std::source_location::current()) noexcept;
+	void write_diagnostic(
 	    std::string_view event,
 	    std::string_view detail = {},
 	    std::source_location location = std::source_location::current()) noexcept;
@@ -48,7 +54,8 @@ namespace kcd2mp::kcse::join_trace
 #define KCD2MP_JOIN_TRACE(event, detail)                                     \
 	do                                                                       \
 	{                                                                        \
-		if (::kcd2mp::kcse::join_trace::active())                              \
+		if (::kcd2mp::kcse::join_trace::active()                              \
+		    && ::kcd2mp::kcse::join_trace::diagnostics_enabled())             \
 		{                                                                      \
 			::kcd2mp::kcse::join_trace::write(                                  \
 			    (event),                                                        \

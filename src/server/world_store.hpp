@@ -49,6 +49,8 @@ namespace kcd2mp::server
 
 		[[nodiscard]] const session_manifest &manifest() const;
 		[[nodiscard]] std::vector<persisted_profile> profiles() const;
+		[[nodiscard]] const std::vector<protocol::WorldObjectState> &
+		world_objects() const;
 		[[nodiscard]] std::optional<persisted_profile> find_by_token(
 		    std::string_view token) const;
 		[[nodiscard]] std::optional<persisted_profile> find_by_player_id(
@@ -59,10 +61,13 @@ namespace kcd2mp::server
 		void save_profile(
 		    const token_hash &identity_hash,
 		    const protocol::PlayerProfile &profile);
+		void save_world_objects(
+		    std::span<const protocol::WorldObjectState> objects);
 
 	private:
 		void load_or_create(const server_config &config);
 		void load_profiles();
+		void load_world_objects();
 		void write_manifest() const;
 		void write_profile(const persisted_profile &profile) const;
 
@@ -70,5 +75,6 @@ namespace kcd2mp::server
 		std::filesystem::path m_profiles_directory;
 		session_manifest m_manifest;
 		std::vector<persisted_profile> m_profiles;
+		std::vector<protocol::WorldObjectState> m_world_objects;
 	};
 }

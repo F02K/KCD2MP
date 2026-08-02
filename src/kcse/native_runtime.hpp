@@ -41,6 +41,12 @@ namespace kcd2mp::kcse
 		[[nodiscard]] bool set_npc_entities_disabled(
 		    bool humans_disabled,
 		    bool animals_disabled) override;
+		[[nodiscard]] std::vector<protocol::WorldObjectState>
+		poll_world_object_updates() override;
+		[[nodiscard]] bool apply_world_object_state(
+		    const protocol::WorldObjectState &state) override;
+		[[nodiscard]] bool apply_authoritative_profile(
+		    const protocol::PlayerProfile &profile) override;
 
 		[[nodiscard]] std::optional<protocol::TransformState>
 		local_transform() const;

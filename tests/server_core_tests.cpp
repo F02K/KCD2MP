@@ -237,10 +237,11 @@ namespace
 	    connection_id connection,
 	    time_point now,
 	    player_id expected_id,
-	    protocol::PlayerProfile *enrolled_profile = nullptr)
+	    protocol::PlayerProfile *enrolled_profile = nullptr,
+	    std::string name = "Henry")
 	{
 		core.on_transport_connected(connection, now);
-		core.on_message(connection, hello(), now);
+		core.on_message(connection, hello(std::move(name)), now);
 		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
 		assert(outbound.front().envelope.has_server_challenge());
@@ -740,6 +741,184 @@ int main()
 		           config.allowed_avatar_archetypes,
 		           npc::default_soul_id)
 		    != config.allowed_avatar_archetypes.end());
+	}
+
+	temporary_world world_sync_world;
+	std::string world_identity_token;
+	{
+		server_core core(config_for(world_sync_world.path));
+		protocol::PlayerProfile first_profile;
+		protocol::PlayerProfile second_profile;
+		world_identity_token = connect_new_player(
+		    core,
+		    50,
+		    start,
+		    1,
+		    &first_profile);
+		(void)connect_new_player(
+		    core,
+		    51,
+		    start + 4ms,
+		    2,
+		    &second_profile,
+		    "Hans");
+
+		protocol::Envelope observed_container;
+		auto *container_update =
+		    observed_container.mutable_client_world_object_update();
+		container_update->set_base_revision(0);
+		auto *container = container_update->mutable_state();
+		container->set_entity_guid(0x12345678ULL);
+		container->set_kind(protocol::WORLD_OBJECT_KIND_CONTAINER);
+		container->set_revision(0);
+		container->set_opened(true);
+		container->set_has_inventory(true);
+		auto *loot = container->add_inventory();
+		loot->set_instance_id(
+		    "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+		loot->set_definition_id(
+		    "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+		loot->set_count(1);
+		loot->set_quality(100.0F);
+		loot->set_condition(1.0F);
+		core.on_message(50, observed_container, start + 8ms);
+		auto outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 50
+			        && message.envelope.has_world_object_accepted()
+			        && message.envelope.world_object_accepted().revision() == 1;
+		    }));
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 51
+			        && message.envelope.has_world_object_updated()
+			        && message.envelope.world_object_updated()
+			               .state()
+			               .inventory_size()
+			            == 1;
+		    }));
+
+		protocol::Envelope first_loot_update;
+		auto *first_profile_update =
+		    first_loot_update.mutable_client_profile_update();
+		first_profile_update->set_base_revision(first_profile.revision());
+		*first_profile_update->mutable_profile() = first_profile;
+		*first_profile_update->mutable_profile()->add_inventory() = *loot;
+		core.on_message(50, first_loot_update, start + 9ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 50
+			        && message.envelope.has_profile_accepted()
+			        && message.envelope.profile_accepted().revision() == 2;
+		    }));
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.envelope.has_world_object_updated()
+			        && message.envelope.world_object_updated().state().revision()
+			            == 2
+			        && message.envelope.world_object_updated()
+			               .state()
+			               .inventory_size()
+			            == 0;
+		    }));
+
+		protocol::Envelope duplicate_loot_update;
+		auto *second_profile_update =
+		    duplicate_loot_update.mutable_client_profile_update();
+		second_profile_update->set_base_revision(second_profile.revision());
+		*second_profile_update->mutable_profile() = second_profile;
+		*second_profile_update->mutable_profile()->add_inventory() = *loot;
+		core.on_message(51, duplicate_loot_update, start + 10ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_rejected());
+		assert(outbound.front().close_after_send == close_kind::none);
+		assert(outbound.front()
+		           .envelope.profile_rejected()
+		           .authoritative_profile()
+		           .revision()
+		    == second_profile.revision());
+
+		auto stale_container = observed_container;
+		stale_container.mutable_client_world_object_update()
+		    ->set_base_revision(1);
+		stale_container.mutable_client_world_object_update()
+		    ->mutable_state()
+		    ->set_revision(1);
+		stale_container.mutable_client_world_object_update()
+		    ->mutable_state()
+		    ->set_opened(false);
+		core.on_message(51, stale_container, start + 11ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_world_object_rejected());
+		const auto &authoritative = outbound.front()
+		                                .envelope.world_object_rejected()
+		                                .authoritative_state();
+		assert(authoritative.revision() == 2);
+		assert(authoritative.inventory_size() == 0);
+
+		auto reintroduced_loot = observed_container;
+		reintroduced_loot.mutable_client_world_object_update()
+		    ->set_base_revision(2);
+		reintroduced_loot.mutable_client_world_object_update()
+		    ->mutable_state()
+		    ->set_revision(2);
+		core.on_message(51, reintroduced_loot, start + 12ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_world_object_rejected());
+		assert(outbound.front()
+		           .envelope.world_object_rejected()
+		           .authoritative_state()
+		           .revision()
+		    == 2);
+		assert(outbound.front()
+		           .envelope.world_object_rejected()
+		           .authoritative_state()
+		           .inventory_size()
+		    == 0);
+	}
+	{
+		server_core restarted(config_for(world_sync_world.path));
+		restarted.on_transport_connected(52, start + 1s);
+		restarted.on_message(52, hello(), start + 1s);
+		(void)restarted.take_outbound();
+		restarted.on_message(
+		    52,
+		    authenticate(world_identity_token),
+		    start + 1s + 1ms);
+		const auto bootstrap = find_bootstrap(restarted.take_outbound(), 52);
+		assert(bootstrap.world_objects_size() == 0);
+		restarted.on_message(52, ready(bootstrap), start + 1s + 2ms);
+		const auto outbound = restarted.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 52
+			        && message.envelope.has_world_object_updated()
+			        && message.envelope.world_object_updated()
+			               .state()
+			               .entity_guid()
+			            == 0x12345678ULL
+			        && message.envelope.world_object_updated().state().revision()
+			            == 2
+			        && message.envelope.world_object_updated()
+			               .state()
+			               .inventory_size()
+			            == 0;
+		    }));
 	}
 
 	temporary_world lease_world;

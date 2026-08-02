@@ -182,9 +182,11 @@ AI/physics/visibility mutations without checking whether the Entity was actually
 AI-controlled. This contradicted the server contract and could touch UI, camera,
 particle, equipment, trigger, and other engine-helper Entities. Enumeration also
 used an unbounded `IsEnd()` loop instead of the engine-observed `Next() == null`
-termination. Isolation now caches the local Entity id, filters on the native
-`has-AI` flag, follows the observed `MoveFirst`/`Next` iterator protocol, and is
-strictly bounded by the Entity count captured before mutations begin.
+termination. Isolation now caches the local Entity id, requires the native
+`has-AI` flag plus Human/Animal RTTI, follows the observed `MoveFirst`/`Next`
+iterator protocol, and is strictly bounded by the Entity count captured before
+mutations begin. Isolation itself is visibility-only so Actor activation, AI,
+physics, animation, combat, and interaction systems remain intact.
 
 ## Fork versus upstream
 

@@ -59,6 +59,14 @@ namespace kcd2mp::server
 	    m_human_npcs_disabled(m_config.disable_human_npcs),
 	    m_animal_npcs_disabled(m_config.disable_animal_npcs)
 	{
+		for (const auto &object : m_store.world_objects())
+			m_world_objects.emplace(object.entity_guid(), object);
+		for (const auto &stored : m_store.profiles())
+		{
+			for (const auto &item : stored.profile.inventory())
+				m_item_owners.emplace(item.instance_id(), stored.profile.player_id());
+		}
+		remove_owned_items_from_world();
 	}
 
 	void server_core::on_transport_connected(
@@ -134,6 +142,11 @@ namespace kcd2mp::server
 				    *player,
 				    envelope.client_avatar_update(),
 				    now);
+				break;
+			case protocol::Envelope::kClientWorldObjectUpdate:
+				handle_world_object_update(
+				    *player,
+				    envelope.client_world_object_update());
 				break;
 			case protocol::Envelope::kPing:
 				handle_ping(*player, envelope.ping(), now);
@@ -941,6 +954,7 @@ namespace kcd2mp::server
 		    m_players.insert_or_assign(session.id, std::move(session));
 		(void)inserted;
 		send_accepted(iterator->second);
+		send_world_objects(connection);
 		protocol::Envelope joined;
 		*joined.mutable_player_joined()->mutable_player() =
 		    snapshot_of(iterator->second, true);
@@ -973,14 +987,32 @@ namespace kcd2mp::server
 			auto *response = rejected.mutable_profile_rejected();
 			response->set_authoritative_revision(player.profile.revision());
 			response->set_reason("profile revision or schema conflict");
+			*response->mutable_authoritative_profile() = player.profile;
 			queue(
 			    *player.connection,
 			    std::move(rejected),
-			    reliability::reliable,
-			    close_kind::reject);
+			    reliability::reliable);
 			return;
 		}
 		auto accepted = message.profile();
+		for (const auto &item : accepted.inventory())
+		{
+			const auto owner = m_item_owners.find(item.instance_id());
+			if (owner != m_item_owners.end() && owner->second != player.id)
+			{
+				protocol::Envelope rejected;
+				auto *response = rejected.mutable_profile_rejected();
+				response->set_authoritative_revision(player.profile.revision());
+				response->set_reason(
+				    "loot item is already owned by another player");
+				*response->mutable_authoritative_profile() = player.profile;
+				queue(
+				    *player.connection,
+				    std::move(rejected),
+				    reliability::reliable);
+				return;
+			}
+		}
 		accepted.set_player_id(player.id);
 		accepted.set_display_name(player.display_name);
 		accepted.set_level_id(m_store.manifest().level_id);
@@ -996,12 +1028,115 @@ namespace kcd2mp::server
 		{
 			*accepted.mutable_last_transform() = player.transform;
 		}
+		for (const auto &item : player.profile.inventory())
+		{
+			const auto owner = m_item_owners.find(item.instance_id());
+			if (owner != m_item_owners.end() && owner->second == player.id)
+				m_item_owners.erase(owner);
+		}
 		player.profile = std::move(accepted);
+		for (const auto &item : player.profile.inventory())
+			m_item_owners.insert_or_assign(item.instance_id(), player.id);
 		persist_player(player, now);
+		remove_owned_items_from_world();
 		protocol::Envelope response;
 		response.mutable_profile_accepted()->set_revision(
 		    player.profile.revision());
 		queue(*player.connection, std::move(response), reliability::reliable);
+	}
+
+	void server_core::handle_world_object_update(
+	    player_session &player,
+	    const protocol::ClientWorldObjectUpdate &message)
+	{
+		const auto reject_state = [&](const protocol::WorldObjectState &state)
+		{
+			protocol::Envelope rejected;
+			auto *response = rejected.mutable_world_object_rejected();
+			*response->mutable_authoritative_state() = state;
+			response->set_reason("world object revision conflict");
+			queue(
+			    *player.connection,
+			    std::move(rejected),
+			    reliability::reliable);
+		};
+		if (!message.has_state()
+		    || !is_valid_world_object_state(message.state(), false))
+		{
+			reject(
+			    *player.connection,
+			    protocol::REJECT_REASON_MALFORMED_MESSAGE,
+			    "world object update is invalid");
+			return;
+		}
+
+		const auto guid = message.state().entity_guid();
+		auto found = m_world_objects.find(guid);
+		if (found != m_world_objects.end()
+		    && (message.base_revision() != found->second.revision()
+		        || message.state().kind() != found->second.kind()))
+		{
+			reject_state(found->second);
+			return;
+		}
+		if (found == m_world_objects.end() && message.base_revision() != 0)
+		{
+			protocol::WorldObjectState empty = message.state();
+			empty.set_revision(1);
+			empty.set_opened(false);
+			empty.set_has_inventory(false);
+			empty.clear_inventory();
+			reject_state(empty);
+			return;
+		}
+
+		auto accepted = message.state();
+		bool contained_owned_item = false;
+		auto *inventory = accepted.mutable_inventory();
+		for (auto index = inventory->size(); index-- > 0;)
+		{
+			if (m_item_owners.contains(inventory->Get(index).instance_id()))
+			{
+				inventory->DeleteSubrange(index, 1);
+				contained_owned_item = true;
+			}
+		}
+		if (contained_owned_item)
+		{
+			if (found != m_world_objects.end())
+			{
+				reject_state(found->second);
+				return;
+			}
+			accepted.set_revision(1);
+			m_world_objects.insert_or_assign(guid, accepted);
+			persist_world_objects();
+			reject_state(accepted);
+			protocol::Envelope corrected;
+			*corrected.mutable_world_object_updated()->mutable_state() = accepted;
+			broadcast(
+			    std::move(corrected),
+			    reliability::reliable,
+			    player.connection);
+			return;
+		}
+		accepted.set_revision(
+		    found == m_world_objects.end() ? 1 : found->second.revision() + 1);
+		m_world_objects.insert_or_assign(guid, accepted);
+		persist_world_objects();
+
+		protocol::Envelope response;
+		auto *ack = response.mutable_world_object_accepted();
+		ack->set_entity_guid(guid);
+		ack->set_revision(accepted.revision());
+		queue(*player.connection, std::move(response), reliability::reliable);
+
+		protocol::Envelope updated;
+		*updated.mutable_world_object_updated()->mutable_state() = accepted;
+		broadcast(
+		    std::move(updated),
+		    reliability::reliable,
+		    player.connection);
 	}
 
 	void server_core::handle_transform(
@@ -1274,6 +1409,17 @@ namespace kcd2mp::server
 		queue(connection, std::move(envelope), reliability::reliable);
 	}
 
+	void server_core::send_world_objects(connection_id connection)
+	{
+		for (const auto &[guid, object] : m_world_objects)
+		{
+			(void)guid;
+			protocol::Envelope envelope;
+			*envelope.mutable_world_object_updated()->mutable_state() = object;
+			queue(connection, std::move(envelope), reliability::reliable);
+		}
+	}
+
 	void server_core::apply_default_avatar(
 	    protocol::PlayerProfile &profile)
 	{
@@ -1420,6 +1566,51 @@ namespace kcd2mp::server
 		*player.profile.mutable_avatar() = player.avatar;
 		m_store.save_profile(player.identity_hash, player.profile);
 		player.last_persisted_at = now;
+	}
+
+	void server_core::persist_world_objects()
+	{
+		std::vector<protocol::WorldObjectState> objects;
+		objects.reserve(m_world_objects.size());
+		for (const auto &[guid, object] : m_world_objects)
+		{
+			(void)guid;
+			objects.push_back(object);
+		}
+		std::ranges::sort(
+		    objects,
+		    {},
+		    &protocol::WorldObjectState::entity_guid);
+		m_store.save_world_objects(objects);
+	}
+
+	void server_core::remove_owned_items_from_world()
+	{
+		bool changed = false;
+		for (auto &[guid, object] : m_world_objects)
+		{
+			(void)guid;
+			auto *inventory = object.mutable_inventory();
+			bool object_changed = false;
+			for (auto index = inventory->size(); index-- > 0;)
+			{
+				if (m_item_owners.contains(inventory->Get(index).instance_id()))
+				{
+					inventory->DeleteSubrange(index, 1);
+					object_changed = true;
+				}
+			}
+			if (!object_changed)
+				continue;
+
+			object.set_revision(object.revision() + 1);
+			changed = true;
+			protocol::Envelope updated;
+			*updated.mutable_world_object_updated()->mutable_state() = object;
+			broadcast(std::move(updated), reliability::reliable);
+		}
+		if (changed)
+			persist_world_objects();
 	}
 
 	void server_core::broadcast(

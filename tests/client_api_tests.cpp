@@ -42,6 +42,7 @@ namespace
 	{
 		return 0;
 	}
+	void __cdecl diagnostic_logging(std::uint32_t) noexcept {}
 }
 
 int main()
@@ -68,7 +69,7 @@ int main()
 	static_assert(sizeof(client_status_view) == 672);
 	static_assert(sizeof(remote_player_view) == 80);
 	static_assert(sizeof(chat_entry_view) == 336);
-	static_assert(sizeof(client_api) == 88);
+	static_assert(sizeof(client_api) == 96);
 #endif
 
 	client_api valid{
@@ -83,7 +84,8 @@ int main()
 	    status,
 	    players,
 	    chat,
-	    archetypes};
+	    archetypes,
+	    diagnostic_logging};
 	assert(compatible(&valid));
 
 	auto old_abi = valid;

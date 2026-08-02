@@ -12,6 +12,7 @@
 #include <playermodule/C_PlayerModule.h>
 #include <playermodule/I_Minigame.h>
 #include <Offsets/vtables/ICVar.h>
+#include <Offsets/vtables/IConsole.h>
 
 #include <algorithm>
 #include <chrono>
@@ -56,6 +57,27 @@ namespace kcd2mp::kcse
 			rotation->set_z(rotation->z() * inverse);
 			rotation->set_w(rotation->w() * inverse);
 			return true;
+		}
+
+		bool execute_console_command(const char *command) noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pConsole)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+				environment->pConsole->ExecuteString(command, true, false);
+				return true;
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#else
+			environment->pConsole->ExecuteString(command, true, false);
+			return true;
+#endif
 		}
 
 		protocol::Quaternion quaternion_from_matrix(const Matrix34 &matrix)
@@ -474,6 +496,29 @@ namespace kcd2mp::kcse
 			    false,
 			    "Native profile transaction failed: " + applied.error};
 		}
+		std::string world_error;
+		if (!m_entities.begin_world_sync(world_error))
+		{
+			m_profiles.reset();
+			lock.unlock();
+			begin_native_unload(world_error);
+			return {false, world_error};
+		}
+		(void)execute_console_command(
+		    "cheat_no_lockpicking nolockpicks:true");
+		(void)execute_console_command("cheat_own_stolen_items");
+		for (const auto &object : bootstrap.world_objects())
+		{
+			if (!m_entities.apply_world_object_state(object, world_error))
+			{
+				m_profiles.reset();
+				lock.unlock();
+				begin_native_unload(world_error);
+				return {
+				    false,
+				    "Native world-object bootstrap failed: " + world_error};
+			}
+		}
 		m_sandbox_active = true;
 		m_sandbox_progress.phase = sandbox_phase::ready;
 		m_sandbox_progress.initial_spawn = spawn;
@@ -550,6 +595,45 @@ namespace kcd2mp::kcse
 			m_diagnostic = std::move(error);
 		}
 		return result;
+	}
+
+	std::vector<protocol::WorldObjectState>
+	native_runtime::poll_world_object_updates()
+	{
+		auto updates = m_entities.poll_world_object_updates();
+		if (!updates.empty())
+			(void)execute_console_command("cheat_own_stolen_items");
+		return updates;
+	}
+
+	bool native_runtime::apply_world_object_state(
+	    const protocol::WorldObjectState &state)
+	{
+		std::string error;
+		const bool result = m_entities.apply_world_object_state(state, error);
+		if (!result)
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = std::move(error);
+		}
+		return result;
+	}
+
+	bool native_runtime::apply_authoritative_profile(
+	    const protocol::PlayerProfile &profile)
+	{
+		if (!is_valid_profile(profile))
+			return false;
+		const auto applied = reconcile_profile(m_profiles, profile);
+		if (!applied.success)
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = "Native profile correction failed: " + applied.error;
+			return false;
+		}
+		m_profiles.set_wire_identity(profile);
+		(void)execute_console_command("cheat_own_stolen_items");
+		return true;
 	}
 
 	std::optional<protocol::TransformState>

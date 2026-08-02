@@ -33,13 +33,67 @@ namespace kcd2mp::kcse
 	{
 		constexpr std::uint32_t item_equipped = 1U;
 		constexpr std::uint32_t entity_flag_calc_physics = 1U << 7;
+		constexpr std::uint32_t entity_flag_client_only = 1U << 8;
 		constexpr std::uint32_t entity_flag_has_ai = 1U << 13;
 		constexpr std::uint32_t entity_flag_trigger_areas = 1U << 14;
 		constexpr std::uint32_t entity_flag_no_save = 1U << 15;
 		constexpr std::uint32_t entity_flag_clientside_state = 1U << 17;
 		constexpr std::uint32_t entity_flag_no_proximity = 1U << 19;
+		constexpr std::uint32_t entity_flag_never_network_static = 1U << 22;
+		constexpr std::uint32_t remote_actor_creation_flags =
+		    entity_flag_client_only | entity_flag_no_save
+		    | entity_flag_clientside_state | entity_flag_no_proximity
+		    | entity_flag_never_network_static;
+		constexpr auto remote_motion_keepalive =
+		    std::chrono::milliseconds(250);
+		constexpr auto remote_native_validation_interval =
+		    std::chrono::seconds(1);
+		std::chrono::steady_clock::time_point
+		    last_slow_status_diagnostic_at{};
+		std::chrono::steady_clock::time_point
+		    last_update_diagnostic_at{};
 		constexpr std::string_view probe_equipment_definition_id =
 		    "c164f346-0463-4116-b790-094b11274e5e";
+
+		bool position_or_rotation_changed(
+		    const protocol::TransformState &left,
+		    const protocol::TransformState &right)
+		{
+			constexpr float position_epsilon_squared = 0.000001F;
+			constexpr float rotation_epsilon = 0.00001F;
+			const auto dx = left.position().x() - right.position().x();
+			const auto dy = left.position().y() - right.position().y();
+			const auto dz = left.position().z() - right.position().z();
+			if (dx * dx + dy * dy + dz * dz
+			    > position_epsilon_squared)
+			{
+				return true;
+			}
+
+			const auto &a = left.rotation();
+			const auto &b = right.rotation();
+			const auto direct = std::abs(a.x() - b.x())
+			    + std::abs(a.y() - b.y())
+			    + std::abs(a.z() - b.z())
+			    + std::abs(a.w() - b.w());
+			const auto negated = std::abs(a.x() + b.x())
+			    + std::abs(a.y() + b.y())
+			    + std::abs(a.z() + b.z())
+			    + std::abs(a.w() + b.w());
+			return std::min(direct, negated) > rotation_epsilon;
+		}
+
+		bool velocity_changed(
+		    const protocol::Vec3 &left,
+		    const protocol::Vec3 &right)
+		{
+			constexpr float velocity_epsilon_squared = 0.0025F;
+			const auto dx = left.x() - right.x();
+			const auto dy = left.y() - right.y();
+			const auto dz = left.z() - right.z();
+			return dx * dx + dy * dy + dz * dz
+			    > velocity_epsilon_squared;
+		}
 
 		CryGUID make_instance_guid()
 		{
@@ -143,7 +197,7 @@ namespace kcd2mp::kcse
 				    position,
 				    rotation,
 				    scale,
-				    0);
+				    remote_actor_creation_flags);
 			}
 			__except(KCD2MP_JOIN_SEH_FILTER(
 			    "join.remote-spawn.CreateActor.seh"))
@@ -158,7 +212,7 @@ namespace kcd2mp::kcse
 			    position,
 			    rotation,
 			    scale,
-			    0);
+			    remote_actor_creation_flags);
 #endif
 		}
 	}
@@ -401,15 +455,22 @@ namespace kcd2mp::kcse
 			    m_diagnostic);
 			return false;
 		}
-		std::string error;
-		if (!npc::initialize_runtime_catalog(error)
-		    || !npc::initialize_runtime_equipment_catalog(error))
+		if (!m_catalogs_ready)
 		{
-			m_diagnostic = std::move(error);
+			std::string error;
+			if (!npc::initialize_runtime_catalog(error)
+			    || !npc::initialize_runtime_equipment_catalog(error))
+			{
+				m_diagnostic = std::move(error);
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-backend.catalog-failed",
+				    m_diagnostic);
+				return false;
+			}
+			m_catalogs_ready = true;
 			KCD2MP_JOIN_TRACE(
-			    "join.remote-backend.catalog-failed",
-			    m_diagnostic);
-			return false;
+			    "join.remote-backend.catalog-ready",
+			    "native NPC and equipment catalogs initialized and cached");
 		}
 		m_diagnostic.clear();
 		return true;
@@ -506,7 +567,7 @@ namespace kcd2mp::kcse
 		        "class=\"NPC\" template=<not-used-by-CreateActor> "
 		        "soul=\"{}\" position=({:.6f},{:.6f},{:.6f}) "
 		        "rotation=({:.6f},{:.6f},{:.6f},{:.6f}) "
-		        "scale=(1,1,1) requested_entity_id=0 "
+		        "scale=(1,1,1) requested_entity_id=0 flags=0x{:08X} "
 		        "actor_system={} entity_system={}",
 		        name,
 		        player.avatar.archetype_id(),
@@ -517,6 +578,7 @@ namespace kcd2mp::kcse
 		        rotation.v.y,
 		        rotation.v.z,
 		        rotation.w,
+		        remote_actor_creation_flags,
 		        static_cast<void *>(context->m_pActorSystem),
 		        SSystemGlobalEnvironment::GetInstance()
 		                ? static_cast<void *>(
@@ -592,8 +654,7 @@ namespace kcd2mp::kcse
 		    std::format("entity_id={} flags=0x{:08X}", id, flags));
 		flags &= ~(entity_flag_calc_physics | entity_flag_has_ai
 		    | entity_flag_trigger_areas);
-		flags |= entity_flag_no_save | entity_flag_clientside_state
-		    | entity_flag_no_proximity;
+		flags |= remote_actor_creation_flags;
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.SetFlags.begin",
 		    std::format("entity_id={} flags=0x{:08X}", id, flags));
@@ -640,7 +701,8 @@ namespace kcd2mp::kcse
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.entity.configure.complete",
 		    std::format(
-		        "entity_id={} flags=0x{:08X} ai_object_id=0 "
+		        "entity_id={} flags=0x{:08X} client_only=true "
+		        "never_network_static=true ai_object_id=0 "
 		        "physics=false hidden=false active=true",
 		        id,
 		        flags));
@@ -678,6 +740,33 @@ namespace kcd2mp::kcse
 	remote_avatar_backend_status native_remote_avatar_backend::status(
 	    remote_avatar_handle avatar) const
 	{
+		const auto started = std::chrono::steady_clock::now();
+		auto result = status_impl(avatar);
+		const auto finished = std::chrono::steady_clock::now();
+		const auto elapsed = finished - started;
+		if (join_trace::diagnostics_enabled()
+		    && elapsed >= std::chrono::milliseconds(1)
+		    && (last_slow_status_diagnostic_at
+		            == std::chrono::steady_clock::time_point{}
+		        || finished - last_slow_status_diagnostic_at
+		            >= std::chrono::seconds(1)))
+		{
+			last_slow_status_diagnostic_at = finished;
+			join_trace::write_diagnostic(
+			    "performance.remote-avatar-status",
+			    std::format(
+			        "handle={} state={} elapsed_ms={:.3f} diagnostic=\"{}\"",
+			        avatar,
+			        static_cast<int>(result.state),
+			        std::chrono::duration<double, std::milli>(elapsed).count(),
+			        result.diagnostic));
+		}
+		return result;
+	}
+
+	remote_avatar_backend_status native_remote_avatar_backend::status_impl(
+	    remote_avatar_handle avatar) const
+	{
 		auto *value = const_cast<entry *>(find(avatar));
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-status.begin",
@@ -697,6 +786,8 @@ namespace kcd2mp::kcse
 			return {
 			    remote_avatar_state::failed,
 			    "remote avatar belongs to a stale runtime epoch"};
+		if (value->lifecycle_ready)
+			return {remote_avatar_state::ready, {}};
 
 		auto *entity = resolve_entity(value->entity_id);
 		auto *actor = resolve_actor(value->entity_id);
@@ -805,6 +896,7 @@ namespace kcd2mp::kcse
 			    remote_avatar_state::pending,
 			    "waiting for native Human inventory/equipment"};
 		}
+		value->lifecycle_ready = true;
 		return {remote_avatar_state::ready, {}};
 	}
 
@@ -813,24 +905,53 @@ namespace kcd2mp::kcse
 	    const remote_avatar_snapshot &player,
 	    bool appearance_changed)
 	{
+		const auto update_started = std::chrono::steady_clock::now();
+		std::chrono::steady_clock::duration lifecycle_time{};
+		std::chrono::steady_clock::duration validation_time{};
+		std::chrono::steady_clock::duration transform_time{};
+		std::chrono::steady_clock::duration motion_time{};
+		std::chrono::steady_clock::duration appearance_time{};
+		bool appearance_attempted = false;
 		auto *value = find(avatar);
-		auto *entity =
-		    value && value->epoch == m_epoch
-		    ? resolve_entity(value->entity_id)
-		    : nullptr;
-		if (!value || !entity || value->failed)
+		if (!value || value->epoch != m_epoch || value->failed)
 		{
 			KCD2MP_JOIN_TRACE(
 			    "join.remote-update.rejected",
 			    std::format(
-			        "handle={} entry={} entity={} failed={}",
+			        "handle={} entry={} epoch={} current_epoch={} failed={}",
 			        avatar,
 			        static_cast<void *>(value),
-			        static_cast<void *>(entity),
+			        value ? value->epoch : 0,
+			        m_epoch,
 			        value ? value->failed : false));
 			return false;
 		}
 		std::string error;
+		const auto lifecycle_started = std::chrono::steady_clock::now();
+		const auto lifecycle = status(avatar);
+		lifecycle_time = std::chrono::steady_clock::now() - lifecycle_started;
+		if (lifecycle.state == remote_avatar_state::failed)
+			return false;
+		const auto now = std::chrono::steady_clock::now();
+		if (lifecycle.state == remote_avatar_state::ready
+		    && (value->last_native_validation_at
+		            == std::chrono::steady_clock::time_point{}
+		        || now - value->last_native_validation_at
+		            >= remote_native_validation_interval))
+		{
+			const auto validation_started = std::chrono::steady_clock::now();
+			if (!resolve_entity(value->entity_id)
+			    || !resolve_actor(value->entity_id))
+			{
+				value->failed = true;
+				value->failure =
+				    "remote avatar entity or actor was destroyed externally";
+				return false;
+			}
+			value->last_native_validation_at = now;
+			validation_time =
+			    std::chrono::steady_clock::now() - validation_started;
+		}
 		if (!value->first_transform_logged)
 		{
 			value->first_transform_logged = true;
@@ -846,8 +967,33 @@ namespace kcd2mp::kcse
 			        player.transform.position().y(),
 			        player.transform.position().z()));
 		}
-		if (!m_entities.write_transform(entity, player.transform, error)
-		    || !drive_motion(*value, player, error))
+		const bool transform_changed = !value->transform_applied
+		    || position_or_rotation_changed(
+		        value->last_transform,
+		        player.transform);
+		bool transform_succeeded = true;
+		if (transform_changed)
+		{
+			const auto transform_started = std::chrono::steady_clock::now();
+			auto *entity = resolve_entity(value->entity_id);
+			if (!entity)
+				error = "native remote entity disappeared";
+			transform_succeeded = entity
+			    && m_entities.write_transform(
+			        entity,
+			        player.transform,
+			        error);
+			transform_time =
+			    std::chrono::steady_clock::now() - transform_started;
+		}
+		bool motion_succeeded = true;
+		if (transform_succeeded)
+		{
+			const auto motion_started = std::chrono::steady_clock::now();
+			motion_succeeded = drive_motion(*value, player, error);
+			motion_time = std::chrono::steady_clock::now() - motion_started;
+		}
+		if (!transform_succeeded || !motion_succeeded)
 		{
 			value->failed = true;
 			value->failure = std::move(error);
@@ -861,13 +1007,17 @@ namespace kcd2mp::kcse
 			        value->failure));
 			return false;
 		}
+		if (transform_changed)
+		{
+			value->last_transform = player.transform;
+			value->transform_applied = true;
+		}
 
-		const auto lifecycle = status(avatar);
-		if (lifecycle.state == remote_avatar_state::failed)
-			return false;
 		if (lifecycle.state == remote_avatar_state::ready
 		    && (appearance_changed || !value->appearance_applied))
 		{
+			appearance_attempted = true;
+			const auto appearance_started = std::chrono::steady_clock::now();
 			const auto old = value->appearance;
 			const bool had_old = value->appearance_applied;
 			if (!apply_appearance(*value, player.avatar, error))
@@ -889,6 +1039,39 @@ namespace kcd2mp::kcse
 			}
 			value->appearance = player.avatar;
 			value->appearance_applied = true;
+			appearance_time =
+			    std::chrono::steady_clock::now() - appearance_started;
+		}
+		const auto update_finished = std::chrono::steady_clock::now();
+		if (join_trace::diagnostics_enabled()
+		    && (last_update_diagnostic_at
+		        == std::chrono::steady_clock::time_point{}
+		    || update_finished - last_update_diagnostic_at
+		        >= std::chrono::seconds(1)))
+		{
+			last_update_diagnostic_at = update_finished;
+			const auto milliseconds = [](auto duration)
+			{
+				return std::chrono::duration<double, std::milli>(duration).count();
+			};
+			join_trace::write_diagnostic(
+			    "performance.remote-avatar-update",
+			    std::format(
+			        "player_id={} handle={} total_ms={:.3f} "
+			        "lifecycle_ms={:.3f} validation_ms={:.3f} "
+			        "transform_changed={} transform_ms={:.3f} "
+			        "motion_ms={:.3f} appearance_attempted={} "
+			        "appearance_ms={:.3f}",
+			        value->player,
+			        avatar,
+			        milliseconds(update_finished - update_started),
+			        milliseconds(lifecycle_time),
+			        milliseconds(validation_time),
+			        transform_changed,
+			        milliseconds(transform_time),
+			        milliseconds(motion_time),
+			        appearance_attempted,
+			        milliseconds(appearance_time)));
 		}
 		return true;
 	}
@@ -1214,6 +1397,18 @@ namespace kcd2mp::kcse
 	    const remote_avatar_snapshot &player,
 	    std::string &error)
 	{
+		const auto now = std::chrono::steady_clock::now();
+		const auto &velocity = player.transform.velocity();
+		const bool motion_changed = !avatar.motion_applied
+		    || avatar.last_movement_mode != player.movement_mode
+		    || velocity_changed(avatar.last_motion_velocity, velocity);
+		const bool keepalive_due = avatar.motion_applied
+		    && player.movement_mode != protocol::MOVEMENT_MODE_IDLE
+		    && now - avatar.last_motion_request_at
+		        >= remote_motion_keepalive;
+		if (!motion_changed && !keepalive_due)
+			return true;
+
 		auto *actor = resolve_actor(avatar.entity_id);
 		auto *controller =
 		    actor ? actor->m_pMovementController : nullptr;
@@ -1235,6 +1430,13 @@ namespace kcd2mp::kcse
 		{
 			// Controller construction is part of the asynchronous readiness
 			// chain; transform interpolation still applies in the meantime.
+			if (avatar.lifecycle_ready)
+			{
+				error = actor
+				    ? "native remote MovementController disappeared"
+				    : "native remote actor disappeared";
+				return false;
+			}
 			return true;
 		}
 		float speed{};
@@ -1253,7 +1455,6 @@ namespace kcd2mp::kcse
 		std::optional<Vec3> move_target;
 		if (speed > 0.0F)
 		{
-			const auto &velocity = player.transform.velocity();
 			Vec3 direction(velocity.x(), velocity.y(), velocity.z());
 			const auto length = direction.GetLength();
 			if (length > 0.001F)
@@ -1283,6 +1484,10 @@ namespace kcd2mp::kcse
 			        error));
 			return false;
 		}
+		avatar.motion_applied = true;
+		avatar.last_movement_mode = player.movement_mode;
+		avatar.last_motion_velocity = velocity;
+		avatar.last_motion_request_at = now;
 		return true;
 	}
 }

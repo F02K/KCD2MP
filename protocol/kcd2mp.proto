@@ -190,6 +190,7 @@ message ServerBootstrap {
   PlayerProfile profile = 9;
   string issued_identity_token = 10;
   uint32 timeout_seconds = 11;
+  repeated WorldObjectState world_objects = 12;
 }
 
 message ClientWorldReady {
@@ -218,6 +219,45 @@ message ProfileAccepted {
 message ProfileRejected {
   uint64 authoritative_revision = 1;
   string reason = 2;
+  PlayerProfile authoritative_profile = 3;
+}
+
+enum WorldObjectKind {
+  WORLD_OBJECT_KIND_UNSPECIFIED = 0;
+  WORLD_OBJECT_KIND_DOOR = 1;
+  WORLD_OBJECT_KIND_CONTAINER = 2;
+}
+
+message WorldObjectState {
+  uint64 entity_guid = 1;
+  WorldObjectKind kind = 2;
+  uint64 revision = 3;
+  bool opened = 4;
+  bool has_inventory = 5;
+  repeated InventoryItem inventory = 6;
+}
+
+message ClientWorldObjectUpdate {
+  uint64 base_revision = 1;
+  WorldObjectState state = 2;
+}
+
+message WorldObjectAccepted {
+  uint64 entity_guid = 1;
+  uint64 revision = 2;
+}
+
+message WorldObjectRejected {
+  WorldObjectState authoritative_state = 1;
+  string reason = 2;
+}
+
+message WorldObjectUpdated {
+  WorldObjectState state = 1;
+}
+
+message StoredWorldObjects {
+  repeated WorldObjectState objects = 1;
 }
 
 message StoredPlayerProfile {
@@ -348,5 +388,9 @@ message Envelope {
     AvatarAccepted avatar_accepted = 24;
     AvatarRejected avatar_rejected = 25;
     PlayerAvatarUpdated player_avatar_updated = 26;
+    ClientWorldObjectUpdate client_world_object_update = 27;
+    WorldObjectAccepted world_object_accepted = 28;
+    WorldObjectRejected world_object_rejected = 29;
+    WorldObjectUpdated world_object_updated = 30;
   }
 }

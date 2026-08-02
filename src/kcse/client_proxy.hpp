@@ -20,6 +20,7 @@ namespace kcd2mp::kcse
 		void disconnect() const;
 		[[nodiscard]] bool send_chat(std::string text) const;
 		[[nodiscard]] bool select_avatar(std::string archetype_id) const;
+		void set_diagnostic_logging(bool enabled) const;
 		[[nodiscard]] client_status status() const;
 		[[nodiscard]] std::vector<kcd2mp::remote_player_view>
 		remote_players() const;

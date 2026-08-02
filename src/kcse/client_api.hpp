@@ -5,8 +5,8 @@
 
 namespace kcd2mp::kcse
 {
-	inline constexpr std::uint32_t client_abi_version = 4;
-	inline constexpr std::uint64_t client_build_id = 0x000400006A350E20ULL;
+	inline constexpr std::uint32_t client_abi_version = 5;
+	inline constexpr std::uint64_t client_build_id = 0x000500006A350E20ULL;
 	inline constexpr wchar_t client_module_name[] = L"KCD2MPKCSEClient.dll";
 	inline constexpr char client_query_export[] = "KCD2MP_QueryClient";
 
@@ -100,6 +100,8 @@ namespace kcd2mp::kcse
 		std::uint32_t(__cdecl *copy_avatar_archetypes)(
 		    fixed_string *output,
 		    std::uint32_t capacity) noexcept{};
+		void(__cdecl *set_diagnostic_logging)(
+		    std::uint32_t enabled) noexcept{};
 	};
 
 	using query_client = const client_api *(__cdecl *)(
@@ -113,6 +115,7 @@ namespace kcd2mp::kcse
 		    && api->get_runtime_status && api->connect && api->disconnect
 		    && api->send_chat && api->select_avatar && api->get_status
 		    && api->copy_players && api->copy_chat
-		    && api->copy_avatar_archetypes;
+		    && api->copy_avatar_archetypes
+		    && api->set_diagnostic_logging;
 	}
 }

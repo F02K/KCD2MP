@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace kcd2mp
 {
@@ -131,5 +132,20 @@ namespace kcd2mp
 		[[nodiscard]] virtual bool set_npc_entities_disabled(
 		    bool humans_disabled,
 		    bool animals_disabled) = 0;
+		[[nodiscard]] virtual std::vector<protocol::WorldObjectState>
+		poll_world_object_updates()
+		{
+			return {};
+		}
+		[[nodiscard]] virtual bool apply_world_object_state(
+		    const protocol::WorldObjectState &)
+		{
+			return true;
+		}
+		[[nodiscard]] virtual bool apply_authoritative_profile(
+		    const protocol::PlayerProfile &)
+		{
+			return false;
+		}
 	};
 }

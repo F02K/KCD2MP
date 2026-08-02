@@ -22,6 +22,25 @@ namespace
 	kcd2mp::kcse::native_runtime *g_runtime{};
 	kcd2mp::multiplayer_client *g_client{};
 	KCSE::ITaskInterface *g_tasks{};
+	using frame_clock = std::chrono::steady_clock;
+	frame_clock::time_point g_next_remote_sync{};
+	std::uint32_t g_remote_sync_rate{};
+	std::size_t g_last_remote_player_count{};
+
+	struct performance_window
+	{
+		frame_clock::time_point started{};
+		std::chrono::nanoseconds frame_total{};
+		std::chrono::nanoseconds frame_max{};
+		std::chrono::nanoseconds game_tick_total{};
+		std::chrono::nanoseconds game_tick_max{};
+		std::chrono::nanoseconds remote_sync_total{};
+		std::chrono::nanoseconds remote_sync_max{};
+		std::uint64_t frames{};
+		std::uint64_t sync_runs{};
+	};
+
+	performance_window g_performance;
 
 	template<std::size_t N>
 	void copy_text(char (&target)[N], std::string_view value) noexcept
@@ -44,10 +63,121 @@ namespace
 		    std::numeric_limits<std::uint32_t>::max()));
 	}
 
+	bool remote_sync_due(
+	    frame_clock::time_point now,
+	    const kcd2mp::client_update_rates &rates)
+	{
+		const auto rate = std::clamp(rates.snapshot_rate, 1U, 120U);
+		if (rate != g_remote_sync_rate)
+		{
+			g_remote_sync_rate = rate;
+			g_next_remote_sync = now;
+		}
+		if (now < g_next_remote_sync)
+		{
+			return false;
+		}
+		const auto interval =
+		    std::chrono::duration_cast<frame_clock::duration>(
+		        std::chrono::duration<double>(1.0 / rate));
+		// Keep the server cadence instead of drifting by one rendered frame
+		// whenever the two rates are not clean multiples of each other. Missed
+		// slots are skipped; native synchronization never runs more than once in
+		// a PostUpdate frame.
+		do
+		{
+			g_next_remote_sync += interval;
+		} while (g_next_remote_sync <= now);
+		return true;
+	}
+
+	void reset_remote_sync_schedule() noexcept
+	{
+		g_next_remote_sync = {};
+		g_remote_sync_rate = 0;
+		g_last_remote_player_count = 0;
+	}
+
+	void record_performance(
+	    frame_clock::time_point now,
+	    std::chrono::nanoseconds frame_time,
+	    std::chrono::nanoseconds game_tick_time,
+	    std::chrono::nanoseconds remote_sync_time,
+	    bool sync_ran,
+	    const kcd2mp::client_status &status,
+	    const kcd2mp::client_update_rates &rates,
+	    bool sandbox_active)
+	{
+		if (!kcd2mp::kcse::join_trace::diagnostics_enabled())
+		{
+			g_performance = {};
+			return;
+		}
+		if (status.state != kcd2mp::client_state::connected || !sandbox_active)
+		{
+			g_performance = {};
+			return;
+		}
+		if (g_performance.started == frame_clock::time_point{})
+			g_performance.started = now;
+		g_performance.frame_total += frame_time;
+		g_performance.frame_max = std::max(g_performance.frame_max, frame_time);
+		g_performance.game_tick_total += game_tick_time;
+		g_performance.game_tick_max =
+		    std::max(g_performance.game_tick_max, game_tick_time);
+		if (sync_ran)
+		{
+			g_performance.remote_sync_total += remote_sync_time;
+			g_performance.remote_sync_max =
+			    std::max(g_performance.remote_sync_max, remote_sync_time);
+			++g_performance.sync_runs;
+		}
+		++g_performance.frames;
+
+		const auto elapsed = now - g_performance.started;
+		if (elapsed < std::chrono::seconds(1))
+			return;
+		const auto milliseconds = [](std::chrono::nanoseconds value)
+		{
+			return std::chrono::duration<double, std::milli>(value).count();
+		};
+		const auto elapsed_seconds =
+		    std::chrono::duration<double>(elapsed).count();
+		const auto frame_count = static_cast<double>(g_performance.frames);
+		const auto sync_count = static_cast<double>(g_performance.sync_runs);
+		kcd2mp::kcse::join_trace::write_diagnostic(
+		    "performance.remote-sync",
+		    std::format(
+		        "fps={:.1f} frames={} server_tick_rate={} "
+		        "server_snapshot_rate={} remote_players={} sync_runs={} "
+		        "plugin_work_avg_ms={:.3f} plugin_work_max_ms={:.3f} "
+		        "game_tick_avg_ms={:.3f} game_tick_max_ms={:.3f} "
+		        "remote_sync_avg_ms={:.3f} remote_sync_max_ms={:.3f}",
+		        frame_count / elapsed_seconds,
+		        g_performance.frames,
+		        rates.tick_rate,
+		        rates.snapshot_rate,
+		        g_last_remote_player_count,
+		        g_performance.sync_runs,
+		        milliseconds(g_performance.frame_total) / frame_count,
+		        milliseconds(g_performance.frame_max),
+		        milliseconds(g_performance.game_tick_total) / frame_count,
+		        milliseconds(g_performance.game_tick_max),
+		        sync_count == 0.0
+		            ? 0.0
+		            : milliseconds(g_performance.remote_sync_total) / sync_count,
+		        milliseconds(g_performance.remote_sync_max)));
+		g_performance = {};
+	}
+
 	void queue_frame();
 
 	void run_frame_impl()
 	{
+		const auto frame_started = frame_clock::now();
+		std::chrono::nanoseconds game_tick_time{};
+		std::chrono::nanoseconds remote_sync_time{};
+		bool sync_ran = false;
 		KCD2MP_JOIN_TRACE(
 		    "join.kcse-post-update.enter",
 		    std::format(
@@ -90,11 +220,13 @@ namespace
 			std::optional<kcd2mp::protocol::AvatarDescriptor> avatar_visual;
 			if (g_client->reserve_local_avatar_sample(now))
 				avatar_visual = g_runtime->local_avatar_visual();
+			const auto game_tick_started = frame_clock::now();
 			g_client->game_tick(
 			    g_runtime->local_transform(),
 			    std::move(avatar_visual),
 			    g_runtime->current_level_id(),
 			    now);
+			game_tick_time = frame_clock::now() - game_tick_started;
 			client_status = g_client->status();
 			KCD2MP_JOIN_TRACE(
 			    "join.kcse-post-update.game-tick.complete",
@@ -104,10 +236,17 @@ namespace
 			        client_status.game_queue_size));
 		}
 
+		const bool sandbox_active = g_runtime->sandbox_active();
+		const auto update_rates = g_client->update_rates();
+		const auto remote_sync_now = frame_clock::now();
 		if (client_status.state != kcd2mp::client_state::disconnected
-		    && g_runtime->sandbox_active())
+		    && sandbox_active
+		    && remote_sync_due(remote_sync_now, update_rates))
 		{
+			sync_ran = true;
+			const auto remote_sync_started = frame_clock::now();
 			const auto players = g_client->remote_players();
+			g_last_remote_player_count = players.size();
 			KCD2MP_JOIN_TRACE(
 			    "join.kcse-post-update.remote-sync.prepare",
 			    std::format("remote_players={}", players.size()));
@@ -127,6 +266,7 @@ namespace
 			}
 			const auto synchronized =
 			    g_runtime->sync_remote_players(snapshots);
+			remote_sync_time = frame_clock::now() - remote_sync_started;
 			if (!synchronized.success)
 			{
 				KCD2MP_JOIN_TRACE(
@@ -136,6 +276,11 @@ namespace
 				    "Native remote-avatar synchronization failed: "
 				    + synchronized.error);
 			}
+		}
+		else if (client_status.state == kcd2mp::client_state::disconnected
+		    || !sandbox_active)
+		{
+			reset_remote_sync_schedule();
 		}
 
 		if (const auto correction = g_client->take_local_correction())
@@ -154,6 +299,16 @@ namespace
 			else
 				g_runtime->cancel_multiplayer_preparation();
 		}
+		const auto frame_finished = frame_clock::now();
+		record_performance(
+		    frame_finished,
+		    frame_finished - frame_started,
+		    game_tick_time,
+		    remote_sync_time,
+		    sync_ran,
+		    client_status,
+		    update_rates,
+		    sandbox_active);
 		queue_frame();
 		KCD2MP_JOIN_TRACE(
 		    "join.kcse-post-update.complete",
@@ -550,6 +705,11 @@ namespace
 		}
 	}
 
+	void __cdecl abi_set_diagnostic_logging(std::uint32_t enabled) noexcept
+	{
+		kcd2mp::kcse::join_trace::set_diagnostics_enabled(enabled != 0);
+	}
+
 	const kcd2mp::kcse::client_api g_api{
 	    sizeof(kcd2mp::kcse::client_api),
 	    kcd2mp::kcse::client_abi_version,
@@ -562,7 +722,8 @@ namespace
 	    abi_get_status,
 	    abi_copy_players,
 	    abi_copy_chat,
-	    abi_copy_avatar_archetypes};
+	    abi_copy_avatar_archetypes,
+	    abi_set_diagnostic_logging};
 }
 
 KCSE_EXPORT KCSE::PluginVersionData KCSEPlugin_Version = {

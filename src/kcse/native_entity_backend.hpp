@@ -9,6 +9,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <deque>
 #include <vector>
 
 namespace Offsets
@@ -51,7 +52,14 @@ namespace kcd2mp::kcse
 		void begin_player_spawn();
 		void end_player_spawn();
 		void process_pending_isolation();
+		[[nodiscard]] bool begin_world_sync(std::string &error);
 		void restore_world();
+		[[nodiscard]] std::vector<protocol::WorldObjectState>
+		poll_world_object_updates();
+		[[nodiscard]] bool apply_world_object_state(
+		    const protocol::WorldObjectState &state,
+		    std::string &error);
+		void reset_world_sync();
 
 	private:
 		class isolation_sink final : public Offsets::IEntitySystemSink
@@ -85,8 +93,6 @@ namespace kcd2mp::kcse
 
 		struct entity_state
 		{
-			std::uint32_t flags{};
-			bool active{};
 			bool hidden{};
 		};
 		struct pending_entity
@@ -101,12 +107,20 @@ namespace kcd2mp::kcse
 		    bool game_object_initialized,
 		    bool actor_class_confirmed);
 		void game_object_initialized(std::uint32_t entity_id);
+		void refresh_local_player_exclusion(Offsets::IEntitySystem &system);
 		void refresh_actor_roster(Offsets::IEntitySystem &system);
 		void maintain_isolated_entities(Offsets::IEntitySystem &system);
 		[[nodiscard]] bool isolate_entity(Offsets::IEntity *entity);
 		[[nodiscard]] bool should_isolate_actor(
-		    std::uint32_t entity_id) const;
+		    Offsets::IEntity *entity) const;
 		void entity_removed(Offsets::IEntity *entity);
+		void entity_event(Offsets::IEntity *entity, void *event);
+		[[nodiscard]] std::optional<protocol::WorldObjectState>
+		capture_world_object(Offsets::IEntity *entity) const;
+		[[nodiscard]] bool apply_world_inventory(
+		    Offsets::IEntity *entity,
+		    const protocol::WorldObjectState &state,
+		    std::string &error) const;
 
 		isolation_sink m_sink;
 		game_object_init_sink m_game_object_sink;
@@ -122,5 +136,13 @@ namespace kcd2mp::kcse
 		bool m_human_npcs_disabled{};
 		bool m_animal_npcs_disabled{};
 		bool m_isolation_active{};
+		bool m_applying_world_state{};
+		std::uint32_t m_world_poll_frame{};
+		std::unordered_set<std::uint64_t> m_open_world_containers;
+		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
+		    m_last_world_observations;
+		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
+		    m_deferred_world_states;
+		std::deque<protocol::WorldObjectState> m_world_updates;
 	};
 }

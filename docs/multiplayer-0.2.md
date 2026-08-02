@@ -132,11 +132,11 @@ fallback for both categories. Accepted clients and late joiners receive the same
 
 On the game thread the client classifies AI Actors through the verified `C_Human` and `C_Animal`
 RTTI hierarchies and applies the selected category state to existing and newly spawned NPCs. It
-captures flags, AI object ID, activation, visibility, and physics state before applying the exact
-sink-driven isolation mutations. Unknown Actor subclasses, non-AI engine helpers, the local player,
-and registered remote-player Entities remain active. Destroyed or reused Entities are tracked by
-the audited `IEntitySystemSink` order; enable/disconnect restores every surviving Entity
-symmetrically.
+captures visibility before applying sink-driven `Hide` isolation. Actor activation, AI identity,
+physics, animation, and combat state remain untouched. Unknown Actor subclasses, non-AI engine
+helpers, the local player, and registered remote-player Entities remain active. Destroyed or reused
+Entities are tracked by the audited `IEntitySystemSink` order; enable/disconnect restores every
+surviving Entity symmetrically.
 
 The remote-avatar manager consumes the existing interpolated remote-player views and implements
 the complete spawn/update/remove lifecycle behind a native backend contract. Reconnecting players
@@ -162,6 +162,23 @@ produce a concrete client error. Removal transactionally clears created equipmen
 player exception, and calls native `IEntitySystem::RemoveEntity`, including on disconnect, epoch
 change, sandbox end, and external destruction. No Workshop runtime dependency, generated Lua,
 console, raw EntitySystem spawn, or cloning fallback is used.
+
+## Protocol v7 world interaction sync
+
+Protocol v7 adds revisioned, server-authoritative state for doors and inventory-backed containers.
+Open/close script events are captured by stable Entity GUID. While a container is open, its full
+instance UUID, definition UUID, stack count, quality, and condition set is polled and replicated.
+Conflicting observations are rejected with the complete authoritative state, and known world
+objects are persisted in `world/world_objects.pb` and replayed as individual reliable messages to
+late joiners so large inventories do not inflate the bootstrap packet.
+
+Accepted player inventory ownership removes the same item instance from every persisted container
+and advances its revision. A second profile cannot claim an instance already owned by another
+player; profile rejection applies the authoritative inventory without disconnecting the client.
+The sandbox disables door and stash lockpicking requirements, explicitly unlocks synchronized
+objects when applying state, and clears stolen ownership from locally looted items. Streamed-out
+objects retain their deferred authoritative state and receive it when their Entity becomes
+available again.
 
 ## Local developer console
 
@@ -190,6 +207,8 @@ Automated tests cover:
 - protocol round trips, malformed/oversized messages, invalid enums and profiles;
 - enrollment, duplicate identities, server capacity, claim-code rotation, restart persistence,
   profile revisions, initializer/waiter behavior, lease release, and bootstrap timeout;
+- door/container revision conflicts, synchronized loot ownership, stale-container correction,
+  late-join replay, and world-object restart persistence;
 - DPAPI encrypted round trip and rejection of a corrupted identity file;
 - bounded game/network/local-console queues and reliable/unreliable loopback networking;
 - server entity-control broadcasts, reversible entity-state bookkeeping, remote-avatar primary/
@@ -207,7 +226,9 @@ DPAPI isolation across two different Windows user accounts, native save-director
 comparison, 30-minute in-game play, the full two-client Soul/equipment/weapon/locomotion matrix,
 fault injection, and clean exit after final disconnect remain manual acceptance tests.
 
-World deltas for containers, doors, NPCs, weather, time, and quests remain outside version 0.3.
+World deltas for containers, doors, NPCs, weather, time, and quests remained outside version 0.3.
+Protocol v7 adds doors and inventory-backed containers; NPC world state, weather, time, and quests
+remain outside the current contract.
 
 Version 0.4 defines revisioned remote-avatar descriptors, server-side archetype allowlists, and
 visible equipment/stance replication. The native controlled-NPC machinery remains an internal

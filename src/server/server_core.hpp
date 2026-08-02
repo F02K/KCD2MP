@@ -157,6 +157,9 @@ namespace kcd2mp::server
 		    player_session &player,
 		    const protocol::ClientProfileUpdate &message,
 		    time_point now);
+		void handle_world_object_update(
+		    player_session &player,
+		    const protocol::ClientWorldObjectUpdate &message);
 		void handle_transform(
 		    player_session &player,
 		    const protocol::ClientTransform &message,
@@ -184,6 +187,7 @@ namespace kcd2mp::server
 		    time_point now);
 		void send_accepted(player_session &player);
 		void send_entity_control(connection_id connection);
+		void send_world_objects(connection_id connection);
 		void apply_default_avatar(protocol::PlayerProfile &profile);
 		[[nodiscard]] bool avatar_allowed(
 		    const protocol::AvatarDescriptor &avatar) const;
@@ -195,6 +199,8 @@ namespace kcd2mp::server
 		void release_initializer(connection_id connection);
 		void wake_bootstrap_waiters();
 		void persist_player(player_session &player, time_point now);
+		void persist_world_objects();
+		void remove_owned_items_from_world();
 		void broadcast(
 		    protocol::Envelope envelope,
 		    reliability delivery,
@@ -221,6 +227,9 @@ namespace kcd2mp::server
 		std::unordered_map<connection_id, pending_connection> m_pending;
 		std::unordered_map<player_id, player_session> m_players;
 		std::unordered_map<player_id, profile_claim> m_claims;
+		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
+		    m_world_objects;
+		std::unordered_map<std::string, player_id> m_item_owners;
 		std::optional<connection_id> m_initializer;
 		std::uint64_t m_next_dummy_index{1};
 		bool m_human_npcs_disabled{};

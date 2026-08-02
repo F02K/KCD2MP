@@ -284,6 +284,71 @@ int main()
 	assert(decoded_entity_control.human_npcs_disabled());
 	assert(decoded_entity_control.has_animal_npcs_disabled());
 	assert(!decoded_entity_control.animal_npcs_disabled());
+
+	protocol::Envelope container_update_envelope;
+	auto *container_update =
+	    container_update_envelope.mutable_client_world_object_update();
+	container_update->set_base_revision(0);
+	auto *container = container_update->mutable_state();
+	container->set_entity_guid(0x12345678ULL);
+	container->set_kind(protocol::WORLD_OBJECT_KIND_CONTAINER);
+	container->set_revision(0);
+	container->set_opened(true);
+	container->set_has_inventory(true);
+	auto *container_item = container->add_inventory();
+	container_item->set_instance_id(
+	    "cccccccc-cccc-4ccc-8ccc-cccccccccccc");
+	container_item->set_definition_id(
+	    "dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+	container_item->set_count(1);
+	container_item->set_quality(100.0F);
+	container_item->set_condition(1.0F);
+	assert(is_valid_world_object_state(*container, false));
+	assert(encode(
+	    container_update_envelope,
+	    reliability::reliable,
+	    &error));
+
+	auto mismatched_revision = container_update_envelope;
+	mismatched_revision.mutable_client_world_object_update()
+	    ->mutable_state()
+	    ->set_revision(1);
+	assert(!encode(
+	    mismatched_revision,
+	    reliability::reliable,
+	    &error));
+	auto door_with_inventory = *container;
+	door_with_inventory.set_kind(protocol::WORLD_OBJECT_KIND_DOOR);
+	assert(!is_valid_world_object_state(door_with_inventory, false));
+	auto duplicate_container_item = *container;
+	*duplicate_container_item.add_inventory() =
+	    duplicate_container_item.inventory(0);
+	assert(!is_valid_world_object_state(duplicate_container_item, false));
+
+	protocol::Envelope world_update_envelope;
+	container->set_revision(1);
+	*world_update_envelope.mutable_world_object_updated()->mutable_state() =
+	    *container;
+	assert(encode(
+	    world_update_envelope,
+	    reliability::reliable,
+	    &error));
+
+	protocol::Envelope incomplete_profile_rejection;
+	auto *profile_rejection =
+	    incomplete_profile_rejection.mutable_profile_rejected();
+	profile_rejection->set_authoritative_revision(profile->revision());
+	profile_rejection->set_reason("profile conflict");
+	assert(!encode(
+	    incomplete_profile_rejection,
+	    reliability::reliable,
+	    &error));
+	*profile_rejection->mutable_authoritative_profile() = *profile;
+	assert(encode(
+	    incomplete_profile_rejection,
+	    reliability::reliable,
+	    &error));
+
 	assert(version_string == "0.5.0");
 	auto unknown_address_library = *runtime;
 	unknown_address_library.set_address_library_sha256(std::string(64, '0'));

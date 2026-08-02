@@ -92,6 +92,12 @@ namespace kcd2mp
 				return "ChatBroadcast";
 			if (envelope.has_server_entity_control())
 				return "ServerEntityControl";
+			if (envelope.has_world_object_accepted())
+				return "WorldObjectAccepted";
+			if (envelope.has_world_object_rejected())
+				return "WorldObjectRejected";
+			if (envelope.has_world_object_updated())
+				return "WorldObjectUpdated";
 			if (envelope.has_server_shutdown())
 				return "ServerShutdown";
 			if (envelope.has_pong())
@@ -202,12 +208,16 @@ namespace kcd2mp
 		{
 			std::scoped_lock lock(m_state_mutex);
 			m_status = {};
+			m_update_rates = {};
 			m_status.state = client_state::preflight;
 			m_remote_players.clear();
 			m_chat.clear();
 			m_local_correction.reset();
 			m_profile.reset();
 			m_pending_profile.reset();
+			m_world_objects.clear();
+			m_pending_world_objects.clear();
+			m_deferred_world_objects.clear();
 			m_local_avatar.reset();
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
@@ -372,11 +382,13 @@ namespace kcd2mp
 
 		bool connected = false;
 		bool profile_due = false;
+		std::uint32_t tick_rate = 30;
 		std::optional<protocol::ClientAvatarUpdate> avatar_update;
 		std::string expected_level;
 		{
 			std::scoped_lock lock(m_state_mutex);
 			connected = m_status.state == client_state::connected;
+			tick_rate = std::clamp(m_update_rates.tick_rate, 1U, 120U);
 			expected_level = m_status.level_id;
 			profile_due = connected && !m_profile_update_pending
 			    && (m_last_profile_sent
@@ -424,9 +436,12 @@ namespace kcd2mp
 			queue_network(disconnect_command{});
 			return;
 		}
+		const auto transform_interval =
+		    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+		        std::chrono::duration<double>(1.0 / tick_rate));
 		if (connected && local_transform
 		    && (m_last_transform_sent == std::chrono::steady_clock::time_point{}
-		        || now - m_last_transform_sent >= std::chrono::milliseconds(33)))
+		        || now - m_last_transform_sent >= transform_interval))
 		{
 			queue_network(transform_command{std::move(*local_transform)});
 			m_last_transform_sent = now;
@@ -438,6 +453,8 @@ namespace kcd2mp
 				queue_profile_snapshot(*profile);
 			}
 		}
+		if (connected)
+			queue_world_object_updates(m_runtime.poll_world_object_updates());
 		update_interpolation(now);
 	}
 
@@ -520,6 +537,12 @@ namespace kcd2mp
 	{
 		std::scoped_lock lock(m_state_mutex);
 		return m_status;
+	}
+
+	client_update_rates multiplayer_client::update_rates() const
+	{
+		std::scoped_lock lock(m_state_mutex);
+		return m_update_rates;
 	}
 
 	std::vector<remote_player_view> multiplayer_client::remote_players() const
@@ -749,6 +772,10 @@ namespace kcd2mp
 							        m_status.server_name =
 							            accepted.server_name();
 							        m_status.level_id = accepted.level_id();
+							        m_update_rates.tick_rate =
+							            accepted.tick_rate();
+							        m_update_rates.snapshot_rate =
+							            accepted.snapshot_rate();
 							        m_status.error.clear();
 							        m_profile_snapshot_interval_seconds =
 							            accepted
@@ -1042,6 +1069,16 @@ namespace kcd2mp
 							        envelope,
 							        reliability::reliable);
 						    }
+						    else if constexpr (
+						        std::is_same_v<type, world_object_command>)
+						    {
+							    protocol::Envelope envelope;
+							    *envelope.mutable_client_world_object_update() =
+							        std::move(typed.message);
+							    (void)send_envelope(
+							        envelope,
+							        reliability::reliable);
+						    }
 					    },
 					    command);
 				}
@@ -1141,6 +1178,9 @@ namespace kcd2mp
 				m_status.local_player_id = 0;
 				m_status.ping_ms = -1;
 				m_status.packet_loss_percent = 0.0F;
+				m_world_objects.clear();
+				m_pending_world_objects.clear();
+				m_deferred_world_objects.clear();
 				final_error = m_status.error;
 			}
 		}
@@ -1191,6 +1231,47 @@ namespace kcd2mp
 			m_profile_update_pending = true;
 		}
 		queue_network(profile_command{std::move(update)});
+	}
+
+	void multiplayer_client::queue_world_object_updates(
+	    std::vector<protocol::WorldObjectState> updates)
+	{
+		for (auto &observed : updates)
+		{
+			protocol::ClientWorldObjectUpdate update;
+			{
+				std::scoped_lock lock(m_state_mutex);
+				if (m_status.state != client_state::connected
+				    || !is_valid_world_object_state(observed, false))
+				{
+					continue;
+				}
+				if (m_pending_world_objects.contains(observed.entity_guid()))
+				{
+					m_deferred_world_objects.insert_or_assign(
+					    observed.entity_guid(),
+					    observed);
+					continue;
+				}
+				const auto current = m_world_objects.find(observed.entity_guid());
+				const auto revision = current == m_world_objects.end()
+				    ? 0
+				    : current->second.revision();
+				observed.set_revision(revision);
+				if (current != m_world_objects.end()
+				    && current->second.SerializeAsString()
+				        == observed.SerializeAsString())
+				{
+					continue;
+				}
+				update.set_base_revision(revision);
+				*update.mutable_state() = observed;
+				m_pending_world_objects.insert_or_assign(
+				    observed.entity_guid(),
+				    observed);
+			}
+			queue_network(world_object_command{std::move(update)});
+		}
 	}
 
 	void multiplayer_client::handle_game_envelope(
@@ -1281,6 +1362,11 @@ namespace kcd2mp
 				return;
 			}
 			m_pending_bootstrap = bootstrap_copy;
+			m_world_objects.clear();
+			m_pending_world_objects.clear();
+			m_deferred_world_objects.clear();
+			for (const auto &object : bootstrap.world_objects())
+				m_world_objects.emplace(object.entity_guid(), object);
 		}
 		else if (envelope.has_player_joined())
 		{
@@ -1332,11 +1418,85 @@ namespace kcd2mp
 		}
 		else if (envelope.has_profile_rejected())
 		{
+			const auto authoritative =
+			    envelope.profile_rejected().authoritative_profile();
+			lock.unlock();
+			const bool applied =
+			    m_runtime.apply_authoritative_profile(authoritative);
+			lock.lock();
 			m_pending_profile.reset();
 			m_profile_update_pending = false;
-			m_status.state = client_state::closing;
+			if (!applied)
+			{
+				m_status.state = client_state::closing;
+				m_status.error =
+				    "could not apply authoritative profile correction: "
+				    + envelope.profile_rejected().reason();
+				queue_network(disconnect_command{});
+				return;
+			}
+			m_profile = authoritative;
 			m_status.error = envelope.profile_rejected().reason();
-			queue_network(disconnect_command{});
+		}
+		else if (envelope.has_world_object_accepted())
+		{
+			const auto &accepted = envelope.world_object_accepted();
+			const auto pending =
+			    m_pending_world_objects.find(accepted.entity_guid());
+			if (pending == m_pending_world_objects.end())
+				return;
+			auto state = pending->second;
+			state.set_revision(accepted.revision());
+			m_world_objects.insert_or_assign(accepted.entity_guid(), state);
+			m_pending_world_objects.erase(pending);
+			if (const auto deferred =
+			        m_deferred_world_objects.find(accepted.entity_guid());
+			    deferred != m_deferred_world_objects.end())
+			{
+				auto desired = deferred->second;
+				m_deferred_world_objects.erase(deferred);
+				desired.set_revision(accepted.revision());
+				if (desired.SerializeAsString() != state.SerializeAsString())
+				{
+					protocol::ClientWorldObjectUpdate update;
+					update.set_base_revision(accepted.revision());
+					*update.mutable_state() = desired;
+					m_pending_world_objects.insert_or_assign(
+					    accepted.entity_guid(), desired);
+					queue_network(world_object_command{std::move(update)});
+				}
+			}
+		}
+		else if (envelope.has_world_object_rejected())
+		{
+			const auto state =
+			    envelope.world_object_rejected().authoritative_state();
+			m_pending_world_objects.erase(state.entity_guid());
+			m_deferred_world_objects.erase(state.entity_guid());
+			m_world_objects.insert_or_assign(state.entity_guid(), state);
+			lock.unlock();
+			const bool applied = m_runtime.apply_world_object_state(state);
+			lock.lock();
+			if (!applied)
+				m_status.error = "could not apply world object correction";
+		}
+		else if (envelope.has_world_object_updated())
+		{
+			const auto state = envelope.world_object_updated().state();
+			const auto current = m_world_objects.find(state.entity_guid());
+			if (current != m_world_objects.end()
+			    && state.revision() <= current->second.revision())
+			{
+				return;
+			}
+			m_pending_world_objects.erase(state.entity_guid());
+			m_deferred_world_objects.erase(state.entity_guid());
+			m_world_objects.insert_or_assign(state.entity_guid(), state);
+			lock.unlock();
+			const bool applied = m_runtime.apply_world_object_state(state);
+			lock.lock();
+			if (!applied)
+				m_status.error = "could not apply remote world object update";
 		}
 		else if (envelope.has_avatar_accepted())
 		{
@@ -1610,6 +1770,14 @@ namespace kcd2mp
 		{
 			return;
 		}
+		const auto sequence = snapshot.transform().sequence();
+		if (player.has_transform_sequence
+		    && sequence <= player.last_transform_sequence)
+		{
+			return;
+		}
+		player.has_transform_sequence = true;
+		player.last_transform_sequence = sequence;
 		player.history.push_back({
 		    now,
 		    snapshot.transform(),
