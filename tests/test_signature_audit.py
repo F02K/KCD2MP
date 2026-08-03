@@ -123,6 +123,41 @@ class StartupSafetyTests(unittest.TestCase):
         self.assertIn("pD3D12CreateDevice", cpp)
         self.assertIn("jmp qword ptr [pD3D12CreateDevice]", assembly)
 
+    def test_environment_bootstrap_precedes_destructive_native_mutation(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_runtime.cpp"
+        ).read_text(encoding="utf-8")
+        begin = source.index("sandbox_start_result native_runtime::begin_sandbox")
+        end = source.index("sandbox_poll_result native_runtime::poll_sandbox", begin)
+        sandbox = source[begin:end]
+
+        environment = sandbox.index("apply_environment_state(")
+        save_lock = sandbox.index('"join.sandbox.save-load-lock.begin"')
+        profile_apply = sandbox.index("reconcile_profile(m_profiles, target)")
+        self.assertLess(environment, save_lock)
+        self.assertLess(environment, profile_apply)
+
+        environment_failure = sandbox.index(
+            '"join.sandbox.environment.failed"', environment
+        )
+        environment_success = sandbox.index(
+            '"join.sandbox.environment.ok"', environment_failure
+        )
+        self.assertNotIn(
+            "begin_native_unload", sandbox[environment_failure:environment_success]
+        )
+
+    def test_environment_cvar_override_restores_engine_flags(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_runtime.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("environment_cvar_override_mask", source)
+        self.assertIn("cvar->ClearFlags(*overridden_flags)", source)
+        self.assertIn(
+            "cvar->SetFlags(current_flags | *overridden_flags)", source
+        )
+        self.assertIn('"join.environment.cvar.applied"', source)
+
 
 if __name__ == "__main__":
     unittest.main()

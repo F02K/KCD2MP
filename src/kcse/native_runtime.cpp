@@ -25,6 +25,15 @@ namespace kcd2mp::kcse
 {
 	namespace
 	{
+		constexpr int environment_cvar_override_mask =
+		    0x00000002 // VF_CHEAT
+		    | 0x00000080 // VF_NET_SYNCED
+		    | 0x00000800 // VF_READONLY
+		    | 0x00800000 // VF_CONST_CVAR
+		    | 0x01000000 // VF_CHEAT_ALWAYS_CHECK
+		    | 0x02000000 // VF_CHEAT_NOCHECK
+		    | 0x40000000; // VF_SYSSPEC_OVERWRITE
+
 		bool in_whgame_text(const void *address) noexcept
 		{
 			const auto text = REL::Module::get().segment(REL::Segment::textx);
@@ -102,9 +111,13 @@ namespace kcd2mp::kcse
 					if (!cvar)
 						return false;
 					auto **vtable = *reinterpret_cast<void ***>(cvar);
-					if (!vtable || !vtable[10]
-					    || !in_whgame_text(vtable[10]))
+					if (!vtable)
 						return false;
+					for (const auto slot : {4U, 10U, 11U, 12U, 13U})
+					{
+						if (!vtable[slot] || !in_whgame_text(vtable[slot]))
+							return false;
+					}
 				}
 				return true;
 #ifdef _WIN32
@@ -119,26 +132,53 @@ namespace kcd2mp::kcse
 		bool guarded_force_set_cvar(
 		    ICVar *cvar,
 		    const char *text,
-		    float *actual) noexcept
+		    float *actual,
+		    int *original_flags,
+		    int *overridden_flags) noexcept
 		{
+			*original_flags = 0;
+			*overridden_flags = 0;
 #ifdef _WIN32
 			__try
 			{
+				__try
+				{
 #endif
-				auto **vtable = *reinterpret_cast<void ***>(cvar);
-				if (!vtable || !vtable[10] || !in_whgame_text(vtable[10]))
-					return false;
-				using force_set = void(__fastcall *)(ICVar *, const char *);
-				reinterpret_cast<force_set>(vtable[10])(cvar, text);
-				*actual = cvar->GetFVal();
-				return true;
+					auto **vtable = *reinterpret_cast<void ***>(cvar);
+					if (!vtable)
+						return false;
+					for (const auto slot : {4U, 10U, 11U, 12U, 13U})
+					{
+						if (!vtable[slot] || !in_whgame_text(vtable[slot]))
+							return false;
+					}
+					*original_flags = cvar->GetFlags();
+					*overridden_flags =
+					    *original_flags & environment_cvar_override_mask;
+					if (*overridden_flags != 0)
+						cvar->ClearFlags(*overridden_flags);
+					using force_set = void(__fastcall *)(ICVar *, const char *);
+					reinterpret_cast<force_set>(vtable[10])(cvar, text);
+					*actual = cvar->GetFVal();
 #ifdef _WIN32
+				}
+				__finally
+				{
+#endif
+					if (*overridden_flags != 0)
+					{
+						const auto current_flags = cvar->GetFlags();
+						cvar->SetFlags(current_flags | *overridden_flags);
+					}
+#ifdef _WIN32
+				}
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER)
 			{
 				return false;
 			}
 #endif
+			return true;
 		}
 
 		bool force_set_environment_cvar(
@@ -161,9 +201,20 @@ namespace kcd2mp::kcse
 			}
 			const auto text = std::format("{:.6f}", value);
 			float actual_float{};
-			if (!guarded_force_set_cvar(cvar, text.c_str(), &actual_float))
+			int original_flags{};
+			int overridden_flags{};
+			if (!guarded_force_set_cvar(
+			        cvar,
+			        text.c_str(),
+			        &actual_float,
+			        &original_flags,
+			        &overridden_flags))
 			{
-				error = std::format("CVar '{}' ForceSet raised an SEH exception", name);
+				error = std::format(
+				    "CVar '{}' override raised an SEH exception or has an "
+				    "incompatible vtable",
+				    name);
+				KCD2MP_JOIN_TRACE("join.environment.cvar.failed", error);
 				return false;
 			}
 			const auto actual = static_cast<double>(actual_float);
@@ -173,12 +224,26 @@ namespace kcd2mp::kcse
 			if (!std::isfinite(actual) || difference > 0.001)
 			{
 				error = std::format(
-				    "CVar '{}' rejected ForceSet to {}; actual value is {}",
+				    "CVar '{}' rejected override to {}; actual value is {}; "
+				    "flags=0x{:08X}; overridden=0x{:08X}",
 				    name,
 				    value,
-				    actual);
+				    actual,
+				    static_cast<unsigned int>(original_flags),
+				    static_cast<unsigned int>(overridden_flags));
+				KCD2MP_JOIN_TRACE("join.environment.cvar.failed", error);
 				return false;
 			}
+			KCD2MP_JOIN_TRACE(
+			    "join.environment.cvar.applied",
+			    std::format(
+			        "name=\"{}\" requested={} actual={} flags=0x{:08X} "
+			        "overridden=0x{:08X}",
+			        name,
+			        value,
+			        actual,
+			        static_cast<unsigned int>(original_flags),
+			        static_cast<unsigned int>(overridden_flags)));
 			return true;
 		}
 
@@ -558,6 +623,29 @@ namespace kcd2mp::kcse
 			    "CCryAction=nil");
 			return {false, "CCryAction is unavailable."};
 		}
+		lock.unlock();
+		const auto environment_applied =
+		    apply_environment_state(bootstrap.environment(), true);
+		lock.lock();
+		if (!environment_applied)
+		{
+			const auto environment_error = m_diagnostic.empty()
+			    ? std::string{"Native server environment bootstrap failed."}
+			    : m_diagnostic;
+			KCD2MP_JOIN_TRACE(
+			    "join.sandbox.environment.failed",
+			    environment_error);
+			return {false, environment_error};
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.environment.ok",
+		    std::format(
+		        "time_of_day={} time_scale={} weather_id={} "
+		        "weather_transition_ms={}",
+		        bootstrap.environment().time_of_day_hours(),
+		        bootstrap.environment().time_scale(),
+		        bootstrap.environment().weather_id(),
+		        bootstrap.environment().weather_transition_ms()));
 		KCD2MP_JOIN_TRACE(
 		    "join.sandbox.save-load-lock.begin",
 		    std::format(
@@ -632,19 +720,6 @@ namespace kcd2mp::kcse
 				    false,
 				    "Native world-item bootstrap failed: " + world_error};
 			}
-		}
-		lock.unlock();
-		const auto environment_applied =
-		    apply_environment_state(bootstrap.environment(), true);
-		lock.lock();
-		if (!environment_applied)
-		{
-			m_profiles.reset();
-			lock.unlock();
-			begin_native_unload(
-			    "Native server environment bootstrap failed; unloading the "
-			    "modified save.");
-			return {false, "Native server environment bootstrap failed."};
 		}
 		m_sandbox_active = true;
 		m_sandbox_progress.phase = sandbox_phase::ready;
@@ -770,7 +845,14 @@ namespace kcd2mp::kcse
 	    bool apply_weather)
 	{
 		if (!is_valid_environment_state(state))
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = "Native environment synchronization received an invalid state.";
+			KCD2MP_JOIN_TRACE(
+			    "join.environment.apply.failed",
+			    m_diagnostic);
 			return false;
+		}
 		std::string error;
 		if (!force_set_environment_cvar(
 		        "e_TimeOfDay",
@@ -785,6 +867,9 @@ namespace kcd2mp::kcse
 		{
 			std::scoped_lock lock(m_cache_mutex);
 			m_diagnostic = "Native environment synchronization failed: " + error;
+			KCD2MP_JOIN_TRACE(
+			    "join.environment.apply.failed",
+			    m_diagnostic);
 			return false;
 		}
 		if (apply_weather)
@@ -798,9 +883,19 @@ namespace kcd2mp::kcse
 				std::scoped_lock lock(m_cache_mutex);
 				m_diagnostic =
 				    "Native environment synchronization could not apply weather.";
+				KCD2MP_JOIN_TRACE(
+				    "join.environment.apply.failed",
+				    m_diagnostic);
 				return false;
 			}
 		}
+		KCD2MP_JOIN_TRACE(
+		    "join.environment.apply.ok",
+		    std::format(
+		        "revision={} weather_revision={} apply_weather={}",
+		        state.revision(),
+		        state.weather_revision(),
+		        apply_weather));
 		return true;
 	}
 
