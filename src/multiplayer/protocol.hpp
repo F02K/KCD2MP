@@ -1,6 +1,8 @@
 #pragma once
 
 #include "kcd2mp.pb.h"
+#include "generated/kcd2mp_version.hpp"
+#include "multiplayer/environment.hpp"
 #include "multiplayer/runtime_capabilities.hpp"
 #include "multiplayer/address_library_manifest.generated.hpp"
 
@@ -17,8 +19,6 @@
 
 namespace kcd2mp
 {
-	constexpr std::uint32_t protocol_version = 7;
-	constexpr std::string_view version_string = "0.5.0";
 	constexpr std::uint32_t supported_whgame_timestamp = 0x6A350E20;
 	constexpr std::uint64_t supported_whgame_image_size = 0x5B2D000;
 	constexpr std::uint32_t supported_kcse_game_version = 0x01050600;
@@ -35,6 +35,7 @@ namespace kcd2mp
 	constexpr std::size_t max_profile_inventory_items = 512;
 	constexpr std::size_t max_world_objects = 4096;
 	constexpr std::size_t max_world_object_inventory_items = 512;
+	constexpr std::size_t max_world_items = 4096;
 	constexpr std::size_t max_profile_quick_access_slots = 36;
 	constexpr std::int64_t max_profile_money = 2'000'000'000;
 	constexpr std::uint32_t money_subunits_per_groschen = 10;
@@ -125,6 +126,9 @@ namespace kcd2mp
 	[[nodiscard]] bool is_valid_profile(const protocol::PlayerProfile &profile);
 	[[nodiscard]] bool is_valid_world_object_state(
 	    const protocol::WorldObjectState &state,
+	    bool require_revision = true);
+	[[nodiscard]] bool is_valid_world_item_state(
+	    const protocol::WorldItemState &state,
 	    bool require_revision = true);
 	[[nodiscard]] bool is_valid_avatar_descriptor(
 	    const protocol::AvatarDescriptor &avatar);

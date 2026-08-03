@@ -24,7 +24,7 @@ enum AvatarWeaponClass {
 
 enum RejectReason {
   REJECT_REASON_UNSPECIFIED = 0;
-  REJECT_REASON_PROTOCOL_MISMATCH = 1;
+  REJECT_REASON_VERSION_MISMATCH = 1;
   REJECT_REASON_GAME_BUILD_MISMATCH = 2;
   REJECT_REASON_LEVEL_MISMATCH = 3;
   REJECT_REASON_AUTHENTICATION_FAILED = 4;
@@ -109,8 +109,9 @@ message ClientRuntimeCapabilities {
 }
 
 message ClientHello {
-  uint32 protocol_version = 1;
-  string client_version = 2;
+  string version = 1;
+  reserved 2;
+  reserved "client_version";
   uint32 whgame_timestamp = 3;
   uint64 whgame_image_size = 4;
   string display_name = 5;
@@ -178,6 +179,18 @@ message PlayerProfile {
   repeated QuickAccessSlot quick_access_slots = 13;
 }
 
+message EnvironmentState {
+  uint64 revision = 1;
+  // Authoritative time of day at server_time_ms, in the range [0, 24).
+  double time_of_day_hours = 2;
+  // In-game seconds advanced per real-world second. Zero pauses the cycle.
+  float time_scale = 3;
+  uint64 server_time_ms = 4;
+  uint32 weather_id = 5;
+  uint32 weather_transition_ms = 6;
+  uint64 weather_revision = 7;
+}
+
 message ServerBootstrap {
   string server_id = 1;
   string session_id = 2;
@@ -191,6 +204,8 @@ message ServerBootstrap {
   string issued_identity_token = 10;
   uint32 timeout_seconds = 11;
   repeated WorldObjectState world_objects = 12;
+  EnvironmentState environment = 13;
+  repeated WorldItemState world_items = 14;
 }
 
 message ClientWorldReady {
@@ -256,8 +271,39 @@ message WorldObjectUpdated {
   WorldObjectState state = 1;
 }
 
+message WorldItemState {
+  string instance_id = 1;
+  uint64 revision = 2;
+  bool present = 3;
+  InventoryItem item = 4;
+  TransformState transform = 5;
+}
+
+message ClientWorldItemUpdate {
+  uint64 base_revision = 1;
+  WorldItemState state = 2;
+}
+
+message WorldItemAccepted {
+  string instance_id = 1;
+  uint64 revision = 2;
+}
+
+message WorldItemRejected {
+  WorldItemState authoritative_state = 1;
+  string reason = 2;
+}
+
+message WorldItemUpdated {
+  WorldItemState state = 1;
+}
+
 message StoredWorldObjects {
   repeated WorldObjectState objects = 1;
+}
+
+message StoredWorldItems {
+  repeated WorldItemState items = 1;
 }
 
 message StoredPlayerProfile {
@@ -300,6 +346,11 @@ message WorldSnapshot {
   uint64 server_tick = 1;
   uint64 server_time_ms = 2;
   repeated PlayerSnapshot players = 3;
+  EnvironmentState environment = 4;
+}
+
+message ServerEnvironmentUpdated {
+  EnvironmentState state = 1;
 }
 
 message StateCorrection {
@@ -392,5 +443,10 @@ message Envelope {
     WorldObjectAccepted world_object_accepted = 28;
     WorldObjectRejected world_object_rejected = 29;
     WorldObjectUpdated world_object_updated = 30;
+    ServerEnvironmentUpdated server_environment_updated = 31;
+    ClientWorldItemUpdate client_world_item_update = 32;
+    WorldItemAccepted world_item_accepted = 33;
+    WorldItemRejected world_item_rejected = 34;
+    WorldItemUpdated world_item_updated = 35;
   }
 }

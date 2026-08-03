@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -11,7 +12,8 @@ import struct
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+import zipfile
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -65,6 +67,15 @@ class BuildEnvironment:
 
 
 @dataclass(frozen=True)
+class PackageResult:
+    root: Path
+    client_root: Path
+    server_root: Path
+    tests_root: Path
+    client_zip: Path
+
+
+@dataclass(frozen=True)
 class BuildResult:
     profile: BuildProfile
     build_dir: Path
@@ -77,6 +88,7 @@ class BuildResult:
     kcse_client_path: Optional[Path] = None
     kcse_client_pdb_path: Optional[Path] = None
     address_library_paths: Tuple[Path, ...] = ()
+    package: Optional[PackageResult] = None
 
 
 @dataclass(frozen=True)
@@ -600,7 +612,10 @@ class BuildService:
                     "\n".join(missing)
                 )
             )
-        return result
+        package = package_artifacts(result, self.project_root)
+        log("Packaged client, server, and tests under {}.".format(package.root))
+        log("Install-ready client ZIP: {}".format(package.client_zip))
+        return replace(result, package=package)
 
     def update_address_library(self, log: LogCallback = print) -> str:
         """Fast-forward the pinned Address Library submodule to origin's HEAD."""
@@ -980,6 +995,211 @@ def is_game_running() -> bool:
     return GAME_EXECUTABLE.lower() in completed.stdout.lower()
 
 
+def client_deployment_layout(result: BuildResult) -> Tuple[Tuple[Path, Path], ...]:
+    """Map client artifacts to paths relative to the KCD2 game root."""
+
+    if result.kcse_loader_path is not None and not result.address_library_paths:
+        raise BuildToolError(
+            "KCSE deployment is missing the bundled Address Library tables."
+        )
+
+    game_bin = GAME_BIN_RELATIVE
+    targets: List[Tuple[Path, Path]] = [
+        (result.pdb_path, game_bin / "d3d12.pdb"),
+        (result.dll_path, game_bin / "d3d12.dll"),
+    ]
+    optional_targets = (
+        (result.kcse_loader_path, game_bin / "dinput8.dll"),
+        (result.kcse_loader_pdb_path, game_bin / "dinput8.pdb"),
+        (
+            result.kcse_client_path,
+            Path("mods") / "KCD2MP" / "KCSE" / "Plugins" / "KCD2MPKCSEClient.dll",
+        ),
+        (
+            result.kcse_client_pdb_path,
+            Path("mods") / "KCD2MP" / "KCSE" / "Plugins" / "KCD2MPKCSEClient.pdb",
+        ),
+    )
+    targets.extend(
+        (source, destination)
+        for source, destination in optional_targets
+        if source is not None
+    )
+    targets.extend(
+        (
+            path,
+            Path("KCSE") / "addresslib" / path.name,
+        )
+        for path in result.address_library_paths
+    )
+    return tuple(targets)
+
+
+def _required_artifacts(layout: Iterable[Tuple[Path, Path]], purpose: str) -> None:
+    missing = [str(source) for source, _ in layout if not source.is_file()]
+    if missing:
+        raise BuildToolError(
+            "Cannot {} with missing build artifacts:\n{}".format(
+                purpose, "\n".join(missing)
+            )
+        )
+
+
+def _copy_layout(layout: Iterable[Tuple[Path, Path]], destination: Path) -> None:
+    for source, relative in layout:
+        target = destination / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target)
+
+
+def _write_deterministic_zip(source_root: Path, archive: Path) -> None:
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(
+        archive,
+        "w",
+        compression=zipfile.ZIP_DEFLATED,
+        compresslevel=9,
+    ) as bundle:
+        for source in sorted(path for path in source_root.rglob("*") if path.is_file()):
+            relative = source.relative_to(source_root.parent).as_posix()
+            info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = 0o100644 << 16
+            with source.open("rb") as input_stream, bundle.open(
+                info, "w", force_zip64=True
+            ) as output_stream:
+                shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def read_project_version(project_root: Path = PROJECT_ROOT) -> str:
+    cmake = (project_root / "CMakeLists.txt").read_text(
+        encoding="utf-8", errors="strict"
+    )
+    match = re.search(
+        r"project\(KCD2MP\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)", cmake
+    )
+    if match is None:
+        raise BuildToolError("CMakeLists.txt does not declare the KCD2MP version.")
+    return match.group(1)
+
+
+def package_artifacts(
+    result: BuildResult,
+    project_root: Path = PROJECT_ROOT,
+    output_root: Optional[Path] = None,
+) -> PackageResult:
+    """Create separated client/server/test outputs and an install-ready client ZIP."""
+
+    project_root = project_root.resolve()
+    package_root = (
+        output_root
+        if output_root is not None
+        else project_root / "out" / "package" / result.profile.key
+    ).resolve()
+    if package_root in {project_root, project_root.parent}:
+        raise BuildToolError("Package output must not replace the project directory.")
+
+    client_layout = client_deployment_layout(result)
+    _required_artifacts(client_layout, "package the client")
+    if result.server_path is None or not result.server_path.is_file():
+        raise BuildToolError("Cannot package the server: KCD2MPServer.exe is missing.")
+
+    artifact_dir = result.dll_path.parent
+    test_executables = tuple(sorted(artifact_dir.glob("KCD2MP*Tests.exe")))
+    if not test_executables:
+        raise BuildToolError("Cannot package tests: no KCD2MP test executables were found.")
+
+    package_root.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=package_root.name + ".", dir=str(package_root.parent))
+    )
+    try:
+        client_root = staging / "client"
+        game_root = client_root / "KingdomComeDeliverance2"
+        server_root = staging / "server"
+        tests_root = staging / "tests"
+        _copy_layout(client_layout, game_root)
+        server_root.mkdir(parents=True, exist_ok=True)
+
+        server_sources = (
+            result.server_path,
+            result.server_path.with_suffix(".pdb"),
+            project_root / "server.toml.example",
+            project_root / "starter_profile.toml",
+            project_root / "data" / "npc_archetypes.json",
+        )
+        missing_server = [str(path) for path in server_sources if not path.is_file()]
+        if missing_server:
+            raise BuildToolError(
+                "Cannot package the server with missing files:\n{}".format(
+                    "\n".join(missing_server)
+                )
+            )
+        for source in server_sources:
+            shutil.copy2(source, server_root / source.name)
+
+        if result.audit_path is not None:
+            audit_sources = (result.audit_path, result.audit_path.with_suffix(".pdb"))
+            missing_audit = [str(path) for path in audit_sources if not path.is_file()]
+            if missing_audit:
+                raise BuildToolError(
+                    "Cannot package diagnostic tools with missing files:\n{}".format(
+                        "\n".join(missing_audit)
+                    )
+                )
+            tools_root = server_root / "tools"
+            tools_root.mkdir(parents=True, exist_ok=True)
+            for source in audit_sources:
+                shutil.copy2(source, tools_root / source.name)
+
+        tests_root.mkdir(parents=True, exist_ok=True)
+        for executable in test_executables:
+            shutil.copy2(executable, tests_root / executable.name)
+            symbols = executable.with_suffix(".pdb")
+            if symbols.is_file():
+                shutil.copy2(symbols, tests_root / symbols.name)
+
+        version = read_project_version(project_root)
+        client_zip = client_root / "KCD2MP-Client-v{}.zip".format(version)
+        _write_deterministic_zip(game_root, client_zip)
+
+        checksum_files = sorted(
+            path
+            for path in staging.rglob("*")
+            if path.is_file() and path.name != "SHA256SUMS.txt"
+        )
+        checksums = "".join(
+            "{}  {}\n".format(_sha256(path), path.relative_to(staging).as_posix())
+            for path in checksum_files
+        )
+        (staging / "SHA256SUMS.txt").write_text(checksums, encoding="utf-8")
+
+        if package_root.exists():
+            shutil.rmtree(package_root)
+        os.replace(staging, package_root)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+    return PackageResult(
+        root=package_root,
+        client_root=package_root / "client",
+        server_root=package_root / "server",
+        tests_root=package_root / "tests",
+        client_zip=package_root
+        / "client"
+        / "KCD2MP-Client-v{}.zip".format(read_project_version(project_root)),
+    )
+
+
 def deploy_artifacts(
     result: BuildResult,
     game_root: Path,
@@ -991,57 +1211,17 @@ def deploy_artifacts(
     if not executable.is_file():
         raise BuildToolError("Deployment target does not contain {}: {}".format(GAME_EXECUTABLE, destination))
 
-    artifacts = [
-        result.dll_path,
-        result.pdb_path,
-        result.kcse_loader_path,
-        result.kcse_loader_pdb_path,
-        result.kcse_client_path,
-        result.kcse_client_pdb_path,
-        *result.address_library_paths,
-    ]
-    missing = [str(path) for path in artifacts if path is not None and not path.is_file()]
-    if missing:
-        raise BuildToolError("Cannot deploy missing build artifacts:\n{}".format("\n".join(missing)))
+    layout = client_deployment_layout(result)
+    _required_artifacts(layout, "deploy")
     if process_checker():
         raise BuildToolError(
             "{} is running. Close the game before deploying.".format(GAME_EXECUTABLE)
         )
-    if result.kcse_loader_path is not None:
-        if not result.address_library_paths:
-            raise BuildToolError(
-                "KCSE deployment is missing the bundled Address Library tables."
-            )
-
-    targets = [
-        (result.pdb_path, destination / "d3d12.pdb"),
-        (result.dll_path, destination / "d3d12.dll"),
-    ]
-    if result.kcse_loader_path is not None:
-        targets.append((result.kcse_loader_path, destination / "dinput8.dll"))
-    if result.kcse_loader_pdb_path is not None:
-        targets.append((result.kcse_loader_pdb_path, destination / "dinput8.pdb"))
-    plugin_destination = normalized_root / "mods" / "KCD2MP" / "KCSE" / "Plugins"
-    if result.kcse_client_path is not None or result.kcse_client_pdb_path is not None:
-        plugin_destination.mkdir(parents=True, exist_ok=True)
-    if result.kcse_client_path is not None:
-        targets.append(
-            (result.kcse_client_path, plugin_destination / "KCD2MPKCSEClient.dll")
-        )
-    if result.kcse_client_pdb_path is not None:
-        targets.append(
-            (result.kcse_client_pdb_path, plugin_destination / "KCD2MPKCSEClient.pdb")
-        )
-    if result.address_library_paths:
-        address_library_destination = normalized_root / "KCSE" / "addresslib"
-        address_library_destination.mkdir(parents=True, exist_ok=True)
-        targets.extend(
-            (path, address_library_destination / path.name)
-            for path in result.address_library_paths
-        )
+    targets = tuple((source, normalized_root / relative) for source, relative in layout)
     temporary_paths: List[Path] = []
     try:
         for source, target in targets:
+            target.parent.mkdir(parents=True, exist_ok=True)
             temporary = target.with_name(target.name + ".kcd2mp.tmp")
             shutil.copy2(source, temporary)
             temporary_paths.append(temporary)

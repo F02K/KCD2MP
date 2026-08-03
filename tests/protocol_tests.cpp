@@ -1,6 +1,7 @@
 #include "multiplayer/protocol.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <format>
@@ -10,6 +11,19 @@
 
 namespace
 {
+	kcd2mp::protocol::EnvironmentState environment()
+	{
+		kcd2mp::protocol::EnvironmentState state;
+		state.set_revision(1);
+		state.set_time_of_day_hours(8.0);
+		state.set_time_scale(15.0F);
+		state.set_server_time_ms(1);
+		state.set_weather_id(1);
+		state.set_weather_transition_ms(30'000);
+		state.set_weather_revision(1);
+		return state;
+	}
+
 	kcd2mp::protocol::TransformState transform(
 	    float x,
 	    float speed,
@@ -41,8 +55,7 @@ int main()
 
 	protocol::Envelope envelope;
 	auto *hello = envelope.mutable_client_hello();
-	hello->set_protocol_version(protocol_version);
-	hello->set_client_version(version_string);
+	hello->set_version(kcd2mp_version);
 	hello->set_whgame_timestamp(supported_whgame_timestamp);
 	hello->set_whgame_image_size(supported_whgame_image_size);
 	hello->set_display_name("Henry");
@@ -66,6 +79,12 @@ int main()
 	const auto decoded = decode(encoded->bytes, &error);
 	assert(decoded);
 	assert(decoded->client_hello().display_name() == "Henry");
+	assert(decoded->client_hello().version() == "0.0.9");
+	auto incompatible = envelope;
+	incompatible.mutable_client_hello()->set_version("0.0.8");
+	assert(encode(incompatible, reliability::reliable, &error));
+	incompatible.mutable_client_hello()->set_version("invalid version");
+	assert(!encode(incompatible, reliability::reliable, &error));
 	auto truncated = encoded->bytes;
 	truncated.pop_back();
 	assert(!decode(truncated, &error));
@@ -100,6 +119,7 @@ int main()
 
 	protocol::Envelope too_many_players;
 	auto *world = too_many_players.mutable_world_snapshot();
+	*world->mutable_environment() = environment();
 	for (std::size_t index = 0; index < max_players + 1; ++index)
 	{
 		auto *player = world->add_players();
@@ -256,8 +276,9 @@ int main()
 	assert(!is_valid_avatar_policy(policy));
 
 	protocol::Envelope static_avatar_in_snapshot;
-	auto *static_player =
-	    static_avatar_in_snapshot.mutable_world_snapshot()->add_players();
+	auto *static_world = static_avatar_in_snapshot.mutable_world_snapshot();
+	*static_world->mutable_environment() = environment();
+	auto *static_player = static_world->add_players();
 	static_player->set_player_id(1);
 	static_player->set_display_name("Henry");
 	*static_player->mutable_avatar() = *avatar;
@@ -334,6 +355,26 @@ int main()
 	    reliability::reliable,
 	    &error));
 
+	protocol::Envelope dropped_item_envelope;
+	auto *dropped_update =
+	    dropped_item_envelope.mutable_client_world_item_update();
+	dropped_update->set_base_revision(0);
+	auto *dropped = dropped_update->mutable_state();
+	dropped->set_instance_id(container_item->instance_id());
+	dropped->set_revision(0);
+	dropped->set_present(true);
+	*dropped->mutable_item() = *container_item;
+	*dropped->mutable_transform() = transform(4.0F, 0.0F, 0);
+	assert(is_valid_world_item_state(*dropped, false));
+	assert(encode(dropped_item_envelope, reliability::reliable, &error));
+	auto bad_drop = *dropped;
+	bad_drop.mutable_item()->set_instance_id(
+	    "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+	assert(!is_valid_world_item_state(bad_drop, false));
+	bad_drop = *dropped;
+	bad_drop.mutable_transform()->mutable_rotation()->set_w(0.0F);
+	assert(!is_valid_world_item_state(bad_drop, false));
+
 	protocol::Envelope incomplete_profile_rejection;
 	auto *profile_rejection =
 	    incomplete_profile_rejection.mutable_profile_rejected();
@@ -349,7 +390,24 @@ int main()
 	    reliability::reliable,
 	    &error));
 
-	assert(version_string == "0.5.0");
+	auto valid_environment = environment();
+	assert(is_valid_environment_state(valid_environment));
+	assert(std::abs(project_time_of_day_hours(
+	    23.5,
+	    600.0F,
+	    std::chrono::seconds(126)) - 20.5) < 0.000001);
+	assert(circular_time_distance_hours(23.9, 0.1) < 0.21);
+	protocol::Envelope environment_update;
+	*environment_update.mutable_server_environment_updated()->mutable_state() =
+	    valid_environment;
+	assert(encode(environment_update, reliability::reliable, &error));
+	valid_environment.set_time_scale(maximum_time_scale + 1.0F);
+	assert(!is_valid_environment_state(valid_environment));
+	*environment_update.mutable_server_environment_updated()->mutable_state() =
+	    valid_environment;
+	assert(!encode(environment_update, reliability::reliable, &error));
+
+	assert(kcd2mp_version == "0.0.9");
 	auto unknown_address_library = *runtime;
 	unknown_address_library.set_address_library_sha256(std::string(64, '0'));
 	assert(is_valid_address_library_identity(unknown_address_library));

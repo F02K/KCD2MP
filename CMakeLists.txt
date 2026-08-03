@@ -8,7 +8,21 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
 
-project(KCD2MP VERSION 0.5.0 LANGUAGES CXX C ASM ASM_MASM)
+project(KCD2MP VERSION 0.0.9 LANGUAGES CXX C ASM ASM_MASM)
+
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/multiplayer/version.hpp.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/kcd2mp_version.hpp"
+    @ONLY
+)
+set(GENERATED_RESOURCE_FILE
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/resources.rc"
+)
+configure_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/resources.rc.in"
+    "${GENERATED_RESOURCE_FILE}"
+    @ONLY
+)
 
 add_compile_definitions(
     "$<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>"
@@ -360,13 +374,20 @@ add_custom_command(TARGET KCD2MPServer POST_BUILD
         "$<TARGET_FILE_DIR:KCD2MPServer>/npc_archetypes.json"
 )
 
-add_library(KCD2MP MODULE "${SRC_MAIN}" "${GENERATED_VERSION_SOURCE}")
+add_library(KCD2MP MODULE
+    "${SRC_MAIN}"
+    "${GENERATED_VERSION_SOURCE}"
+    "${GENERATED_RESOURCE_FILE}"
+)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set_property(TARGET KCD2MP PROPERTY CXX_STANDARD 23)
 
 source_group(TREE ${SRC_DIR} PREFIX "src" FILES ${SRC_MAIN})
-source_group("generated" FILES "${GENERATED_VERSION_SOURCE}")
+source_group("generated" FILES
+    "${GENERATED_VERSION_SOURCE}"
+    "${GENERATED_RESOURCE_FILE}"
+)
 
 target_include_directories(KCD2MP PRIVATE
     "${SRC_DIR}"
@@ -399,6 +420,10 @@ if(KCD2MP_BUILD_KCSE)
 		"${SRC_DIR}/kcse/remote_avatar_readiness.hpp"
 		"${SRC_DIR}/kcse/native_runtime.cpp"
         "${SRC_DIR}/kcse/native_runtime.hpp"
+		"${SRC_DIR}/kcse/native_world_object_sync.cpp"
+		"${SRC_DIR}/kcse/native_world_object_sync.hpp"
+		"${SRC_DIR}/kcse/native_world_item_sync.cpp"
+		"${SRC_DIR}/kcse/native_world_item_sync.hpp"
     )
     set_property(TARGET KCD2MPKCSENativeRuntime PROPERTY CXX_STANDARD 23)
     set_property(TARGET KCD2MPKCSENativeRuntime PROPERTY CXX_STANDARD_REQUIRED ON)
@@ -704,6 +729,15 @@ if (BUILD_TESTING)
     set_property(TARGET KCD2MPIdentityStoreTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPIdentityStoreTests COMMAND KCD2MPIdentityStoreTests)
 
+	add_executable(KCD2MPWorldObjectSyncTests
+		"${PROJECT_SOURCE_DIR}/tests/world_object_sync_tests.cpp"
+	)
+	set_property(TARGET KCD2MPWorldObjectSyncTests PROPERTY CXX_STANDARD 23)
+	target_include_directories(KCD2MPWorldObjectSyncTests PRIVATE "${SRC_DIR}")
+	target_link_libraries(KCD2MPWorldObjectSyncTests PRIVATE KCD2MPProtocol)
+	set_property(TARGET KCD2MPWorldObjectSyncTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+	add_test(NAME KCD2MPWorldObjectSyncTests COMMAND KCD2MPWorldObjectSyncTests)
+
     add_custom_target(KCD2MPTests
         DEPENDS
             KCD2MPSignatureCoreTests
@@ -723,6 +757,7 @@ if (BUILD_TESTING)
             KCD2MPEngineConsoleQueueTests
             KCD2MPNetworkingTests
             KCD2MPIdentityStoreTests
+			KCD2MPWorldObjectSyncTests
     )
 endif()
 

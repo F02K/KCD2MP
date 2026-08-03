@@ -24,6 +24,19 @@ namespace kcd2mp
 			return std::isfinite(value);
 		}
 
+		bool valid_version_label(std::string_view value)
+		{
+			return !value.empty() && value.size() <= 32
+			    && std::ranges::all_of(
+			        value,
+			        [](unsigned char character)
+			        {
+				        return std::isalnum(character) != 0
+				            || character == '.' || character == '-'
+				            || character == '+';
+			        });
+		}
+
 		bool valid_player_snapshot(
 		    const protocol::PlayerSnapshot &player,
 		    bool require_avatar)
@@ -64,8 +77,7 @@ namespace kcd2mp
 			if (envelope.has_client_hello())
 			{
 				const auto &message = envelope.client_hello();
-				return message.protocol_version() == protocol_version
-				    && message.client_version() == version_string
+				return valid_version_label(message.version())
 				    && message.whgame_timestamp()
 				        == supported_whgame_timestamp
 				    && message.whgame_image_size()
@@ -130,10 +142,18 @@ namespace kcd2mp
 				    && message.issued_identity_token().size() <= 128
 				    && message.world_objects_size()
 				        <= static_cast<int>(max_world_objects)
+				    && message.world_items_size()
+				        <= static_cast<int>(max_world_items)
+				    && message.has_environment()
+				    && is_valid_environment_state(message.environment())
 				    && std::ranges::all_of(
 				        message.world_objects(),
 				        [](const protocol::WorldObjectState &state)
-				        { return is_valid_world_object_state(state); });
+				        { return is_valid_world_object_state(state); })
+				    && std::ranges::all_of(
+				        message.world_items(),
+				        [](const protocol::WorldItemState &state)
+				        { return is_valid_world_item_state(state); });
 			}
 			if (envelope.has_client_world_ready())
 			{
@@ -201,6 +221,39 @@ namespace kcd2mp
 				    && is_valid_world_object_state(
 				        envelope.world_object_updated().state());
 			}
+			if (envelope.has_client_world_item_update())
+			{
+				const auto &message = envelope.client_world_item_update();
+				return message.has_state()
+				    && is_valid_world_item_state(message.state(), false)
+				    && message.state().revision() == message.base_revision();
+			}
+			if (envelope.has_world_item_accepted())
+			{
+				return is_uuid(envelope.world_item_accepted().instance_id())
+				    && envelope.world_item_accepted().revision() > 0;
+			}
+			if (envelope.has_world_item_rejected())
+			{
+				const auto &message = envelope.world_item_rejected();
+				return message.has_authoritative_state()
+				    && is_valid_world_item_state(
+				        message.authoritative_state())
+				    && valid_utf8_with_codepoint_count(
+				        message.reason(), 1, 512);
+			}
+			if (envelope.has_world_item_updated())
+			{
+				return envelope.world_item_updated().has_state()
+				    && is_valid_world_item_state(
+				        envelope.world_item_updated().state());
+			}
+			if (envelope.has_server_environment_updated())
+			{
+				const auto &message = envelope.server_environment_updated();
+				return message.has_state()
+				    && is_valid_environment_state(message.state());
+			}
 			if (envelope.has_client_avatar_update())
 			{
 				const auto &message = envelope.client_avatar_update();
@@ -265,7 +318,9 @@ namespace kcd2mp
 			else if (envelope.has_world_snapshot())
 			{
 				const auto &message = envelope.world_snapshot();
-				if (message.players_size() > static_cast<int>(max_players))
+				if (message.players_size() > static_cast<int>(max_players)
+				    || !message.has_environment()
+				    || !is_valid_environment_state(message.environment()))
 				{
 					return false;
 				}
@@ -709,6 +764,21 @@ namespace kcd2mp
 			    return valid_inventory_item(item, false)
 			        && instances.insert(item.instance_id()).second;
 		    });
+	}
+
+	bool is_valid_world_item_state(
+	    const protocol::WorldItemState &state,
+	    bool require_revision)
+	{
+		auto transform = state.transform();
+		return is_uuid(state.instance_id())
+		    && (!require_revision || state.revision() != 0)
+		    && state.has_item()
+		    && state.item().instance_id() == state.instance_id()
+		    && valid_inventory_item(state.item(), false)
+		    && state.has_transform()
+		    && is_finite_transform(state.transform())
+		    && normalize_rotation(transform.mutable_rotation());
 	}
 
 	bool is_finite_transform(const protocol::TransformState &transform)

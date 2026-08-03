@@ -1,5 +1,7 @@
 #pragma once
 
+#include "kcse/native_world_object_sync.hpp"
+#include "kcse/native_world_item_sync.hpp"
 #include "kcd2mp.pb.h"
 
 #include <Offsets/vtables/IEntitySystem.h>
@@ -9,7 +11,6 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
-#include <deque>
 #include <vector>
 
 namespace Offsets
@@ -58,6 +59,11 @@ namespace kcd2mp::kcse
 		poll_world_object_updates();
 		[[nodiscard]] bool apply_world_object_state(
 		    const protocol::WorldObjectState &state,
+		    std::string &error);
+		[[nodiscard]] std::vector<protocol::WorldItemState>
+		poll_world_item_updates();
+		[[nodiscard]] bool apply_world_item_state(
+		    const protocol::WorldItemState &state,
 		    std::string &error);
 		void reset_world_sync();
 
@@ -115,15 +121,11 @@ namespace kcd2mp::kcse
 		    Offsets::IEntity *entity) const;
 		void entity_removed(Offsets::IEntity *entity);
 		void entity_event(Offsets::IEntity *entity, void *event);
-		[[nodiscard]] std::optional<protocol::WorldObjectState>
-		capture_world_object(Offsets::IEntity *entity) const;
-		[[nodiscard]] bool apply_world_inventory(
-		    Offsets::IEntity *entity,
-		    const protocol::WorldObjectState &state,
-		    std::string &error) const;
 
 		isolation_sink m_sink;
 		game_object_init_sink m_game_object_sink;
+		native_world_object_sync m_world_sync;
+		native_world_item_sync m_world_item_sync;
 		Offsets::IEntitySystem *m_sink_system{};
 		void *m_game_object_system{};
 		std::unordered_map<std::uint32_t, entity_state> m_isolated;
@@ -136,13 +138,5 @@ namespace kcd2mp::kcse
 		bool m_human_npcs_disabled{};
 		bool m_animal_npcs_disabled{};
 		bool m_isolation_active{};
-		bool m_applying_world_state{};
-		std::uint32_t m_world_poll_frame{};
-		std::unordered_set<std::uint64_t> m_open_world_containers;
-		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
-		    m_last_world_observations;
-		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
-		    m_deferred_world_states;
-		std::deque<protocol::WorldObjectState> m_world_updates;
 	};
 }

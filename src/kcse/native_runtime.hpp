@@ -45,6 +45,13 @@ namespace kcd2mp::kcse
 		poll_world_object_updates() override;
 		[[nodiscard]] bool apply_world_object_state(
 		    const protocol::WorldObjectState &state) override;
+		[[nodiscard]] std::vector<protocol::WorldItemState>
+		poll_world_item_updates() override;
+		[[nodiscard]] bool apply_world_item_state(
+		    const protocol::WorldItemState &state) override;
+		[[nodiscard]] bool apply_environment_state(
+		    const protocol::EnvironmentState &state,
+		    bool apply_weather) override;
 		[[nodiscard]] bool apply_authoritative_profile(
 		    const protocol::PlayerProfile &profile) override;
 

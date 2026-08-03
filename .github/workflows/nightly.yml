@@ -73,51 +73,22 @@ jobs:
         run: cmake -D CMAKE_BUILD_TYPE=RelWithDebInfo -D FINAL=YES -D BUILD_TESTING=ON -D CMAKE_TOOLCHAIN_FILE="${{ github.workspace }}/.cache/vcpkg/scripts/buildsystems/vcpkg.cmake" -D VCPKG_TARGET_TRIPLET=x64-windows-static -D VCPKG_OVERLAY_PORTS="${{ github.workspace }}/cmake_scripts/vcpkg/ports" -S. -Bbuild -G Ninja
         #run: cmake -D CMAKE_BUILD_TYPE=Debug -S. -Bbuild -G Ninja
 
-      - name: Prepare 64bit release DLL
-        shell: bash
-        run: |
-          set -x
-
-          namespace="KCD2MP"
-          mod_name="KCD2MP"
-
-          version_number="0.2.0"
-
-          # Remove quotes from output
-          version_number=$(echo "$version_number" | tr -d '"')
-
-          # For the FILEVERSION we want a , format
-          version_number_comma=$(echo $version_number | tr . ,),0
-
-          cd src
-          sed -i 's/FILEVERSION .*/FILEVERSION '"$version_number_comma"'/' resources.rc
-          sed -i 's/PRODUCTVERSION .*/PRODUCTVERSION '"$version_number_comma"'/' resources.rc
-          sed -i 's/"FileVersion", *"[^"]*"/"FileVersion", "'"$version_number"'"/g' resources.rc
-          sed -i 's/"ProductVersion", *"[^"]*"/"ProductVersion", "'"$version_number"'"/g' resources.rc
-          cd ..
-
       - name: Build 64bit release DLL
+        shell: pwsh
         run: |
           cmake --build ./build --config RelWithDebInfo --target KCD2MPRuntime KCD2MPServer KCD2MPSignatureAudit KCD2MPTests --
           ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MP" --output-on-failure
-          #cmake --build ./build --config Debug --target KCD2MP --
-          mv ./build/d3d12_.dll ./build/d3d12.dll
-          mv ./build/d3d12_.pdb ./build/d3d12.pdb
+
+      - name: Package release outputs
+        shell: pwsh
+        run: |
+          python tools/package_build.py --build-dir build --config RelWithDebInfo --output out/package/release
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: binary
-          path: |
-            build/d3d12.dll
-            build/d3d12.pdb
-            build/RelWithDebInfo/dinput8.dll
-            build/RelWithDebInfo/dinput8.pdb
-            build/KCD2MPKCSEClient.dll
-            build/KCD2MPKCSEClient.pdb
-            build/KCSE/addresslib/*.bin
-            build/KCD2MPServer.exe
-            build/server.toml.example
+          name: kcd2mp-release
+          path: out/package/release
       - name: Generate Build Info
         id: var
         run: |
@@ -175,12 +146,14 @@ jobs:
       - name: Download Artifact
         uses: actions/download-artifact@v4
         with:
-          name: binary
+          name: kcd2mp-release
+          path: package
 
       - name: Echo build sha256
         id: build_sha
+        shell: bash
         run: |
-          sha256sum d3d12.dll > sha256.checksum
+          sha256sum package/client/KCD2MP-Client-v*.zip > sha256.checksum
           echo "build_sha=$(cat sha256.checksum)" >> $GITHUB_OUTPUT
           cat sha256.checksum
 
@@ -193,7 +166,7 @@ jobs:
             **This release has been built by Github Actions**
             [Link to build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-            Build SHA256:
+            Client package SHA256:
             ```
             ${{ steps.build_sha.outputs.build_sha }}
             ```
@@ -207,7 +180,11 @@ jobs:
             ${{ needs.build_nightly.outputs.full_sha }}
             ```
           files: |
-            d3d12.dll
-            RelWithDebInfo/dinput8.dll
-            KCD2MPKCSEClient.dll
-            KCSE/addresslib/*.bin
+            package/client/KCD2MP-Client-v*.zip
+            package/server/KCD2MPServer.exe
+            package/server/KCD2MPServer.pdb
+            package/server/server.toml.example
+            package/server/starter_profile.toml
+            package/server/npc_archetypes.json
+            package/server/tools/*
+            package/SHA256SUMS.txt

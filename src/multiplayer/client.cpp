@@ -98,6 +98,14 @@ namespace kcd2mp
 				return "WorldObjectRejected";
 			if (envelope.has_world_object_updated())
 				return "WorldObjectUpdated";
+			if (envelope.has_world_item_accepted())
+				return "WorldItemAccepted";
+			if (envelope.has_world_item_rejected())
+				return "WorldItemRejected";
+			if (envelope.has_world_item_updated())
+				return "WorldItemUpdated";
+			if (envelope.has_server_environment_updated())
+				return "ServerEnvironmentUpdated";
 			if (envelope.has_server_shutdown())
 				return "ServerShutdown";
 			if (envelope.has_pong())
@@ -218,6 +226,9 @@ namespace kcd2mp
 			m_world_objects.clear();
 			m_pending_world_objects.clear();
 			m_deferred_world_objects.clear();
+			m_world_items.clear();
+			m_pending_world_items.clear();
+			m_deferred_world_items.clear();
 			m_local_avatar.reset();
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
@@ -230,6 +241,9 @@ namespace kcd2mp
 			m_last_avatar_sent = {};
 			m_last_avatar_sampled = {};
 			m_profile_snapshot_interval_seconds = 15;
+			m_environment_revision = 0;
+			m_weather_revision = 0;
+			m_last_environment_applied = {};
 			m_resume_token.clear();
 			m_pending_connect = std::move(options);
 		}
@@ -327,6 +341,15 @@ namespace kcd2mp
 			m_remote_players.clear();
 			m_local_correction.reset();
 			m_pending_bootstrap.reset();
+			m_world_objects.clear();
+			m_pending_world_objects.clear();
+			m_deferred_world_objects.clear();
+			m_world_items.clear();
+			m_pending_world_items.clear();
+			m_deferred_world_items.clear();
+			m_environment_revision = 0;
+			m_weather_revision = 0;
+			m_last_environment_applied = {};
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
 			m_profile.reset();
@@ -454,7 +477,17 @@ namespace kcd2mp
 			}
 		}
 		if (connected)
+		{
 			queue_world_object_updates(m_runtime.poll_world_object_updates());
+			auto world_items = m_runtime.poll_world_item_updates();
+			if (!world_items.empty())
+			{
+				if (const auto profile = m_runtime.local_profile())
+					queue_profile_snapshot(*profile);
+				m_last_profile_sent = {};
+				queue_world_item_updates(std::move(world_items));
+			}
+		}
 		update_interpolation(now);
 	}
 
@@ -658,8 +691,7 @@ namespace kcd2mp
 					        set_state(client_state::preflight);
 					        protocol::Envelope envelope;
 					        auto *hello = envelope.mutable_client_hello();
-					        hello->set_protocol_version(protocol_version);
-					        hello->set_client_version(version_string);
+					        hello->set_version(kcd2mp_version);
 					        hello->set_whgame_timestamp(supported_whgame_timestamp);
 					        hello->set_whgame_image_size(
 					            supported_whgame_image_size);
@@ -686,11 +718,10 @@ namespace kcd2mp
 					        KCD2MP_JOIN_TRACE(
 					            "join.handshake.client-hello.ready",
 					            std::format(
-					                "protocol={} client={} game={} release={} "
+					                "version={} game={} release={} "
 					                "epoch={} capabilities=0x{:X} addresslib=\"{}:{}\" "
 					                "format={} entries={} sha256={}",
-					                protocol_version,
-					                version_string,
+					                kcd2mp_version,
 					                runtime.game_version,
 					                runtime.release_index,
 					                runtime.epoch,
@@ -1079,6 +1110,16 @@ namespace kcd2mp
 							        envelope,
 							        reliability::reliable);
 						    }
+						    else if constexpr (
+						        std::is_same_v<type, world_item_command>)
+						    {
+							    protocol::Envelope envelope;
+							    *envelope.mutable_client_world_item_update() =
+							        std::move(typed.message);
+							    (void)send_envelope(
+							        envelope,
+							        reliability::reliable);
+						    }
 					    },
 					    command);
 				}
@@ -1181,6 +1222,12 @@ namespace kcd2mp
 				m_world_objects.clear();
 				m_pending_world_objects.clear();
 				m_deferred_world_objects.clear();
+				m_world_items.clear();
+				m_pending_world_items.clear();
+				m_deferred_world_items.clear();
+				m_environment_revision = 0;
+				m_weather_revision = 0;
+				m_last_environment_applied = {};
 				final_error = m_status.error;
 			}
 		}
@@ -1274,6 +1321,44 @@ namespace kcd2mp
 		}
 	}
 
+	void multiplayer_client::queue_world_item_updates(
+	    std::vector<protocol::WorldItemState> updates)
+	{
+		for (auto &observed : updates)
+		{
+			protocol::ClientWorldItemUpdate update;
+			{
+				std::scoped_lock lock(m_state_mutex);
+				if (m_status.state != client_state::connected
+				    || !is_valid_world_item_state(observed, false))
+				{
+					continue;
+				}
+				const auto key = observed.instance_id();
+				if (m_pending_world_items.contains(key))
+				{
+					m_deferred_world_items.insert_or_assign(key, observed);
+					continue;
+				}
+				const auto current = m_world_items.find(key);
+				const auto revision = current == m_world_items.end()
+				    ? 0
+				    : current->second.revision();
+				observed.set_revision(revision);
+				if (current != m_world_items.end()
+				    && current->second.SerializeAsString()
+				        == observed.SerializeAsString())
+				{
+					continue;
+				}
+				update.set_base_revision(revision);
+				*update.mutable_state() = observed;
+				m_pending_world_items.insert_or_assign(key, observed);
+			}
+			queue_network(world_item_command{std::move(update)});
+		}
+	}
+
 	void multiplayer_client::handle_game_envelope(
 	    const protocol::Envelope &envelope,
 	    std::chrono::steady_clock::time_point now)
@@ -1362,11 +1447,19 @@ namespace kcd2mp
 				return;
 			}
 			m_pending_bootstrap = bootstrap_copy;
+			m_environment_revision = bootstrap.environment().revision();
+			m_weather_revision = bootstrap.environment().weather_revision();
+			m_last_environment_applied = now;
 			m_world_objects.clear();
 			m_pending_world_objects.clear();
 			m_deferred_world_objects.clear();
+			m_world_items.clear();
+			m_pending_world_items.clear();
+			m_deferred_world_items.clear();
 			for (const auto &object : bootstrap.world_objects())
 				m_world_objects.emplace(object.entity_guid(), object);
+			for (const auto &item : bootstrap.world_items())
+				m_world_items.emplace(item.instance_id(), item);
 		}
 		else if (envelope.has_player_joined())
 		{
@@ -1378,6 +1471,40 @@ namespace kcd2mp
 		}
 		else if (envelope.has_world_snapshot())
 		{
+			const auto &environment = envelope.world_snapshot().environment();
+			const bool environment_changed =
+			    environment.revision() > m_environment_revision;
+			const bool environment_current =
+			    environment.revision() == m_environment_revision;
+			const bool environment_correction_due =
+			    m_last_environment_applied
+			            == std::chrono::steady_clock::time_point{}
+			    || now - m_last_environment_applied >= std::chrono::seconds(10);
+			if (environment_changed
+			    || (environment_current && environment_correction_due))
+			{
+				const auto state = environment;
+				lock.unlock();
+				const bool applied = m_runtime.apply_environment_state(
+				    state,
+				    state.weather_revision() > m_weather_revision);
+				lock.lock();
+				if (!applied)
+				{
+					m_status.state = client_state::closing;
+					m_status.error =
+					    "could not apply the server environment timeline";
+					queue_network(disconnect_command{});
+					return;
+				}
+				m_environment_revision = std::max(
+				    m_environment_revision,
+				    state.revision());
+				m_last_environment_applied = now;
+				m_weather_revision = std::max(
+				    m_weather_revision,
+				    state.weather_revision());
+			}
 			KCD2MP_JOIN_TRACE(
 			    "join.snapshot.apply.begin",
 			    std::format(
@@ -1393,6 +1520,28 @@ namespace kcd2mp
 			    std::format(
 			        "tracked_remote_players={}",
 			        m_remote_players.size()));
+		}
+		else if (envelope.has_server_environment_updated())
+		{
+			const auto state = envelope.server_environment_updated().state();
+			if (state.revision() <= m_environment_revision)
+				return;
+			lock.unlock();
+			const bool applied = m_runtime.apply_environment_state(
+			    state,
+			    state.weather_revision() > m_weather_revision);
+			lock.lock();
+			if (!applied)
+			{
+				m_status.state = client_state::closing;
+				m_status.error =
+				    "could not apply the updated server environment";
+				queue_network(disconnect_command{});
+				return;
+			}
+			m_environment_revision = state.revision();
+			m_weather_revision = state.weather_revision();
+			m_last_environment_applied = now;
 		}
 		else if (envelope.has_state_correction())
 		{
@@ -1497,6 +1646,66 @@ namespace kcd2mp
 			lock.lock();
 			if (!applied)
 				m_status.error = "could not apply remote world object update";
+		}
+		else if (envelope.has_world_item_accepted())
+		{
+			const auto &accepted = envelope.world_item_accepted();
+			const auto pending =
+			    m_pending_world_items.find(accepted.instance_id());
+			if (pending == m_pending_world_items.end())
+				return;
+			auto state = pending->second;
+			state.set_revision(accepted.revision());
+			m_world_items.insert_or_assign(accepted.instance_id(), state);
+			m_pending_world_items.erase(pending);
+			if (const auto deferred =
+			        m_deferred_world_items.find(accepted.instance_id());
+			    deferred != m_deferred_world_items.end())
+			{
+				auto desired = deferred->second;
+				m_deferred_world_items.erase(deferred);
+				desired.set_revision(accepted.revision());
+				if (desired.SerializeAsString() != state.SerializeAsString())
+				{
+					protocol::ClientWorldItemUpdate update;
+					update.set_base_revision(accepted.revision());
+					*update.mutable_state() = desired;
+					m_pending_world_items.insert_or_assign(
+					    accepted.instance_id(), desired);
+					queue_network(world_item_command{std::move(update)});
+				}
+			}
+		}
+		else if (envelope.has_world_item_rejected())
+		{
+			const auto state =
+			    envelope.world_item_rejected().authoritative_state();
+			m_pending_world_items.erase(state.instance_id());
+			m_deferred_world_items.erase(state.instance_id());
+			m_world_items.insert_or_assign(state.instance_id(), state);
+			lock.unlock();
+			const bool applied = m_runtime.apply_world_item_state(state);
+			lock.lock();
+			if (!applied)
+				m_status.error = "could not apply world item correction";
+		}
+		else if (envelope.has_world_item_updated())
+		{
+			const auto state = envelope.world_item_updated().state();
+			const auto current = m_world_items.find(state.instance_id());
+			if (current != m_world_items.end()
+			    && state.revision() <= current->second.revision())
+			{
+				return;
+			}
+			m_pending_world_items.erase(state.instance_id());
+			m_deferred_world_items.erase(state.instance_id());
+			m_world_items.insert_or_assign(state.instance_id(), state);
+			lock.unlock();
+			const bool applied = m_runtime.apply_world_item_state(state);
+			lock.lock();
+			if (!applied)
+				m_status.error = "could not apply remote world item update";
 		}
 		else if (envelope.has_avatar_accepted())
 		{

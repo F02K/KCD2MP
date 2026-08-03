@@ -5,6 +5,7 @@ import stat
 import struct
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -17,10 +18,12 @@ from tools.build_tui.core import (
     BuildService,
     BuildToolError,
     ConfigStore,
+    client_deployment_layout,
     deploy_artifacts,
     detect_game_root,
     discover_address_libraries,
     normalize_game_root,
+    package_artifacts,
     parse_vdf,
     resolve_game_location,
 )
@@ -288,6 +291,122 @@ class DeploymentTests(unittest.TestCase):
             with mock.patch("tools.build_tui.core.os.replace", side_effect=PermissionError):
                 with self.assertRaisesRegex(BuildToolError, "Windows refused"):
                     deploy_artifacts(result, game_root, lambda: False)
+
+
+class PackagingTests(unittest.TestCase):
+    def _project_and_result(self, root: Path) -> tuple[Path, BuildResult]:
+        project = root / "project"
+        artifacts = root / "artifacts"
+        (project / "data").mkdir(parents=True)
+        artifacts.mkdir()
+        (project / "CMakeLists.txt").write_text(
+            "project(KCD2MP VERSION 0.0.9 LANGUAGES CXX)\n", encoding="utf-8"
+        )
+        (project / "server.toml.example").write_text("[server]\n", encoding="utf-8")
+        (project / "starter_profile.toml").write_text("money = 0\n", encoding="utf-8")
+        (project / "data" / "npc_archetypes.json").write_text(
+            "{}\n", encoding="utf-8"
+        )
+
+        names = {
+            "d3d12_.dll": b"frontend",
+            "d3d12_.pdb": b"frontend-symbols",
+            "dinput8.dll": b"kcse",
+            "dinput8.pdb": b"kcse-symbols",
+            "KCD2MPKCSEClient.dll": b"client",
+            "KCD2MPKCSEClient.pdb": b"client-symbols",
+            "KCD2MPServer.exe": b"server",
+            "KCD2MPServer.pdb": b"server-symbols",
+            "KCD2MPSignatureAudit.exe": b"audit",
+            "KCD2MPSignatureAudit.pdb": b"audit-symbols",
+            "KCD2MPProtocolTests.exe": b"tests",
+            "KCD2MPProtocolTests.pdb": b"test-symbols",
+        }
+        for name, content in names.items():
+            (artifacts / name).write_bytes(content)
+        address_libraries = tuple(
+            artifacts / "kcd_addresslib_{}_test.bin".format(distribution)
+            for distribution in ("steam", "gog", "epic")
+        )
+        for table in address_libraries:
+            table.write_bytes(table.name.encode("ascii"))
+
+        return project, BuildResult(
+            profile=BUILD_PROFILES["release"],
+            build_dir=root,
+            dll_path=artifacts / "d3d12_.dll",
+            pdb_path=artifacts / "d3d12_.pdb",
+            audit_path=artifacts / "KCD2MPSignatureAudit.exe",
+            server_path=artifacts / "KCD2MPServer.exe",
+            kcse_loader_path=artifacts / "dinput8.dll",
+            kcse_loader_pdb_path=artifacts / "dinput8.pdb",
+            kcse_client_path=artifacts / "KCD2MPKCSEClient.dll",
+            kcse_client_pdb_path=artifacts / "KCD2MPKCSEClient.pdb",
+            address_library_paths=address_libraries,
+        )
+
+    def test_package_separates_outputs_and_mirrors_deployment_zip(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project, result = self._project_and_result(root)
+            output = root / "package"
+
+            package = package_artifacts(result, project, output)
+
+            game = package.client_root / "KingdomComeDeliverance2"
+            self.assertEqual(
+                (game / GAME_BIN_RELATIVE / "d3d12.dll").read_bytes(), b"frontend"
+            )
+            self.assertEqual(
+                (
+                    game
+                    / "mods"
+                    / "KCD2MP"
+                    / "KCSE"
+                    / "Plugins"
+                    / "KCD2MPKCSEClient.dll"
+                ).read_bytes(),
+                b"client",
+            )
+            self.assertEqual(
+                (package.server_root / "KCD2MPServer.exe").read_bytes(), b"server"
+            )
+            self.assertTrue(
+                (package.server_root / "tools" / "KCD2MPSignatureAudit.exe").is_file()
+            )
+            self.assertEqual(
+                {path.name for path in package.tests_root.iterdir()},
+                {"KCD2MPProtocolTests.exe", "KCD2MPProtocolTests.pdb"},
+            )
+            self.assertTrue((package.root / "SHA256SUMS.txt").is_file())
+
+            expected_zip_paths = {
+                (Path("KingdomComeDeliverance2") / relative).as_posix()
+                for _, relative in client_deployment_layout(result)
+            }
+            with zipfile.ZipFile(package.client_zip) as archive:
+                self.assertEqual(set(archive.namelist()), expected_zip_paths)
+                self.assertEqual(
+                    archive.read(
+                        "KingdomComeDeliverance2/"
+                        "Bin/Win64MasterMasterSteamPGO/d3d12.dll"
+                    ),
+                    b"frontend",
+                )
+
+    def test_client_zip_is_reproducible_and_stale_files_are_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project, result = self._project_and_result(root)
+            output = root / "package"
+            first = package_artifacts(result, project, output)
+            first_zip = first.client_zip.read_bytes()
+            (output / "stale.txt").write_text("stale", encoding="utf-8")
+
+            second = package_artifacts(result, project, output)
+
+            self.assertEqual(second.client_zip.read_bytes(), first_zip)
+            self.assertFalse((output / "stale.txt").exists())
 
 
 class AddressLibraryTests(unittest.TestCase):

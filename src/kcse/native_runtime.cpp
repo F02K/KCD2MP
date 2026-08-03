@@ -25,6 +25,13 @@ namespace kcd2mp::kcse
 {
 	namespace
 	{
+		bool in_whgame_text(const void *address) noexcept
+		{
+			const auto text = REL::Module::get().segment(REL::Segment::textx);
+			const auto value = reinterpret_cast<std::uintptr_t>(address);
+			return value >= text.address() && value - text.address() < text.size();
+		}
+
 #ifdef _WIN32
 		bool guarded_end_game_context(CCryAction *framework) noexcept
 		{
@@ -78,6 +85,101 @@ namespace kcd2mp::kcse
 			environment->pConsole->ExecuteString(command, true, false);
 			return true;
 #endif
+		}
+
+		bool environment_runtime_available() noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pConsole)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				for (const auto *name : {"e_TimeOfDay", "e_TimeOfDaySpeed"})
+				{
+					auto *cvar = environment->pConsole->GetCVar(name);
+					if (!cvar)
+						return false;
+					auto **vtable = *reinterpret_cast<void ***>(cvar);
+					if (!vtable || !vtable[10]
+					    || !in_whgame_text(vtable[10]))
+						return false;
+				}
+				return true;
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#endif
+		}
+
+		bool guarded_force_set_cvar(
+		    ICVar *cvar,
+		    const char *text,
+		    float *actual) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+#endif
+				auto **vtable = *reinterpret_cast<void ***>(cvar);
+				if (!vtable || !vtable[10] || !in_whgame_text(vtable[10]))
+					return false;
+				using force_set = void(__fastcall *)(ICVar *, const char *);
+				reinterpret_cast<force_set>(vtable[10])(cvar, text);
+				*actual = cvar->GetFVal();
+				return true;
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#endif
+		}
+
+		bool force_set_environment_cvar(
+		    const char *name,
+		    double value,
+		    bool circular,
+		    std::string &error) noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pConsole)
+			{
+				error = "native engine console is unavailable";
+				return false;
+			}
+			auto *cvar = environment->pConsole->GetCVar(name);
+			if (!cvar)
+			{
+				error = std::format("required environment CVar '{}' is unavailable", name);
+				return false;
+			}
+			const auto text = std::format("{:.6f}", value);
+			float actual_float{};
+			if (!guarded_force_set_cvar(cvar, text.c_str(), &actual_float))
+			{
+				error = std::format("CVar '{}' ForceSet raised an SEH exception", name);
+				return false;
+			}
+			const auto actual = static_cast<double>(actual_float);
+			const auto difference = circular
+			    ? circular_time_distance_hours(actual, value)
+			    : std::abs(actual - value);
+			if (!std::isfinite(actual) || difference > 0.001)
+			{
+				error = std::format(
+				    "CVar '{}' rejected ForceSet to {}; actual value is {}",
+				    name,
+				    value,
+				    actual);
+				return false;
+			}
+			return true;
 		}
 
 		protocol::Quaternion quaternion_from_matrix(const Matrix34 &matrix)
@@ -519,6 +621,31 @@ namespace kcd2mp::kcse
 				    "Native world-object bootstrap failed: " + world_error};
 			}
 		}
+		for (const auto &item : bootstrap.world_items())
+		{
+			if (!m_entities.apply_world_item_state(item, world_error))
+			{
+				m_profiles.reset();
+				lock.unlock();
+				begin_native_unload(world_error);
+				return {
+				    false,
+				    "Native world-item bootstrap failed: " + world_error};
+			}
+		}
+		lock.unlock();
+		const auto environment_applied =
+		    apply_environment_state(bootstrap.environment(), true);
+		lock.lock();
+		if (!environment_applied)
+		{
+			m_profiles.reset();
+			lock.unlock();
+			begin_native_unload(
+			    "Native server environment bootstrap failed; unloading the "
+			    "modified save.");
+			return {false, "Native server environment bootstrap failed."};
+		}
 		m_sandbox_active = true;
 		m_sandbox_progress.phase = sandbox_phase::ready;
 		m_sandbox_progress.initial_spawn = spawn;
@@ -617,6 +744,64 @@ namespace kcd2mp::kcse
 			m_diagnostic = std::move(error);
 		}
 		return result;
+	}
+
+	std::vector<protocol::WorldItemState>
+	native_runtime::poll_world_item_updates()
+	{
+		return m_entities.poll_world_item_updates();
+	}
+
+	bool native_runtime::apply_world_item_state(
+	    const protocol::WorldItemState &state)
+	{
+		std::string error;
+		const bool result = m_entities.apply_world_item_state(state, error);
+		if (!result)
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = std::move(error);
+		}
+		return result;
+	}
+
+	bool native_runtime::apply_environment_state(
+	    const protocol::EnvironmentState &state,
+	    bool apply_weather)
+	{
+		if (!is_valid_environment_state(state))
+			return false;
+		std::string error;
+		if (!force_set_environment_cvar(
+		        "e_TimeOfDay",
+		        state.time_of_day_hours(),
+		        true,
+		        error)
+		    || !force_set_environment_cvar(
+		        "e_TimeOfDaySpeed",
+		        state.time_scale(),
+		        false,
+		        error))
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = "Native environment synchronization failed: " + error;
+			return false;
+		}
+		if (apply_weather)
+		{
+			const auto command = std::format(
+			    "cheat_set_weather id:{} transition:{:.3f}",
+			    state.weather_id(),
+			    static_cast<double>(state.weather_transition_ms()) / 1000.0);
+			if (!execute_console_command(command.c_str()))
+			{
+				std::scoped_lock lock(m_cache_mutex);
+				m_diagnostic =
+				    "Native environment synchronization could not apply weather.";
+				return false;
+			}
+		}
+		return true;
 	}
 
 	bool native_runtime::apply_authoritative_profile(
@@ -780,6 +965,8 @@ namespace kcd2mp::kcse
 			transition_blocker =
 			    "The native PlayerModule is not ready for multiplayer.";
 		}
+		if (environment_runtime_available())
+			capabilities |= runtime_capability_environment;
 		KCD2MP_JOIN_TRACE(
 		    "join.runtime.cached-state.precheck",
 		    std::format(

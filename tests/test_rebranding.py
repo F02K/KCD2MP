@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import re
 import unittest
 from pathlib import Path
 
@@ -9,6 +11,30 @@ OLD_NAME = "KCD2" + "ModLoader"
 
 
 class RebrandingTests(unittest.TestCase):
+    def test_project_version_is_the_wire_and_package_version(self) -> None:
+        cmake = (PROJECT_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+        match = re.search(r"project\(KCD2MP VERSION ([0-9]+\.[0-9]+\.[0-9]+)", cmake)
+        self.assertIsNotNone(match)
+        version = match.group(1)
+        self.assertEqual(version, "0.0.9")
+
+        manifest = json.loads((PROJECT_ROOT / "vcpkg.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["version-string"], version)
+
+        generated_version = (
+            PROJECT_ROOT / "src" / "multiplayer" / "version.hpp.in"
+        ).read_text(encoding="utf-8")
+        resources = (PROJECT_ROOT / "src" / "resources.rc.in").read_text(
+            encoding="utf-8"
+        )
+        proto = (PROJECT_ROOT / "protocol" / "kcd2mp.proto").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('kcd2mp_version = "@PROJECT_VERSION@"', generated_version)
+        self.assertIn('"@PROJECT_VERSION@\\0"', resources)
+        self.assertIn("string version = 1;", proto)
+        self.assertNotIn("uint32 protocol_version", proto)
+
     def test_old_name_only_remains_in_readme_attribution(self) -> None:
         matches = []
         ignored_directories = {".git", "build", "out", ".venv-build", "__pycache__"}
@@ -45,7 +71,8 @@ class RebrandingTests(unittest.TestCase):
                     if OLD_NAME in line:
                         matches.append((path.relative_to(PROJECT_ROOT), line_number))
 
-        self.assertEqual(matches, [(Path("README.md"), 5)])
+        self.assertEqual(len(matches), 1)
+        self.assertEqual(matches[0][0], Path("README.md"))
 
     def test_cmake_uses_new_target_and_generated_version_source(self) -> None:
         cmake = (PROJECT_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
@@ -54,6 +81,9 @@ class RebrandingTests(unittest.TestCase):
         )
 
         self.assertIn("project(KCD2MP", cmake)
+        self.assertIn("project(KCD2MP VERSION 0.0.9", cmake)
+        self.assertIn("generated/kcd2mp_version.hpp", cmake)
+        self.assertIn("GENERATED_RESOURCE_FILE", cmake)
         self.assertIn("add_library(KCD2MP", cmake)
         self.assertIn("target_compile_definitions(KCD2MP PRIVATE", cmake)
         self.assertIn("GENERATED_VERSION_SOURCE", cmake)

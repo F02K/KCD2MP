@@ -76,6 +76,14 @@ namespace kcd2mp::server
 		    bool animals_disabled);
 		[[nodiscard]] bool human_npcs_disabled() const;
 		[[nodiscard]] bool animal_npcs_disabled() const;
+		[[nodiscard]] protocol::EnvironmentState current_environment(
+		    time_point now) const;
+		[[nodiscard]] bool set_time_of_day(double hours, time_point now);
+		[[nodiscard]] bool set_time_scale(float scale, time_point now);
+		[[nodiscard]] bool set_weather(
+		    std::uint32_t weather_id,
+		    std::uint32_t transition_seconds,
+		    time_point now);
 		void shutdown(std::string reason);
 		[[nodiscard]] std::optional<std::string> create_profile_claim(
 		    player_id id,
@@ -160,6 +168,9 @@ namespace kcd2mp::server
 		void handle_world_object_update(
 		    player_session &player,
 		    const protocol::ClientWorldObjectUpdate &message);
+		void handle_world_item_update(
+		    player_session &player,
+		    const protocol::ClientWorldItemUpdate &message);
 		void handle_transform(
 		    player_session &player,
 		    const protocol::ClientTransform &message,
@@ -188,6 +199,9 @@ namespace kcd2mp::server
 		void send_accepted(player_session &player);
 		void send_entity_control(connection_id connection);
 		void send_world_objects(connection_id connection);
+		void send_world_items(connection_id connection);
+		void advance_environment_clock(time_point now);
+		void broadcast_environment(time_point now);
 		void apply_default_avatar(protocol::PlayerProfile &profile);
 		[[nodiscard]] bool avatar_allowed(
 		    const protocol::AvatarDescriptor &avatar) const;
@@ -200,6 +214,7 @@ namespace kcd2mp::server
 		void wake_bootstrap_waiters();
 		void persist_player(player_session &player, time_point now);
 		void persist_world_objects();
+		void persist_world_items();
 		void remove_owned_items_from_world();
 		void broadcast(
 		    protocol::Envelope envelope,
@@ -229,11 +244,21 @@ namespace kcd2mp::server
 		std::unordered_map<player_id, profile_claim> m_claims;
 		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
 		    m_world_objects;
+		std::unordered_map<std::string, protocol::WorldItemState> m_world_items;
 		std::unordered_map<std::string, player_id> m_item_owners;
 		std::optional<connection_id> m_initializer;
 		std::uint64_t m_next_dummy_index{1};
 		bool m_human_npcs_disabled{};
 		bool m_animal_npcs_disabled{};
+		std::uint64_t m_environment_revision{1};
+		std::uint64_t m_weather_revision{1};
+		double m_environment_anchor_hours{};
+		float m_environment_time_scale{};
+		std::uint32_t m_environment_weather_id{};
+		std::uint32_t m_environment_weather_transition_ms{};
+		time_point m_environment_anchor_time{};
+		time_point m_current_time{};
+		bool m_environment_clock_started{};
 		std::vector<outbound_message> m_outbound;
 	};
 }

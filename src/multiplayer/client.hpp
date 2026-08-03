@@ -151,6 +151,10 @@ namespace kcd2mp
 		{
 			protocol::ClientWorldObjectUpdate message;
 		};
+		struct world_item_command
+		{
+			protocol::ClientWorldItemUpdate message;
+		};
 		using network_command = std::variant<
 		    connect_command,
 		    disconnect_command,
@@ -160,7 +164,8 @@ namespace kcd2mp
 		    world_failed_command,
 		    profile_command,
 		    avatar_command,
-		    world_object_command>;
+		    world_object_command,
+		    world_item_command>;
 
 		struct timed_transform
 		{
@@ -187,6 +192,8 @@ namespace kcd2mp
 		void queue_profile_snapshot(protocol::PlayerProfile profile);
 		void queue_world_object_updates(
 		    std::vector<protocol::WorldObjectState> updates);
+		void queue_world_item_updates(
+		    std::vector<protocol::WorldItemState> updates);
 		void handle_game_envelope(
 		    const protocol::Envelope &envelope,
 		    std::chrono::steady_clock::time_point now);
@@ -228,7 +235,15 @@ namespace kcd2mp
 		    m_pending_world_objects;
 		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
 		    m_deferred_world_objects;
+		std::unordered_map<std::string, protocol::WorldItemState> m_world_items;
+		std::unordered_map<std::string, protocol::WorldItemState>
+		    m_pending_world_items;
+		std::unordered_map<std::string, protocol::WorldItemState>
+		    m_deferred_world_items;
 		std::uint32_t m_profile_snapshot_interval_seconds{15};
+		std::uint64_t m_environment_revision{};
+		std::uint64_t m_weather_revision{};
+		std::chrono::steady_clock::time_point m_last_environment_applied{};
 
 		mutable std::mutex m_network_mutex;
 		std::deque<network_command> m_network_commands;

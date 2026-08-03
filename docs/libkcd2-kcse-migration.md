@@ -1,6 +1,6 @@
 # libKCD2/KCSE migration audit
 
-This is the capability matrix for the protocol-v4 native client. The removed
+This is the capability matrix for the native multiplayer client. The removed
 KCD2MP implementation records intended behavior only; it is not an engine ABI
 reference and is never used as a fallback.
 
@@ -15,7 +15,7 @@ reference and is never used as a fallback.
 | Inventory/equipment | Native item creation, logical instance GUID, count/quality/condition, slot-ordered equip/unequip/delete, draw/holster | Transaction and rollback tests plus active probe |
 | RPG profile | Absolute money, 10 stats, 35 skills, normalized progress, inventory, equipment, and avatar state | Full capture/apply/reconcile/rollback tests |
 | Sandbox | Native save/load lock and `CCryAction::EndGameContext` unload | Audited VTable target and confirmed lifecycle completion gate |
-| UI boundary | Copied protocol-v4 POD snapshots and commands | ABI size/version tests; no engine pointer crosses the boundary |
+| UI boundary | Copied, versioned POD snapshots and commands | ABI size/version tests; no engine pointer crosses the boundary |
 
 ## Runtime ownership and capability publication
 

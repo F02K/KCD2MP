@@ -1,25 +1,73 @@
 # KCD2MP
 
-KCD2MP is a work-in-progress multiplayer framework for Kingdom Come: Deliverance II. The repository currently contains the breaking Version 0.4 protocol, Direct-IP networking, persistent dedicated server, and a KCSE-owned client foundation.
+Experimental multiplayer for Kingdom Come: Deliverance II.
 
-The project is forked from [KCD2ModLoader](https://github.com/xiaoxiao921/KCD2ModLoader) and uses
-[ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase) as its modding foundation.
-The repository includes the project fork
-[F02K/libKCD2](https://github.com/F02K/libKCD2) as a pinned Git submodule,
-including its nested KCSE runtime, and
+> [!WARNING]
+> KCD2MP **v0.0.9 is a prototype**, not a production-ready multiplayer mod.
+> Expect breaking changes, incomplete world simulation, compatibility limits,
+> and loss of multiplayer-world data while development continues. Use test
+> saves and keep backups of anything important.
+
+## Project status
+
+| | |
+| --- | --- |
+| Current version | **0.0.9** |
+| Development stage | Prototype / technical preview |
+| Networking | Direct IP, dedicated authoritative server |
+| Platform | Windows x64 |
+| Supported game | Steam build `23914554`, game version 1.5 |
+| Supported WHGame | `1308617_856` |
+
+KCD2MP uses one project version across the client, server, build metadata, and
+network handshake. During the prototype phase, clients and servers must run the
+exact same KCD2MP version. There is no separate user-facing "protocol version".
+See [CHANGELOG.md](CHANGELOG.md) for version history.
+
+## What works in v0.0.9
+
+- Direct-IP client/server connection with authentication and reconnect support
+- Persistent server sessions and player profiles
+- Remote-player spawning, movement, appearance, equipment, and weapon state
+- Native inventory and equipment reconciliation with rollback
+- Server-authoritative doors and loot containers
+- Supported containers: regular chests, cart chests, stash corpses, bird nests,
+  and destructible stashes
+- Server-authoritative dropped items, pickup ownership, and restart persistence
+- Shared time-of-day, time scale, and weather
+- Independent human- and animal-NPC isolation controls
+- Signature and Address Library validation before native hooks are enabled
+
+NPC world synchronization, quests, dialogue state, combat AI, and complete
+cooperative world progression are **not implemented yet**. Native NPCs can be
+isolated, but they are not currently replicated as shared server entities.
+
+The detailed implementation status and current limits are documented in
+[docs/multiplayer.md](docs/multiplayer.md).
+
+## Architecture
+
+KCD2MP keeps its two runtime boundaries separate:
+
+- `d3d12.dll` provides the mod-loader and ImGui frontend.
+- `dinput8.dll` hosts KCSE.
+- `KCD2MPKCSEClient.dll` owns the in-game multiplayer client and native game
+  integration.
+- `KCD2MPServer.exe` is a standalone dedicated server and does not load KCD2.
+
+The project is based on
+[KCD2ModLoader](https://github.com/xiaoxiao921/KCD2ModLoader) and
+[ReturnOfModdingBase](https://github.com/xiaoxiao921/ReturnOfModdingBase).
+It pins [F02K/libKCD2](https://github.com/F02K/libKCD2) and
 [F02K/Address-Library-For-KCSE](https://github.com/F02K/Address-Library-For-KCSE)
-as the pinned source of KCSE's versioned address tables.
-KCD2MP keeps the two loaders separate: `d3d12.dll` hosts the ImGui/modloader
-frontend and `dinput8.dll` hosts the multiplayer client as a KCSE plugin.
+as vendor dependencies.
 
-> Version 0.4 uses the native libKCD2/KCSE multiplayer runtime. Every join runs
-> an active engine probe before publishing capabilities: transform write/read,
-> Actor/Soul/Human/Inventory readiness, item create/equip/unequip/delete, and
-> Entity cleanup. Probe failures are reported as concrete client errors. The
-> removed Game-Lua and signature paths are never used as fallbacks. See the
-> [libKCD2/KCSE migration audit](docs/libkcd2-kcse-migration.md).
+Native engine access is capability-gated. A client join verifies the game
+build, KCSE/libKCD2 runtime, Address Library identity, required native features,
+content fingerprint, and KCD2MP version before entering the world. Runtime
+objects never cross the frontend/client ABI boundary.
 
-## Build tool
+## Build and deploy
 
 Requirements:
 
@@ -28,150 +76,127 @@ Requirements:
 - CMake
 - Visual Studio with the MSVC x64 C++ workload
 
-After cloning, initialize the pinned vendor repositories with
-`powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1`. See
-[libKCD2 vendor integration](docs/libkcd2-vendor.md) for the update workflow.
+Initialize the pinned vendor repositories after cloning:
 
-Run `build.bat` from the repository root. On first launch it creates an isolated `.venv-build`
-environment, installs the pinned Textual dependency, and opens the build TUI.
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/init_vendor.ps1
+```
 
-The TUI supports:
+Run `build.bat` from the repository root. On first launch, the build tool
+creates an isolated `.venv-build` environment and installs its pinned Python
+dependencies.
 
-- Debug builds
-- Optimized Release builds with debug symbols
-- Automatic Kingdom Come: Deliverance II discovery through Steam
-- A persistent game-directory override
-- Native signature auditing with live output
-- An explicit, fast-forward-only Address Library update with coverage validation
-- A pinned vcpkg bootstrap for Protobuf, GameNetworkingSockets 1.5.1, Boost.Container, and spdlog
-- Building and testing `d3d12.dll`, KCSE's `dinput8.dll`, `KCD2MPKCSEClient.dll`,
-  `KCD2MPServer.exe`, protocol, server core, and networking
-- Deploying both loaders, the KCSE multiplayer-client plugin, and every pinned
-  Steam/GOG/Epic Address Library table
+The terminal UI can:
 
-Debug, RelWithDebInfo, and Release all build the complete native KCSE
-multiplayer client. Runtime engine objects remain isolated behind the copied
-v4 client ABI.
+- build Debug or optimized Release artifacts with symbols;
+- run native, protocol, server, networking, and deployment tests;
+- discover the Steam installation or remember a manual game path;
+- audit the installed `WHGame.dll` before deployment;
+- validate and deploy the pinned Steam/GOG/Epic Address Library tables; and
+- deploy both loaders and the KCSE client plugin.
 
-`Build & Deploy` runs the signature audit against the installed `WHGame.dll` before copying any
-files. The deploy action does not start or stop the game. Close the game before deploying so
-Windows does not lock the DLL.
+Every successful build also creates a clean package tree under
+`out/package/<debug|release>/`:
+
+```text
+client/   install-ready game tree and KCD2MP-Client-v0.0.9.zip
+server/   dedicated server, configuration, data, symbols, and audit tool
+tests/    test executables and their symbols only
+SHA256SUMS.txt
+```
+
+The client ZIP starts with `KingdomComeDeliverance2/` and mirrors the same
+relative paths used by `Build & Deploy`. It can therefore be extracted directly
+into the Steam `steamapps/common` directory. See
+[Build and release packaging](docs/build-packaging.md) for the exact layout and
+standalone packaging command.
+
+`Build & Deploy` never starts or stops the game. Close KCD2 before deployment so
+Windows can replace the runtime DLLs.
 
 ## Dedicated server
 
-Copy `server.toml.example` to `server.toml`, choose the canonical `level_id` for the sandbox,
-and then start:
+Copy `server.toml.example` to `server.toml`, select the sandbox `level_id`, and
+start the server:
 
 ```powershell
 KCD2MPServer.exe server.toml
 ```
 
-Retail world loading currently accepts the numeric IDs from the supported game tables. The main
-worlds are `2` (`trosecko`), `3` (`kutnohorsko`), and `4` (`klaster`).
+The common retail world IDs are:
 
-The standalone Windows-x64 server does not load or require KCD2. It listens on UDP port `27020`
-by default. Allow that UDP port through Windows Firewall and forward it on the router only when
-hosting beyond the LAN.
+- `2` — Trosky region (`trosecko`)
+- `3` — Kuttenberg region (`kutnohorsko`)
+- `4` — Monastery (`klaster`)
 
-The `world_directory` contains the persistent session manifest and player profiles. Server
-console commands are `status`, `players`, `kick <player_id> [reason]`, `say <text>`,
-`profile claim <player_id>`, `dummy spawn [name]`, `dummy remove <player_id>`,
-`entities <all|humans|animals> <disable|enable>`, `entities status`, `stop`, and `help`.
-Dummy players use the server's
-default avatar, spawn two metres beside the first live player (or the configured world spawn),
-occupy a normal player slot, and are not persisted.
-`disable_human_npcs` and `disable_animal_npcs` independently apply the disabled state on every
-accepted client and late joiner. Classification uses native `C_Human`/`C_Animal` RTTI; unknown
-Actors, UI/Flash helpers, cameras, particles, equipment, and other non-AI entities remain active.
-The legacy `disable_non_player_entities` setting remains a fallback for both categories.
-Passwords, identity tokens, and resume tokens
-are never written to the log. Recovery claim codes are printed only when explicitly requested.
+The server listens on UDP port `27020` by default. Allow and forward that port
+only when hosting outside the LAN.
 
-## Client
+Persistent session data, player profiles, synchronized world objects, and
+dropped items are stored below `world_directory`. Writes use temporary sibling
+files followed by atomic replacement. Native save files are never uploaded to
+or read by the dedicated server.
 
-Load a save normally through KCD2, then open **Multiplayer → Open
-Multiplayer**. The ImGui frontend calls the exact v4 C ABI exported by
-`KCD2MPKCSEClient.dll`; it neither owns the network client nor receives engine
-pointers.
+Available server commands include `status`, `players`, `kick`, `say`,
+`profile claim`, `dummy spawn`, `dummy remove`, `entities`, `time`, `timescale`,
+`weather`, `stop`, and `help`.
 
-The KCSE client resolves the local player with CryAction/GameContext and samples
-the verified world-transform pointer from KCSE's `PostUpdate` task. Networking
-uses bounded queues and never accesses game objects. DataLoaded, LoadGame,
-SaveGame and NewGame events create a new runtime epoch and invalidate native
-state.
+## Joining from the game
 
-Before a client can enter a world, the native runtime performs the complete
-active probe and publishes its capability mask. The implementation uses the
-audited `IEntity::SetWorldTM`, XGen/Actor/Soul/Human/Inventory lifecycle,
-`IEntitySystemSink` order, physics proxy, equipment transactions, and native
-world unload. There is no signature, Entity-name, Game-Lua, or console fallback.
-See the [migration audit](docs/libkcd2-kcse-migration.md) for the exact
-capability matrix.
+1. Start KCD2 and load a normal save through the game's UI.
+2. Open **Multiplayer -> Open Multiplayer** in the KCD2MP frontend.
+3. Enter the server address and connect.
 
-Protocol v4 validates the game build, Address Library identity, KCSE version,
-runtime capability mask, content fingerprint, and persistent identity. The
-authoritative profile contains money, all 10 stats, all 35 skills and progress,
-inventory instances, equipment slots, and avatar state. Capture and apply use
-the same native reconciler, including rollback and rollback-failure unload.
-
-## Supported game build and diagnostics
-
-KCD2MP currently enables hooks only for Steam build `23914554` / WHGame build
-`1308617_856` (game version 1.5). Other builds are reported as unsupported and continue without
-KCD2MP hooks.
-
-The diagnostic log console is always visible in Debug and Release; it is output-only. Startup
-reports each major stage, the detected PE fingerprint, signature validation, and whether hooks
-were enabled. A successful startup ends with:
-
-```text
-KCD2MP initialization completed - all required frontend signatures resolved - hooks enabled
-```
-
-Signatures can be checked without starting the game through the TUI's `Audit signatures` action.
-The same native tool can be built and run from a terminal:
-
-```powershell
-cmake --build out\build\debug --config Debug --target KCD2MPSignatureAudit
-out\build\debug\Debug\KCD2MPSignatureAudit.exe "C:\path\to\WHGame.dll"
-```
-
-Runtime and audit share one typed registry and the same Zydis-based call,
-RIP-relative, VTable, and PE-range validation. These signatures belong to the
-modloader/frontend; the KCSE multiplayer client does not consume them.
+The native client adopts the loaded world only when its level matches the
+server. It then applies the multiplayer profile and sends `WorldReady`. Failed
+native prerequisites stop the join with a concrete error instead of falling
+back to unsafe signatures, generated Lua, or guessed entity names.
 
 ## Manual installation
 
-Copy `d3d12_.dll` and KCSE's `dinput8.dll` to the directory containing
-`KingdomCome.exe`; rename `d3d12_.dll` to `d3d12.dll`. Copy
-`KCD2MPKCSEClient.dll` to
-`<game-root>\mods\KCD2MP\KCSE\Plugins\`.
-The default Steam destination is:
+For manual deployment:
+
+1. Copy `d3d12_.dll` beside `KingdomCome.exe` and rename it to `d3d12.dll`.
+2. Copy KCSE's `dinput8.dll` beside `KingdomCome.exe`.
+3. Copy `KCD2MPKCSEClient.dll` to
+   `<game-root>\mods\KCD2MP\KCSE\Plugins\`.
+4. Copy the matching Address Library table to
+   `<game-root>\KCSE\addresslib\`.
+
+The default Steam binary directory is:
 
 ```text
 KingdomComeDeliverance2\Bin\Win64MasterMasterSteamPGO
 ```
 
-KCSE additionally requires the address-library file matching the installed distribution and
-game build under `<game-root>\KCSE\addresslib\`. CMake bundles all tables from
-`vendor\Address-Library-For-KCSE\kcd2_address_library`; the build tool deploys them together and
-refuses to deploy `dinput8.dll` without them. KCSE intentionally fails closed when it cannot
-resolve its versioned native addresses.
-
-To uninstall KCD2MP and its KCSE integration, remove or rename `d3d12.dll`, `dinput8.dll`, and
+To uninstall the runtime, remove or rename `d3d12.dll`, `dinput8.dll`, and
 `mods\KCD2MP\KCSE\Plugins\KCD2MPKCSEClient.dll`.
 
-## Existing modding features
+## Diagnostics and testing
 
-- Lua plugin loading and hot reload
-- Dear ImGui Lua bindings ([ImGui API](docs/lua/tables/ImGui.md),
-  [GUI API](docs/lua/tables/rom.gui.md))
-- FMOD modding
-- Generic game-file modifications
-- ASI mod loading
-- XML merging
-- Debug inspectors and trainer utilities
+Debug and Release builds expose an output-only diagnostic console. Successful
+startup reports the detected PE fingerprint, signature validation, and enabled
+hooks. The build tool can run the same signature audit without starting KCD2.
 
-## Test mod
+Automated coverage includes protocol validation, server lifecycle and
+persistence, player profiles, identity storage, remote avatars, container and
+door conflicts, dropped-item ownership, environment state, native capability
+gates, deployment behavior, and Address Library coverage.
 
-The example plugin is available in [`examples/plugins/KCD2MP-TestMod`](examples/plugins/KCD2MP-TestMod).
+In-game multi-client soak tests, save-directory comparison, fault injection,
+and full NPC/quest simulation remain manual or future work.
+
+## Additional documentation
+
+- [Multiplayer architecture and status](docs/multiplayer.md)
+- [Version history](CHANGELOG.md)
+- [libKCD2/KCSE migration audit](docs/libkcd2-kcse-migration.md)
+- [Vendor integration](docs/libkcd2-vendor.md)
+- [Build and release packaging](docs/build-packaging.md)
+
+## Existing mod-loader features
+
+The inherited modding layer also provides Lua plugin loading and hot reload,
+Dear ImGui Lua bindings, FMOD integration, ASI loading, XML merging, and debug
+inspection tools. The example plugin is in
+[`examples/plugins/KCD2MP-TestMod`](examples/plugins/KCD2MP-TestMod).

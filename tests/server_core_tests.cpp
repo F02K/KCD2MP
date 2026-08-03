@@ -4,6 +4,7 @@
 
 #include <cassert>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -72,8 +73,7 @@ namespace
 	{
 		protocol::Envelope envelope;
 		auto *message = envelope.mutable_client_hello();
-		message->set_protocol_version(protocol_version);
-		message->set_client_version(version_string);
+		message->set_version(kcd2mp_version);
 		message->set_whgame_timestamp(supported_whgame_timestamp);
 		message->set_whgame_image_size(supported_whgame_image_size);
 		message->set_display_name(std::move(name));
@@ -250,6 +250,8 @@ namespace
 		outbound = core.take_outbound();
 		const auto bootstrap = find_bootstrap(outbound, connection);
 		assert(bootstrap.mode() == protocol::BOOTSTRAP_MODE_LOAD);
+		assert(bootstrap.has_environment());
+		assert(is_valid_environment_state(bootstrap.environment()));
 		assert(!bootstrap.issued_identity_token().empty());
 		const auto token = bootstrap.issued_identity_token();
 		if (enrolled_profile)
@@ -301,13 +303,74 @@ int main()
 		    << "[server]\n"
 		       "level_id = \"sandbox\"\n"
 		       "world_directory = \"world\"\n"
-		       "disable_non_player_entities = true\n";
+		       "disable_non_player_entities = true\n"
+		       "[environment]\n"
+		       "initial_time_of_day_hours = 21.5\n"
+		       "time_scale = 30.0\n"
+		       "weather_id = 8\n"
+		       "weather_transition_seconds = 12\n";
 		output.close();
 		const auto parsed = load_server_config(path);
 		assert(parsed.disable_human_npcs);
 		assert(parsed.disable_animal_npcs);
 		assert(parsed.world_directory
 		    == parsed_config_world.path / "world");
+		assert(parsed.initial_time_of_day_hours == 21.5);
+		assert(parsed.time_scale == 30.0F);
+		assert(parsed.weather_id == 8);
+		assert(parsed.weather_transition_seconds == 12);
+	}
+
+	temporary_world environment_world;
+	{
+		auto config = config_for(environment_world.path);
+		config.initial_time_of_day_hours = 23.5;
+		config.time_scale = 600.0F;
+		config.weather_id = 2;
+		config.weather_transition_seconds = 5;
+		config.idle_timeout_seconds = 300;
+		server_core core(config);
+		(void)connect_new_player(core, 93, start, 1);
+		auto state = core.current_environment(start + 126s);
+		assert(std::abs(state.time_of_day_hours() - 20.5) < 0.000001);
+		assert(state.time_scale() == 600.0F);
+		assert(state.weather_id() == 2);
+		const auto revision = state.revision();
+		assert(core.set_time_scale(15.0F, start + 126s));
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().delivery == reliability::reliable);
+		assert(outbound.front().envelope.has_server_environment_updated());
+		state = core.current_environment(start + 126s);
+		assert(state.revision() == revision + 1);
+		assert(std::abs(state.time_of_day_hours() - 20.5) < 0.000001);
+		assert(core.set_time_of_day(6.25, start + 126s));
+		(void)core.take_outbound();
+		assert(core.set_weather(13, 30, start + 126s));
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front()
+		           .envelope.server_environment_updated()
+		           .state()
+		           .weather_id()
+		    == 13);
+		state = core.current_environment(start + 126s);
+		assert(std::abs(state.time_of_day_hours() - 6.25) < 0.000001);
+		assert(state.weather_id() == 13);
+		assert(state.weather_transition_ms() == 30'000);
+		assert(!core.set_weather(34, 30, start + 126s));
+		core.tick(start + 127s);
+		outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.delivery == reliability::unreliable
+			        && message.envelope.has_world_snapshot()
+			        && message.envelope.world_snapshot().has_environment()
+			        && message.envelope.world_snapshot().environment().weather_id()
+			            == 13;
+		    }));
 	}
 	{
 		const auto path = parsed_config_world.path / "split-server.toml";
@@ -346,13 +409,23 @@ int main()
 	temporary_world incomplete_runtime_world;
 	{
 		server_core core(config_for(incomplete_runtime_world.path));
+		core.on_transport_connected(89, start);
+		auto wrong_version = hello();
+		wrong_version.mutable_client_hello()->set_version("0.0.8");
+		core.on_message(89, wrong_version, start);
+		auto outbound = core.take_outbound();
+		assert(has_rejection(
+		    outbound,
+		    89,
+		    protocol::REJECT_REASON_VERSION_MISMATCH));
+
 		core.on_transport_connected(90, start);
 		auto missing_capability = hello();
 		missing_capability.mutable_client_hello()
 		    ->mutable_runtime()
 		    ->set_features(runtime_capability_kcse);
 		core.on_message(90, missing_capability, start);
-		auto outbound = core.take_outbound();
+		outbound = core.take_outbound();
 		assert(has_rejection(
 		    outbound,
 		    90,
@@ -888,6 +961,63 @@ int main()
 		           .authoritative_state()
 		           .inventory_size()
 		    == 0);
+
+		protocol::Envelope dropped_item;
+		auto *drop_update = dropped_item.mutable_client_world_item_update();
+		drop_update->set_base_revision(0);
+		auto *drop = drop_update->mutable_state();
+		drop->set_instance_id(loot->instance_id());
+		drop->set_revision(0);
+		drop->set_present(true);
+		*drop->mutable_item() = *loot;
+		auto *drop_transform = drop->mutable_transform();
+		drop_transform->mutable_position()->set_x(1.0F);
+		drop_transform->mutable_position()->set_y(2.0F);
+		drop_transform->mutable_position()->set_z(3.0F);
+		drop_transform->mutable_rotation()->set_w(1.0F);
+		drop_transform->mutable_velocity();
+		core.on_message(50, dropped_item, start + 13ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 50
+			        && message.envelope.has_world_item_accepted()
+			        && message.envelope.world_item_accepted().revision() == 1;
+		    }));
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 51
+			        && message.envelope.has_world_item_updated()
+			        && message.envelope.world_item_updated().state().present();
+		    }));
+
+		protocol::Envelope picked_up_item;
+		auto *pickup_profile =
+		    picked_up_item.mutable_client_profile_update();
+		pickup_profile->set_base_revision(second_profile.revision());
+		*pickup_profile->mutable_profile() = second_profile;
+		*pickup_profile->mutable_profile()->add_inventory() = *loot;
+		core.on_message(51, picked_up_item, start + 14ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 51
+			        && message.envelope.has_profile_accepted();
+		    }));
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.envelope.has_world_item_updated()
+			        && !message.envelope.world_item_updated().state().present()
+			        && message.envelope.world_item_updated().state().revision() == 2;
+		    }));
 	}
 	{
 		server_core restarted(config_for(world_sync_world.path));
@@ -918,6 +1048,15 @@ int main()
 			               .state()
 			               .inventory_size()
 			            == 0;
+		    }));
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 52
+			        && message.envelope.has_world_item_updated()
+			        && !message.envelope.world_item_updated().state().present()
+			        && message.envelope.world_item_updated().state().revision() == 2;
 		    }));
 	}
 

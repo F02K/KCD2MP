@@ -29,7 +29,8 @@ namespace
 		       "say <text>, profile claim <player_id>, "
 		       "dummy spawn [name], dummy remove <player_id>, "
 		       "entities <all|humans|animals> <disable|enable>, "
-		       "entities status, stop, help\n";
+		       "entities status, time <hours>, timescale <ratio>, "
+		       "weather <id> [transition_seconds], stop, help\n";
 	}
 
 	int close_reason(kcd2mp::server::close_kind kind)
@@ -126,7 +127,8 @@ int main(int argc, char **argv)
 		        }});
 
 		transport.listen(config.bind_address, config.port);
-		std::cout << config.name << " listening on " << config.bind_address << ':'
+		std::cout << config.name << " (KCD2MP " << kcd2mp::kcd2mp_version
+		          << ", prototype) listening on " << config.bind_address << ':'
 		          << config.port << " for level " << config.level_id << '\n';
 		print_help();
 
@@ -162,6 +164,12 @@ int main(int argc, char **argv)
 					          << (core.animal_npcs_disabled()
 					                  ? "disabled"
 					                  : "enabled")
+					          << '\n';
+					const auto environment = core.current_environment(now());
+					std::cout << "time=" << environment.time_of_day_hours()
+					          << " scale=" << environment.time_scale()
+					          << " weather=" << environment.weather_id()
+					          << " env_revision=" << environment.revision()
 					          << '\n';
 				}
 				else if (command == "players")
@@ -305,6 +313,61 @@ int main(int argc, char **argv)
 						    animals);
 						std::cout << target << " NPCs "
 						          << (disabled ? "disabled" : "enabled")
+						          << (changed ? "" : " (unchanged)") << '\n';
+					}
+				}
+				else if (command == "time")
+				{
+					double hours{};
+					if (!(input >> hours) || hours < 0.0 || hours >= 24.0)
+					{
+						std::cout << "usage: time <hours 0..23.999>\n";
+					}
+					else
+					{
+						const bool changed = core.set_time_of_day(hours, now());
+						std::cout << "time set to " << hours
+						          << (changed ? "" : " (unchanged)") << '\n';
+					}
+				}
+				else if (command == "timescale")
+				{
+					float scale{};
+					if (!(input >> scale) || scale < 0.0F || scale > 1000.0F)
+					{
+						std::cout << "usage: timescale <ratio 0..1000>\n";
+					}
+					else
+					{
+						const bool changed = core.set_time_scale(scale, now());
+						std::cout << "time scale set to " << scale
+						          << (changed ? "" : " (unchanged)") << '\n';
+					}
+				}
+				else if (command == "weather")
+				{
+					std::uint32_t id{};
+					std::uint32_t transition = 30;
+					if (!(input >> id))
+					{
+						std::cout << "usage: weather <id 1..33> "
+						             "[transition_seconds 0..600]\n";
+						continue;
+					}
+					if (input >> transition)
+					{
+						// Optional transition parsed successfully.
+					}
+					if (id < 1 || id > 33 || transition > 600)
+					{
+						std::cout << "usage: weather <id 1..33> "
+						             "[transition_seconds 0..600]\n";
+					}
+					else
+					{
+						const bool changed = core.set_weather(id, transition, now());
+						std::cout << "weather set to " << id << " over "
+						          << transition << " seconds"
 						          << (changed ? "" : " (unchanged)") << '\n';
 					}
 				}

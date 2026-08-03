@@ -39,6 +39,10 @@ namespace kcd2mp::server
 		std::uint32_t reconnect_grace_seconds{30};
 		std::uint32_t bootstrap_timeout_seconds{180};
 		std::uint32_t profile_snapshot_interval_seconds{15};
+		double initial_time_of_day_hours{8.0};
+		float time_scale{15.0F};
+		std::uint32_t weather_id{1};
+		std::uint32_t weather_transition_seconds{30};
 		bool disable_human_npcs{};
 		bool disable_animal_npcs{};
 		std::string default_avatar_archetype{

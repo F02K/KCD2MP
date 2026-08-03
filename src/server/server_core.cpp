@@ -57,10 +57,17 @@ namespace kcd2mp::server
 	        { return random_hex(32); }),
 	    m_store(m_config),
 	    m_human_npcs_disabled(m_config.disable_human_npcs),
-	    m_animal_npcs_disabled(m_config.disable_animal_npcs)
+	    m_animal_npcs_disabled(m_config.disable_animal_npcs),
+	    m_environment_anchor_hours(m_config.initial_time_of_day_hours),
+	    m_environment_time_scale(m_config.time_scale),
+	    m_environment_weather_id(m_config.weather_id),
+	    m_environment_weather_transition_ms(
+	        m_config.weather_transition_seconds * 1000U)
 	{
 		for (const auto &object : m_store.world_objects())
 			m_world_objects.emplace(object.entity_guid(), object);
+		for (const auto &item : m_store.world_items())
+			m_world_items.emplace(item.instance_id(), item);
 		for (const auto &stored : m_store.profiles())
 		{
 			for (const auto &item : stored.profile.inventory())
@@ -73,6 +80,7 @@ namespace kcd2mp::server
 	    connection_id connection,
 	    time_point now)
 	{
+		advance_environment_clock(now);
 		if (connection == 0 || m_pending.contains(connection)
 		    || find_by_connection(connection))
 		{
@@ -93,6 +101,7 @@ namespace kcd2mp::server
 	    std::string reason,
 	    time_point now)
 	{
+		advance_environment_clock(now);
 		if (m_pending.contains(connection))
 		{
 			release_initializer(connection);
@@ -120,6 +129,7 @@ namespace kcd2mp::server
 	    const protocol::Envelope &envelope,
 	    time_point now)
 	{
+		advance_environment_clock(now);
 		if (auto *player = find_by_connection(connection))
 		{
 			player->last_message_at = now;
@@ -147,6 +157,11 @@ namespace kcd2mp::server
 				handle_world_object_update(
 				    *player,
 				    envelope.client_world_object_update());
+				break;
+			case protocol::Envelope::kClientWorldItemUpdate:
+				handle_world_item_update(
+				    *player,
+				    envelope.client_world_item_update());
 				break;
 			case protocol::Envelope::kPing:
 				handle_ping(*player, envelope.ping(), now);
@@ -241,6 +256,7 @@ namespace kcd2mp::server
 
 	void server_core::tick(time_point now)
 	{
+		advance_environment_clock(now);
 		++m_server_tick;
 		std::vector<connection_id> expired_pending;
 		for (const auto &[connection, pending] : m_pending)
@@ -580,6 +596,82 @@ namespace kcd2mp::server
 		return m_config;
 	}
 
+	protocol::EnvironmentState server_core::current_environment(
+	    time_point now) const
+	{
+		protocol::EnvironmentState state;
+		state.set_revision(m_environment_revision);
+		const auto elapsed = m_environment_clock_started
+		        && now > m_environment_anchor_time
+		    ? now - m_environment_anchor_time
+		    : clock::duration::zero();
+		state.set_time_of_day_hours(project_time_of_day_hours(
+		    m_environment_anchor_hours,
+		    m_environment_time_scale,
+		    elapsed));
+		state.set_time_scale(m_environment_time_scale);
+		state.set_server_time_ms(milliseconds(now));
+		state.set_weather_id(m_environment_weather_id);
+		state.set_weather_transition_ms(m_environment_weather_transition_ms);
+		state.set_weather_revision(m_weather_revision);
+		return state;
+	}
+
+	bool server_core::set_time_of_day(double hours, time_point now)
+	{
+		if (!std::isfinite(hours) || hours < 0.0 || hours >= hours_per_day)
+			return false;
+		advance_environment_clock(now);
+		const auto current = current_environment(now).time_of_day_hours();
+		if (circular_time_distance_hours(current, hours)
+		    < 0.000001)
+			return false;
+		m_environment_anchor_hours = hours;
+		m_environment_anchor_time = now;
+		++m_environment_revision;
+		broadcast_environment(now);
+		return true;
+	}
+
+	bool server_core::set_time_scale(float scale, time_point now)
+	{
+		if (!std::isfinite(scale) || scale < 0.0F
+		    || scale > maximum_time_scale)
+			return false;
+		advance_environment_clock(now);
+		if (std::abs(m_environment_time_scale - scale) < 0.000001F)
+			return false;
+		m_environment_anchor_hours =
+		    current_environment(now).time_of_day_hours();
+		m_environment_anchor_time = now;
+		m_environment_time_scale = scale;
+		++m_environment_revision;
+		broadcast_environment(now);
+		return true;
+	}
+
+	bool server_core::set_weather(
+	    std::uint32_t weather_id,
+	    std::uint32_t transition_seconds,
+	    time_point now)
+	{
+		if (weather_id < minimum_weather_id
+		    || weather_id > maximum_weather_id
+		    || transition_seconds > maximum_weather_transition_ms / 1000U)
+			return false;
+		advance_environment_clock(now);
+		const auto transition_ms = transition_seconds * 1000U;
+		if (weather_id == m_environment_weather_id
+		    && transition_ms == m_environment_weather_transition_ms)
+			return false;
+		m_environment_weather_id = weather_id;
+		m_environment_weather_transition_ms = transition_ms;
+		++m_environment_revision;
+		++m_weather_revision;
+		broadcast_environment(now);
+		return true;
+	}
+
 	void server_core::handle_hello(
 	    connection_id connection,
 	    const protocol::ClientHello &hello,
@@ -589,12 +681,12 @@ namespace kcd2mp::server
 		{
 			reject(connection, reason, std::move(message));
 		};
-		if (hello.protocol_version() != protocol_version
-		    || hello.client_version() != version_string)
+		if (hello.version() != kcd2mp_version)
 		{
 			reject_hello(
-			    protocol::REJECT_REASON_PROTOCOL_MISMATCH,
-			    "KCD2MP protocol or version mismatch");
+			    protocol::REJECT_REASON_VERSION_MISMATCH,
+			    "KCD2MP version mismatch; server requires "
+			        + std::string(kcd2mp_version));
 			return;
 		}
 		if (hello.whgame_timestamp() != supported_whgame_timestamp
@@ -955,6 +1047,7 @@ namespace kcd2mp::server
 		(void)inserted;
 		send_accepted(iterator->second);
 		send_world_objects(connection);
+		send_world_items(connection);
 		protocol::Envelope joined;
 		*joined.mutable_player_joined()->mutable_player() =
 		    snapshot_of(iterator->second, true);
@@ -1095,7 +1188,11 @@ namespace kcd2mp::server
 		auto *inventory = accepted.mutable_inventory();
 		for (auto index = inventory->size(); index-- > 0;)
 		{
-			if (m_item_owners.contains(inventory->Get(index).instance_id()))
+			const auto &instance = inventory->Get(index).instance_id();
+			const auto world_item = m_world_items.find(instance);
+			if (m_item_owners.contains(instance)
+			    || (world_item != m_world_items.end()
+			        && world_item->second.present()))
 			{
 				inventory->DeleteSubrange(index, 1);
 				contained_owned_item = true;
@@ -1133,6 +1230,146 @@ namespace kcd2mp::server
 
 		protocol::Envelope updated;
 		*updated.mutable_world_object_updated()->mutable_state() = accepted;
+		broadcast(
+		    std::move(updated),
+		    reliability::reliable,
+		    player.connection);
+	}
+
+	void server_core::handle_world_item_update(
+	    player_session &player,
+	    const protocol::ClientWorldItemUpdate &message)
+	{
+		const auto reject_state = [&](const protocol::WorldItemState &state)
+		{
+			protocol::Envelope rejected;
+			auto *response = rejected.mutable_world_item_rejected();
+			*response->mutable_authoritative_state() = state;
+			response->set_reason("world item revision conflict");
+			queue(
+			    *player.connection,
+			    std::move(rejected),
+			    reliability::reliable);
+		};
+		if (!message.has_state()
+		    || !is_valid_world_item_state(message.state(), false))
+		{
+			reject(
+			    *player.connection,
+			    protocol::REJECT_REASON_MALFORMED_MESSAGE,
+			    "world item update is invalid");
+			return;
+		}
+
+		const auto &instance = message.state().instance_id();
+		auto found = m_world_items.find(instance);
+		if (found != m_world_items.end()
+		    && message.base_revision() != found->second.revision())
+		{
+			reject_state(found->second);
+			return;
+		}
+		if (found == m_world_items.end() && message.base_revision() != 0)
+		{
+			auto absent = message.state();
+			absent.set_revision(1);
+			absent.set_present(false);
+			reject_state(absent);
+			return;
+		}
+		if (found == m_world_items.end()
+		    && m_world_items.size() >= max_world_items)
+		{
+			auto absent = message.state();
+			absent.set_revision(1);
+			absent.set_present(false);
+			reject_state(absent);
+			return;
+		}
+
+		auto accepted = message.state();
+		(void)normalize_rotation(accepted.mutable_transform()->mutable_rotation());
+		if (accepted.present())
+		{
+			const auto owner = m_item_owners.find(instance);
+			if (owner != m_item_owners.end() && owner->second != player.id)
+			{
+				if (found != m_world_items.end())
+					reject_state(found->second);
+				else
+				{
+					auto absent = accepted;
+					absent.set_revision(1);
+					absent.set_present(false);
+					reject_state(absent);
+				}
+				return;
+			}
+			if (owner != m_item_owners.end())
+			{
+				auto *inventory = player.profile.mutable_inventory();
+				for (auto index = inventory->size(); index-- > 0;)
+				{
+					if (inventory->Get(index).instance_id() == instance)
+						inventory->DeleteSubrange(index, 1);
+				}
+				auto *quick = player.profile.mutable_quick_access_slots();
+				for (auto index = quick->size(); index-- > 0;)
+				{
+					if (quick->Get(index).instance_id() == instance)
+						quick->DeleteSubrange(index, 1);
+				}
+				auto *equipment = player.profile.mutable_avatar()->mutable_equipment();
+				equipment->Clear();
+				for (const auto &item : player.profile.inventory())
+				{
+					if (!item.has_equipped_slot())
+						continue;
+					auto *visible = equipment->Add();
+					visible->set_definition_id(item.definition_id());
+					visible->set_equipped_slot(item.equipped_slot());
+				}
+				player.avatar = player.profile.avatar();
+				m_item_owners.erase(owner);
+				persist_player(player, m_current_time);
+			}
+
+			bool objects_changed = false;
+			for (auto &[guid, object] : m_world_objects)
+			{
+				(void)guid;
+				auto *inventory = object.mutable_inventory();
+				const auto old_size = inventory->size();
+				for (auto index = inventory->size(); index-- > 0;)
+				{
+					if (inventory->Get(index).instance_id() == instance)
+						inventory->DeleteSubrange(index, 1);
+				}
+				if (inventory->size() == old_size)
+					continue;
+				object.set_revision(object.revision() + 1);
+				objects_changed = true;
+				protocol::Envelope updated;
+				*updated.mutable_world_object_updated()->mutable_state() = object;
+				broadcast(std::move(updated), reliability::reliable);
+			}
+			if (objects_changed)
+				persist_world_objects();
+		}
+
+		accepted.set_revision(
+		    found == m_world_items.end() ? 1 : found->second.revision() + 1);
+		m_world_items.insert_or_assign(instance, accepted);
+		persist_world_items();
+
+		protocol::Envelope response;
+		auto *ack = response.mutable_world_item_accepted();
+		ack->set_instance_id(instance);
+		ack->set_revision(accepted.revision());
+		queue(*player.connection, std::move(response), reliability::reliable);
+
+		protocol::Envelope updated;
+		*updated.mutable_world_item_updated()->mutable_state() = accepted;
 		broadcast(
 		    std::move(updated),
 		    reliability::reliable,
@@ -1420,6 +1657,35 @@ namespace kcd2mp::server
 		}
 	}
 
+	void server_core::send_world_items(connection_id connection)
+	{
+		for (const auto &[instance, item] : m_world_items)
+		{
+			(void)instance;
+			protocol::Envelope envelope;
+			*envelope.mutable_world_item_updated()->mutable_state() = item;
+			queue(connection, std::move(envelope), reliability::reliable);
+		}
+	}
+
+	void server_core::advance_environment_clock(time_point now)
+	{
+		m_current_time = now;
+		if (!m_environment_clock_started)
+		{
+			m_environment_anchor_time = now;
+			m_environment_clock_started = true;
+		}
+	}
+
+	void server_core::broadcast_environment(time_point now)
+	{
+		protocol::Envelope envelope;
+		*envelope.mutable_server_environment_updated()->mutable_state() =
+		    current_environment(now);
+		broadcast(std::move(envelope), reliability::reliable);
+	}
+
 	void server_core::apply_default_avatar(
 	    protocol::PlayerProfile &profile)
 	{
@@ -1494,6 +1760,7 @@ namespace kcd2mp::server
 		bootstrap->set_timeout_seconds(m_config.bootstrap_timeout_seconds);
 		bootstrap->set_issued_identity_token(
 		    pending.issued_identity_token);
+		*bootstrap->mutable_environment() = current_environment(m_current_time);
 		if (m_store.manifest().spawn_valid)
 		{
 			*bootstrap->mutable_spawn() = m_store.manifest().spawn;
@@ -1584,6 +1851,19 @@ namespace kcd2mp::server
 		m_store.save_world_objects(objects);
 	}
 
+	void server_core::persist_world_items()
+	{
+		std::vector<protocol::WorldItemState> items;
+		items.reserve(m_world_items.size());
+		for (const auto &[instance, item] : m_world_items)
+		{
+			(void)instance;
+			items.push_back(item);
+		}
+		std::ranges::sort(items, {}, &protocol::WorldItemState::instance_id);
+		m_store.save_world_items(items);
+	}
+
 	void server_core::remove_owned_items_from_world()
 	{
 		bool changed = false;
@@ -1611,6 +1891,21 @@ namespace kcd2mp::server
 		}
 		if (changed)
 			persist_world_objects();
+
+		bool items_changed = false;
+		for (auto &[instance, item] : m_world_items)
+		{
+			if (!item.present() || !m_item_owners.contains(instance))
+				continue;
+			item.set_present(false);
+			item.set_revision(item.revision() + 1);
+			items_changed = true;
+			protocol::Envelope updated;
+			*updated.mutable_world_item_updated()->mutable_state() = item;
+			broadcast(std::move(updated), reliability::reliable);
+		}
+		if (items_changed)
+			persist_world_items();
 	}
 
 	void server_core::broadcast(
@@ -1649,6 +1944,7 @@ namespace kcd2mp::server
 		auto *snapshot = envelope.mutable_world_snapshot();
 		snapshot->set_server_tick(m_server_tick);
 		snapshot->set_server_time_ms(milliseconds(now));
+		*snapshot->mutable_environment() = current_environment(now);
 		for (const auto &[id, player] : m_players)
 		{
 			(void)id;

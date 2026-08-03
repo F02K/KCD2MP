@@ -209,6 +209,7 @@ namespace kcd2mp::server
 		load_or_create(config);
 		load_profiles();
 		load_world_objects();
+		load_world_items();
 	}
 
 	const session_manifest &world_store::manifest() const
@@ -225,6 +226,12 @@ namespace kcd2mp::server
 	world_store::world_objects() const
 	{
 		return m_world_objects;
+	}
+
+	const std::vector<protocol::WorldItemState> &
+	world_store::world_items() const
+	{
+		return m_world_items;
 	}
 
 	std::optional<persisted_profile> world_store::find_by_token(
@@ -319,6 +326,25 @@ namespace kcd2mp::server
 			throw std::runtime_error("could not serialize persistent world objects");
 		atomic_replace(
 		    m_root / "world_objects.pb",
+		    {reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()});
+	}
+
+	void world_store::save_world_items(
+	    std::span<const protocol::WorldItemState> items)
+	{
+		protocol::StoredWorldItems stored;
+		m_world_items.assign(items.begin(), items.end());
+		for (const auto &item : m_world_items)
+		{
+			if (!is_valid_world_item_state(item))
+				throw std::invalid_argument("persistent world item is invalid");
+			*stored.add_items() = item;
+		}
+		std::string bytes;
+		if (!stored.SerializeToString(&bytes))
+			throw std::runtime_error("could not serialize persistent world items");
+		atomic_replace(
+		    m_root / "world_items.pb",
 		    {reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()});
 	}
 
@@ -456,6 +482,29 @@ namespace kcd2mp::server
 			if (!is_valid_world_object_state(object))
 				throw std::runtime_error("invalid persistent world object entry");
 			m_world_objects.push_back(std::move(object));
+		}
+	}
+
+	void world_store::load_world_items()
+	{
+		const auto path = m_root / "world_items.pb";
+		if (!std::filesystem::exists(path))
+			return;
+		std::ifstream input(path, std::ios::binary);
+		const std::string bytes{
+		    std::istreambuf_iterator<char>(input),
+		    std::istreambuf_iterator<char>()};
+		protocol::StoredWorldItems stored;
+		if ((!input && !input.eof()) || !stored.ParseFromString(bytes)
+		    || stored.items_size() > static_cast<int>(max_world_items))
+		{
+			throw std::runtime_error("invalid persistent world item state");
+		}
+		for (auto &item : *stored.mutable_items())
+		{
+			if (!is_valid_world_item_state(item))
+				throw std::runtime_error("invalid persistent world item entry");
+			m_world_items.push_back(std::move(item));
 		}
 	}
 

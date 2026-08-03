@@ -142,6 +142,22 @@ namespace kcd2mp
 		{
 			return true;
 		}
+		[[nodiscard]] virtual std::vector<protocol::WorldItemState>
+		poll_world_item_updates()
+		{
+			return {};
+		}
+		[[nodiscard]] virtual bool apply_world_item_state(
+		    const protocol::WorldItemState &)
+		{
+			return true;
+		}
+		[[nodiscard]] virtual bool apply_environment_state(
+		    const protocol::EnvironmentState &,
+		    bool)
+		{
+			return true;
+		}
 		[[nodiscard]] virtual bool apply_authoritative_profile(
 		    const protocol::PlayerProfile &)
 		{

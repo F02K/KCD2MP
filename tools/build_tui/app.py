@@ -381,7 +381,12 @@ class BuildApp(App[None]):
                 )
                 message = "{} build deployed successfully.".format(profile.label)
             else:
-                message = "{} build completed successfully.".format(profile.label)
+                if result.package is not None:
+                    message = "{} build completed. Packages: {}".format(
+                        profile.label, result.package.root
+                    )
+                else:
+                    message = "{} build completed successfully.".format(profile.label)
             self.call_from_thread(self._finish_operation, True, message)
         except BuildToolError as exc:
             write_log("ERROR: {}".format(exc))

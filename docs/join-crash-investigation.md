@@ -105,9 +105,9 @@ the locally installed game `Tables.pak`.
 
 ### Follow-up: fractional Groschen
 
-Native KCD2 money stacks count tenths of one Groschen. Protocol v4 stored only
+Native KCD2 money stacks count tenths of one Groschen. An early prototype stored only
 whole Groschen and rejected any native total not divisible by ten. Rounding
-would make transaction rollback lossy, so protocol v5 adds
+would make transaction rollback lossy, so a subsequent prototype milestone added
 `PlayerProfile.money_subunits` constrained to `0..9`. Native capture now splits
 the exact amount into whole Groschen and subunits; native apply combines both
 fields back into the exact stack amount. Equality checks, validation, server

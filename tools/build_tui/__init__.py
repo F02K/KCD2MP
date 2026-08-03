@@ -7,8 +7,11 @@ from .core import (
     BuildService,
     BuildToolError,
     ConfigStore,
+    PackageResult,
+    client_deployment_layout,
     deploy_artifacts,
     detect_game_root,
+    package_artifacts,
 )
 
 __all__ = [
@@ -18,6 +21,9 @@ __all__ = [
     "BuildService",
     "BuildToolError",
     "ConfigStore",
+    "PackageResult",
+    "client_deployment_layout",
     "deploy_artifacts",
     "detect_game_root",
+    "package_artifacts",
 ]

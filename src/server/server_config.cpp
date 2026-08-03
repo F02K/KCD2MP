@@ -107,6 +107,23 @@ namespace kcd2mp::server
 		    *server,
 		    "profile_snapshot_interval_seconds",
 		    config.profile_snapshot_interval_seconds);
+		if (const auto *environment = document["environment"].as_table())
+		{
+			config.initial_time_of_day_hours =
+			    (*environment)["initial_time_of_day_hours"].value_or(
+			        config.initial_time_of_day_hours);
+			config.time_scale = static_cast<float>(
+			    (*environment)["time_scale"].value_or(
+			        static_cast<double>(config.time_scale)));
+			config.weather_id = checked_integer(
+			    *environment,
+			    "weather_id",
+			    config.weather_id);
+			config.weather_transition_seconds = checked_integer(
+			    *environment,
+			    "weather_transition_seconds",
+			    config.weather_transition_seconds);
+		}
 		// The aggregate key remains a backwards-compatible fallback. Explicit
 		// category keys override it independently.
 		const auto disable_all_npcs =
@@ -264,6 +281,19 @@ namespace kcd2mp::server
 		    || config.movement_tolerance_m < 0.0F)
 		{
 			throw std::runtime_error("movement limits must be finite and valid");
+		}
+		if (!std::isfinite(config.initial_time_of_day_hours)
+		    || config.initial_time_of_day_hours < 0.0
+		    || config.initial_time_of_day_hours >= hours_per_day
+		    || !std::isfinite(config.time_scale) || config.time_scale < 0.0F
+		    || config.time_scale > maximum_time_scale
+		    || config.weather_id < minimum_weather_id
+		    || config.weather_id > maximum_weather_id
+		    || config.weather_transition_seconds
+		        > maximum_weather_transition_ms / 1000U)
+		{
+			throw std::runtime_error(
+			    "environment time, scale, weather, or transition is invalid");
 		}
 		if (config.world_directory.empty())
 		{

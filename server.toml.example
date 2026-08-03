@@ -22,6 +22,14 @@ movement_tolerance_m = 2.0
 world_directory = "world"
 starter_profile = "starter_profile.toml"
 
+[environment]
+# Server-authoritative normal day cycle. The default ratio is 15 game seconds
+# per real second, matching the retail game's normal time speed.
+initial_time_of_day_hours = 8.0
+time_scale = 15.0
+weather_id = 1
+weather_transition_seconds = 30
+
 # Optional. If omitted, the first authenticated client initializes the spawn.
 # [server.initial_spawn]
 # x = 0.0

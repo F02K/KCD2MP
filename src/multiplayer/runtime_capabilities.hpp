@@ -20,10 +20,11 @@ namespace kcd2mp
 		runtime_capability_profile_qam = 1ULL << 11,
 		runtime_capability_transition_gate = 1ULL << 12,
 		runtime_capability_address_library_identity = 1ULL << 13,
+		runtime_capability_environment = 1ULL << 14,
 	};
 
 	constexpr std::uint64_t known_client_runtime_capabilities =
-	    (runtime_capability_address_library_identity << 1) - 1;
+	    (runtime_capability_environment << 1) - 1;
 
 	// Features required for the authoritative multiplayer simulation. Future
 	// cosmetic/debug capabilities belong in `known`, not in this mask.
