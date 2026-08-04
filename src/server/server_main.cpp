@@ -10,8 +10,11 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <ranges>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace
@@ -31,6 +34,29 @@ namespace
 		       "entities <all|humans|animals> <disable|enable>, "
 		       "entities status, time <hours>, timescale <ratio>, "
 		       "weather <id> [transition_seconds], stop, help\n";
+		std::cout
+		    << "Property: property list [filter], property show <property_id>, "
+		       "property owner <property_id> <player_id>, property grant "
+		       "<actor_player_id> <property_id> <target_player_id> "
+		       "<steward|resident|employee|guard|guest> [minutes], property "
+		       "revoke <actor_player_id|system> <assignment_id>\n";
+	}
+
+	std::optional<kcd2mp::protocol::PropertyRole> property_role(
+	    std::string_view value)
+	{
+		using namespace kcd2mp::protocol;
+		if (value == "steward")
+			return PROPERTY_ROLE_STEWARD;
+		if (value == "resident")
+			return PROPERTY_ROLE_RESIDENT;
+		if (value == "employee")
+			return PROPERTY_ROLE_EMPLOYEE;
+		if (value == "guard")
+			return PROPERTY_ROLE_GUARD;
+		if (value == "guest")
+			return PROPERTY_ROLE_GUEST;
+		return std::nullopt;
 	}
 
 	int close_reason(kcd2mp::server::close_kind kind)
@@ -176,7 +202,8 @@ int main(int argc, char **argv)
 				{
 					for (const auto &player : core.players())
 					{
-						std::cout << player.id << "  " << player.display_name
+						std::cout << player.id << "  " << player.persistent_id
+						          << "  " << player.display_name
 						          << "  "
 						          << (player.dummy
 						                  ? "dummy"
@@ -184,6 +211,132 @@ int main(int argc, char **argv)
 						                         ? "connected"
 						                         : "reconnecting"))
 						          << '\n';
+					}
+				}
+				else if (command == "property")
+				{
+					std::string action;
+					input >> action;
+					if (action == "list")
+					{
+						std::string filter;
+						std::getline(input >> std::ws, filter);
+						for (const auto &property : core.property_catalog().properties())
+						{
+							if (!filter.empty()
+							    && !property.property_id().contains(filter)
+							    && !property.inferred_name().contains(filter)
+							    && !property.source_path().contains(filter))
+								continue;
+							std::cout << property.property_id() << "  "
+							          << property.inferred_name() << "  resources="
+							          << property.resources_size() << " confidence="
+							          << property.discovery_confidence() << "  "
+							          << property.source_path();
+							if (property.has_marker_position())
+								std::cout << "  home=("
+								          << property.marker_position().x() << ','
+								          << property.marker_position().y() << ','
+								          << property.marker_position().z() << ')';
+							std::cout << '\n';
+						}
+					}
+					else if (action == "show")
+					{
+						std::string property_id;
+						input >> property_id;
+						const auto found = std::ranges::find_if(
+						    core.property_catalog().properties(),
+						    [&](const auto &property)
+						    { return property.property_id() == property_id; });
+						if (found == core.property_catalog().properties().end())
+						{
+							std::cout << "unknown property\n";
+							continue;
+						}
+						std::cout << found->property_id() << "  "
+						          << found->inferred_name() << "  "
+						          << found->source_path() << '\n';
+						for (const auto &assignment :
+						     core.property_ledger().assignments())
+						{
+							if (assignment.property_id() == property_id)
+								std::cout << "  " << assignment.assignment_id()
+								          << " player="
+								          << assignment.subject_player_id()
+								          << " role=" << assignment.role()
+								          << " expires="
+								          << assignment.expires_at_ms() << '\n';
+						}
+					}
+					else if (action == "owner")
+					{
+						std::string property_id;
+						kcd2mp::player_id target{};
+						input >> property_id >> target;
+						std::string error;
+						if (property_id.empty() || target == 0
+						    || !core.assign_property_owner(
+						        property_id, target, error))
+							std::cout << "could not assign owner: " << error << '\n';
+						else
+							std::cout << "property owner assigned\n";
+					}
+					else if (action == "grant")
+					{
+						kcd2mp::player_id actor{};
+						kcd2mp::player_id target{};
+						std::string property_id;
+						std::string role_name;
+						std::uint64_t minutes{};
+						input >> actor >> property_id >> target >> role_name;
+						input >> minutes;
+						const auto role = property_role(role_name);
+						const auto expires = minutes == 0 ? 0ULL
+						    : static_cast<std::uint64_t>(
+						          std::chrono::duration_cast<std::chrono::milliseconds>(
+						              std::chrono::system_clock::now().time_since_epoch())
+						              .count())
+						        + minutes * 60'000ULL;
+						std::string error;
+						if (!role || actor == 0 || target == 0
+						    || !core.grant_property_role(
+						        actor,
+						        property_id,
+						        target,
+						        *role,
+						        expires,
+						        error))
+							std::cout << "could not grant role: " << error << '\n';
+						else
+							std::cout << "property role granted\n";
+					}
+					else if (action == "revoke")
+					{
+						std::string actor;
+						std::string assignment;
+						input >> actor >> assignment;
+						std::string error;
+						bool revoked = false;
+						if (actor == "system")
+							revoked = core.system_revoke_property_role(
+							    assignment, error);
+						else
+						{
+							std::istringstream actor_input(actor);
+							kcd2mp::player_id actor_id{};
+							if (actor_input >> actor_id)
+								revoked = core.revoke_property_role(
+								    actor_id, assignment, error);
+						}
+						if (!revoked)
+							std::cout << "could not revoke role: " << error << '\n';
+						else
+							std::cout << "property role revoked\n";
+					}
+					else
+					{
+						std::cout << "usage: property <list|show|owner|grant|revoke>\n";
 					}
 				}
 				else if (command == "kick")

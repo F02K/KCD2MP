@@ -73,6 +73,8 @@ namespace kcd2mp::npc
 		    std::string_view name,
 		    bool two_handed)
 		{
+			if (name == "unarmed")
+				return weapon_class::unarmed;
 			if (name == "bow")
 				return weapon_class::bow;
 			if (name.starts_with("crossbow") || name == "rifle")

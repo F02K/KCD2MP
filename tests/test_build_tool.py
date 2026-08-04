@@ -166,11 +166,32 @@ class DeploymentTests(unittest.TestCase):
             result = self._result(artifacts)
             game_root = _create_game_root(root / "game")
 
-            destination = deploy_artifacts(result, game_root, lambda: False)
+            project_root = root / "project"
+            language_root = project_root / "data" / "lang"
+            language_root.mkdir(parents=True)
+            (language_root / "en.lang").write_text(
+                "menu.title=Multiplayer\n", encoding="utf-8"
+            )
+            (language_root / "de.lang").write_text(
+                "menu.title=Mehrspieler\n", encoding="utf-8"
+            )
+
+            destination = deploy_artifacts(
+                result, game_root, lambda: False, project_root
+            )
 
             self.assertEqual((destination / "d3d12.dll").read_bytes(), b"dll")
             self.assertEqual((destination / "d3d12.pdb").read_bytes(), b"pdb")
             self.assertFalse((destination / "d3d12.dll.kcd2mp.tmp").exists())
+            deployed_languages = game_root / "mods" / "KCD2MP" / "Lang"
+            self.assertEqual(
+                (deployed_languages / "en.lang").read_text(encoding="utf-8"),
+                "menu.title=Multiplayer\n",
+            )
+            self.assertEqual(
+                (deployed_languages / "de.lang").read_text(encoding="utf-8"),
+                "menu.title=Mehrspieler\n",
+            )
 
     def test_deploys_kcse_loader_and_client(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -307,6 +328,13 @@ class PackagingTests(unittest.TestCase):
         (project / "data" / "npc_archetypes.json").write_text(
             "{}\n", encoding="utf-8"
         )
+        (project / "data" / "lang").mkdir()
+        (project / "data" / "lang" / "en.lang").write_text(
+            "menu.title=Multiplayer\n", encoding="utf-8"
+        )
+        (project / "data" / "lang" / "de.lang").write_text(
+            "menu.title=Mehrspieler\n", encoding="utf-8"
+        )
 
         names = {
             "d3d12_.dll": b"frontend",
@@ -369,6 +397,12 @@ class PackagingTests(unittest.TestCase):
                 b"client",
             )
             self.assertEqual(
+                (game / "mods" / "KCD2MP" / "Lang" / "de.lang").read_text(
+                    encoding="utf-8"
+                ),
+                "menu.title=Mehrspieler\n",
+            )
+            self.assertEqual(
                 (package.server_root / "KCD2MPServer.exe").read_bytes(), b"server"
             )
             self.assertTrue(
@@ -382,7 +416,7 @@ class PackagingTests(unittest.TestCase):
 
             expected_zip_paths = {
                 (Path("KingdomComeDeliverance2") / relative).as_posix()
-                for _, relative in client_deployment_layout(result)
+                for _, relative in client_deployment_layout(result, project)
             }
             with zipfile.ZipFile(package.client_zip) as archive:
                 self.assertEqual(set(archive.namelist()), expected_zip_paths)

@@ -105,6 +105,7 @@ namespace kcd2mp
 		    const protocol::PlayerProfile &right)
 		{
 			if (left.player_id() != right.player_id()
+			    || left.persistent_id() != right.persistent_id()
 			    || left.revision() != right.revision()
 			    || left.display_name() != right.display_name()
 			    || left.level_id() != right.level_id()

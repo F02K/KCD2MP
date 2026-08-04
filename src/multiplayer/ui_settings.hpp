@@ -1,0 +1,17 @@
+#pragma once
+
+#include <string>
+
+namespace kcd2mp
+{
+	struct multiplayer_ui_settings
+	{
+		std::string address;
+		std::string display_name;
+
+		void persist_address() const;
+		void persist_display_name() const;
+	};
+
+	[[nodiscard]] multiplayer_ui_settings &ui_settings();
+}

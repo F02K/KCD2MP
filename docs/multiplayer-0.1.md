@@ -31,7 +31,18 @@ password = ""
 max_players = 8
 level_id = "3"
 required_content_hash = ""
+
+[environment]
+# Absolute player count. With fewer players online, the requirement is capped
+# at the number of connected, living players.
+sleeping_players_required = 2
+sleep_wake_hour = 6.0
 ```
+
+While connected, fast travel and the standalone wait action are disabled.
+Sleeping in a bed advances the shared server clock once the configured number
+of players is asleep. Death keeps the game's initial death prompt, then replaces
+save selection with a server-authoritative respawn at the world spawn.
 
 Start the server:
 
@@ -58,8 +69,11 @@ the player immediately.
 
 ## Client operation
 
-Load a save before connecting. The client reads `wh_sys_BaseLevelId` through the typed CryEngine
-CVar interface on the game thread; connecting is disabled while no level ID is available.
+No save is required. From the title screen the authenticated server bootstrap invokes KCD2's
+native debug-New-Game helper for the registered target level. The client preserves the expected
+runtime-epoch changes and waits for `DataLoaded`, the target `wh_sys_BaseLevelId`, the local actor,
+and the native capability probe before applying authoritative state. Production level IDs are
+`2` (`trosecko`), `3` (`kutnohorsko`), and `4` (`klaster`).
 
 Use the **KCD2MP Multiplayer** ImGui page for address, name, optional password, status, player
 list, diagnostics, and global chat. Address and name are persisted. Password and resume token are

@@ -1,4 +1,5 @@
 #include "kcse/native_entity_backend.hpp"
+#include "kcse/native_combat_observer.hpp"
 #include "kcse/join_trace.hpp"
 #include "multiplayer/protocol.hpp"
 
@@ -9,11 +10,17 @@
 #include <Offsets/vtables/IEntity.h>
 #include <Offsets/vtables/IEntityIt.h>
 #include <Offsets/vtables/IEntitySystem.h>
+#include <Offsets/vtables/IConsole.h>
+#include <Offsets/vtables/ICVar.h>
 
 #include <chrono>
+#include <cstddef>
 #include <cmath>
 #include <format>
+#include <string_view>
+#include <thread>
 #include <unordered_set>
+#include <utility>
 
 namespace kcd2mp::kcse
 {
@@ -21,11 +28,47 @@ namespace kcd2mp::kcse
 	{
 		constexpr std::uint16_t spawn_fallback_delay_frames = 3;
 		constexpr std::uint16_t max_actor_registration_wait_frames = 60;
+		constexpr std::size_t max_npc_control_attempts_per_frame = 32;
 		constexpr std::uint32_t isolation_maintenance_interval_frames = 15;
 		constexpr std::size_t game_object_system_add_sink_slot = 16;
 		constexpr std::size_t game_object_system_remove_sink_slot = 17;
 		constexpr int entity_event_init = 3;
 		constexpr int entity_event_script = 18;
+
+		// Only the prefix read by OnBeforeSpawn is modeled here. The offsets are
+		// pinned by CEntity's constructor: pClass is copied from +0x18 and the
+		// stock/shipping spawn-param prefix places sName at +0x30.
+		struct entity_spawn_params_prefix
+		{
+			std::uint32_t id{};
+			std::uint32_t previous_id{};
+			std::uint64_t guid{};
+			std::uint64_t previous_guid{};
+			void *entity_class{};
+			void *archetype{};
+			const char *layer_name{};
+			const char *entity_name{};
+		};
+		static_assert(offsetof(entity_spawn_params_prefix, entity_class) == 0x18);
+		static_assert(offsetof(entity_spawn_params_prefix, entity_name) == 0x30);
+
+		struct entity_class_view
+		{
+			virtual ~entity_class_view() = default;
+			virtual void Release() = 0;
+			virtual const char *GetName() const = 0;
+		};
+
+		struct spawn_description
+		{
+			std::string class_name;
+			std::string entity_name;
+		};
+		struct raw_spawn_description
+		{
+			const char *class_name{};
+			const char *entity_name{};
+		};
 
 		struct native_entity_event
 		{
@@ -41,6 +84,52 @@ namespace kcd2mp::kcse
 			    std::chrono::duration_cast<std::chrono::milliseconds>(
 			        std::chrono::steady_clock::now().time_since_epoch())
 			        .count());
+		}
+
+		raw_spawn_description guarded_read_spawn(
+		    void *raw_params) noexcept
+		{
+			if (!raw_params)
+				return {};
+#ifdef _WIN32
+			__try
+			{
+#endif
+				const auto *params = static_cast<
+				    const entity_spawn_params_prefix *>(raw_params);
+				auto *entity_class = static_cast<entity_class_view *>(
+				    params->entity_class);
+				if (!entity_class)
+					return {};
+				const auto *class_name = entity_class->GetName();
+				if (!class_name || class_name[0] == '\0')
+					return {};
+				return {class_name, params->entity_name};
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return {};
+			}
+#endif
+		}
+
+		std::optional<spawn_description> describe_spawn(
+		    void *raw_params) noexcept
+		{
+			const auto raw = guarded_read_spawn(raw_params);
+			if (!raw.class_name)
+				return std::nullopt;
+			try
+			{
+				return spawn_description{
+				    raw.class_name,
+				    raw.entity_name ? raw.entity_name : ""};
+			}
+			catch (...)
+			{
+				return std::nullopt;
+			}
 		}
 
 		protocol::Quaternion quaternion_from_matrix(const Matrix34 &matrix)
@@ -197,8 +286,83 @@ namespace kcd2mp::kcse
 #endif
 		}
 
-		bool guarded_apply_entity_isolation(Offsets::IEntity *entity) noexcept
+		bool guarded_name_matches_named_cvar(
+		    const char *entity_name,
+		    const char *cvar_name) noexcept
 		{
+			if (!entity_name || entity_name[0] == '\0' || !cvar_name)
+				return false;
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			auto *console = environment ? environment->pConsole : nullptr;
+			if (!console)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				auto *cvar = console->GetCVar(cvar_name);
+				if (!cvar)
+					return false;
+				const auto *protected_name = cvar->GetString();
+				return protected_name && protected_name[0] != '\0'
+				    && std::string_view(protected_name) == entity_name;
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#endif
+		}
+
+		bool guarded_entity_matches_named_cvar(
+		    Offsets::IEntity *entity,
+		    const char *cvar_name) noexcept
+		{
+			if (!entity)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				return guarded_name_matches_named_cvar(
+				    entity->GetName(), cvar_name);
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#endif
+		}
+
+		bool guarded_is_player_scheduler_proxy_name(
+		    const char *entity_name) noexcept
+		{
+			return guarded_name_matches_named_cvar(
+			           entity_name,
+			           "wh_ai_PlayerSchedulerProxy")
+			    || guarded_name_matches_named_cvar(
+			        entity_name,
+			        "wh_ai_PlayerHorseSchedulerProxy");
+		}
+
+		bool guarded_is_player_scheduler_proxy(
+		    Offsets::IEntity *entity) noexcept
+		{
+			return guarded_entity_matches_named_cvar(
+			           entity,
+			           "wh_ai_PlayerSchedulerProxy")
+			    || guarded_entity_matches_named_cvar(
+			        entity,
+			        "wh_ai_PlayerHorseSchedulerProxy");
+		}
+
+		bool guarded_apply_entity_isolation(
+		    Offsets::IEntity *entity) noexcept
+		{
+			if (!entity)
+				return false;
 #ifdef _WIN32
 			__try
 			{
@@ -219,6 +383,8 @@ namespace kcd2mp::kcse
 		    Offsets::IEntity *entity,
 		    bool hidden) noexcept
 		{
+			if (!entity)
+				return false;
 #ifdef _WIN32
 			__try
 			{
@@ -237,6 +403,8 @@ namespace kcd2mp::kcse
 
 		bool guarded_entity_visible(Offsets::IEntity *entity) noexcept
 		{
+			if (!entity)
+				return false;
 #ifdef _WIN32
 			__try
 			{
@@ -350,16 +518,16 @@ namespace kcd2mp::kcse
 		m_owner = &owner;
 	}
 
-	bool native_entity_backend::isolation_sink::OnBeforeSpawn(void *)
+	bool native_entity_backend::isolation_sink::OnBeforeSpawn(void *params)
 	{
-		return true;
+		return !m_owner || m_owner->allow_human_npc_spawn(params);
 	}
 
 	void native_entity_backend::isolation_sink::OnSpawn(
 	    Offsets::IEntity *entity,
 	    void *)
 	{
-		m_owner->queue_entity_for_isolation(entity, false, false);
+		m_owner->queue_entity_for_control(entity, false, false);
 	}
 
 	bool native_entity_backend::isolation_sink::OnRemove(
@@ -374,7 +542,7 @@ namespace kcd2mp::kcse
 	    void *)
 	{
 		m_owner->entity_removed(entity);
-		m_owner->queue_entity_for_isolation(entity, false, false);
+		m_owner->queue_entity_for_control(entity, false, false);
 	}
 
 	void native_entity_backend::isolation_sink::_vf5(
@@ -412,6 +580,42 @@ namespace kcd2mp::kcse
 	{
 		m_sink.attach(*this);
 		m_game_object_sink.attach(*this);
+	}
+
+	native_entity_backend::human_npc_spawn_scope::human_npc_spawn_scope(
+	    native_entity_backend &owner,
+	    std::uint64_t token) noexcept
+	    : m_owner(&owner), m_token(token)
+	{
+	}
+
+	native_entity_backend::human_npc_spawn_scope::human_npc_spawn_scope(
+	    human_npc_spawn_scope &&other) noexcept
+	    : m_owner(other.m_owner), m_token(other.m_token)
+	{
+		other.m_owner = nullptr;
+		other.m_token = 0;
+	}
+
+	native_entity_backend::human_npc_spawn_scope &
+	native_entity_backend::human_npc_spawn_scope::operator=(
+	    human_npc_spawn_scope &&other) noexcept
+	{
+		if (this == &other)
+			return *this;
+		if (m_owner)
+			m_owner->end_human_npc_spawn_authorization(m_token);
+		m_owner = other.m_owner;
+		m_token = other.m_token;
+		other.m_owner = nullptr;
+		other.m_token = 0;
+		return *this;
+	}
+
+	native_entity_backend::human_npc_spawn_scope::~human_npc_spawn_scope()
+	{
+		if (m_owner)
+			m_owner->end_human_npc_spawn_authorization(m_token);
 	}
 
 	native_entity_backend::~native_entity_backend()
@@ -659,17 +863,18 @@ namespace kcd2mp::kcse
 			auto *entity = iterator->Next();
 			if (!entity)
 				break;
-			queue_entity_for_isolation(entity, true, true);
+			queue_entity_for_control(entity, true, true);
 		}
 		iterator->Release();
-		process_pending_isolation();
+		process_pending_entity_control();
 		KCD2MP_JOIN_TRACE(
 		    "join.entity-isolation.complete",
 		    std::format(
-		        "reported={} visited={} isolated={}",
+		        "reported={} visited={} isolated={} pending={}",
 		        entity_count,
 		        visited,
-		        m_isolated.size()));
+		        m_isolated.size(),
+		        m_pending_control.size()));
 		return true;
 	}
 
@@ -679,22 +884,19 @@ namespace kcd2mp::kcse
 		if (entity_id != 0)
 		{
 			m_player_entities.insert(entity_id);
-			if (const auto it = m_isolated.find(entity_id);
-			    it != m_isolated.end())
+			m_pending_control.erase(entity_id);
+			if (const auto isolated = m_isolated.find(entity_id);
+			    isolated != m_isolated.end())
 			{
 				auto *environment = SSystemGlobalEnvironment::GetInstance();
-				auto *system =
-				    environment ? environment->pEntitySystem : nullptr;
+				auto *system = environment ? environment->pEntitySystem : nullptr;
 				if (system)
 				{
-					if (auto *entity = system->GetEntity(entity_id))
-					{
-						(void)guarded_restore_entity(
-						    entity,
-						    it->second.hidden);
-					}
+					(void)guarded_restore_entity(
+					    system->GetEntity(entity_id),
+					    isolated->second.hidden);
 				}
-				m_isolated.erase(it);
+				m_isolated.erase(isolated);
 			}
 		}
 	}
@@ -705,18 +907,107 @@ namespace kcd2mp::kcse
 		m_player_entities.erase(entity_id);
 	}
 
-	void native_entity_backend::begin_player_spawn()
+	native_entity_backend::human_npc_spawn_scope
+	native_entity_backend::authorize_human_npc_spawn(
+	    std::string entity_name)
 	{
-		++m_player_spawn_depth;
+		++m_next_human_npc_spawn_token;
+		if (m_next_human_npc_spawn_token == 0)
+			++m_next_human_npc_spawn_token;
+		m_human_npc_spawn_authorizations.push_back(
+		    human_npc_spawn_authorization{
+		        m_next_human_npc_spawn_token,
+		        std::move(entity_name),
+		        std::this_thread::get_id(),
+		        false});
+		return human_npc_spawn_scope{
+		    *this, m_next_human_npc_spawn_token};
 	}
 
-	void native_entity_backend::end_player_spawn()
+	void native_entity_backend::end_human_npc_spawn_authorization(
+	    std::uint64_t token)
 	{
-		if (m_player_spawn_depth != 0)
-			--m_player_spawn_depth;
+		for (auto it = m_human_npc_spawn_authorizations.begin();
+		     it != m_human_npc_spawn_authorizations.end(); ++it)
+		{
+			if (it->token == token)
+			{
+				m_human_npc_spawn_authorizations.erase(it);
+				return;
+			}
+		}
 	}
 
-	void native_entity_backend::process_pending_isolation()
+	bool native_entity_backend::managed_human_spawn_active() const
+	{
+		const auto thread = std::this_thread::get_id();
+		for (const auto &authorization : m_human_npc_spawn_authorizations)
+		{
+			if (authorization.thread == thread)
+				return true;
+		}
+		return false;
+	}
+
+	bool native_entity_backend::allow_human_npc_spawn(void *params)
+	{
+		if (!m_isolation_active || !m_human_npcs_disabled)
+			return true;
+
+		const auto spawn = describe_spawn(params);
+		if (!spawn)
+		{
+			join_trace::write_diagnostic(
+			    "entity-control.spawn.unclassified",
+			    "spawn params or entity class name could not be read; allowing");
+			return true;
+		}
+		if (spawn->class_name != "NPC"
+		    && spawn->class_name != "NPC_Female")
+		{
+			return true;
+		}
+		if (guarded_is_player_scheduler_proxy_name(
+		        spawn->entity_name.c_str()))
+		{
+			join_trace::write_diagnostic(
+			    "entity-control.spawn.protected",
+			    std::format(
+			        "class=\"{}\" name=\"{}\" reason=player-scheduler-proxy",
+			        spawn->class_name,
+			        spawn->entity_name));
+			return true;
+		}
+
+		const auto thread = std::this_thread::get_id();
+		for (auto it = m_human_npc_spawn_authorizations.rbegin();
+		     it != m_human_npc_spawn_authorizations.rend(); ++it)
+		{
+			if (!it->consumed && it->thread == thread
+			    && it->entity_name == spawn->entity_name)
+			{
+				it->consumed = true;
+				join_trace::write_diagnostic(
+				    "entity-control.spawn.authorized",
+				    std::format(
+				        "class=\"{}\" name=\"{}\" token={}",
+				        spawn->class_name,
+				        spawn->entity_name,
+				        it->token));
+				return true;
+			}
+		}
+
+		join_trace::write_diagnostic(
+		    "entity-control.spawn.blocked",
+		    std::format(
+		        "class=\"{}\" name=\"{}\" reason=not-kcd2mp-authorized",
+		        spawn->class_name,
+		        spawn->entity_name));
+		return false;
+	}
+
+	void native_entity_backend::process_pending_entity_control()
 	{
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
 		auto *system = environment ? environment->pEntitySystem : nullptr;
@@ -724,7 +1015,7 @@ namespace kcd2mp::kcse
 			return;
 		m_world_sync.process();
 		m_world_item_sync.process();
-		if (!m_isolation_active || m_player_spawn_depth != 0)
+		if (!m_isolation_active || managed_human_spawn_active())
 			return;
 		refresh_local_player_exclusion(*system);
 		++m_isolation_maintenance_frame;
@@ -735,24 +1026,30 @@ namespace kcd2mp::kcse
 			maintain_isolated_entities(*system);
 		}
 		refresh_actor_roster(*system);
-		if (m_pending_isolation.empty())
+		if (m_pending_control.empty())
 			return;
 
 		std::vector<std::pair<std::uint32_t, pending_entity>> pending;
-		pending.reserve(m_pending_isolation.size());
-		for (const auto entry : m_pending_isolation)
+		pending.reserve(m_pending_control.size());
+		for (const auto entry : m_pending_control)
 			pending.push_back(entry);
-		m_pending_isolation.clear();
+		m_pending_control.clear();
 		auto *context = wh::game::S_GameContext::GetInstance();
+		std::size_t control_attempts{};
 		for (const auto &[id, state] : pending)
 		{
+			if (control_attempts >= max_npc_control_attempts_per_frame)
+			{
+				m_pending_control.emplace(id, state);
+				continue;
+			}
 			auto *entity = system->GetEntity(id);
 			if (!entity)
 				continue;
 			if (!state.game_object_initialized
 			    && state.waited_frames < spawn_fallback_delay_frames)
 			{
-				m_pending_isolation.emplace(
+				m_pending_control.emplace(
 				    id,
 				    pending_entity{
 				        static_cast<std::uint16_t>(state.waited_frames + 1),
@@ -771,7 +1068,7 @@ namespace kcd2mp::kcse
 				    && state.waited_frames
 				        < max_actor_registration_wait_frames)
 				{
-					m_pending_isolation.emplace(
+					m_pending_control.emplace(
 					    id,
 					    pending_entity{
 					        static_cast<std::uint16_t>(state.waited_frames + 1),
@@ -779,7 +1076,8 @@ namespace kcd2mp::kcse
 				}
 				continue;
 			}
-			(void)isolate_entity(entity);
+			++control_attempts;
+			(void)isolate_npc_entity(entity);
 		}
 	}
 
@@ -841,30 +1139,27 @@ namespace kcd2mp::kcse
 		m_animal_npcs_disabled = false;
 		m_isolation_maintenance_frame = 0;
 		m_last_actor_count = -1;
-		m_pending_isolation.clear();
+		m_pending_control.clear();
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
 		auto *system = environment ? environment->pEntitySystem : nullptr;
 		if (system)
 		{
 			for (const auto &[id, state] : m_isolated)
 			{
-				if (auto *entity = system->GetEntity(id))
-				{
-					(void)guarded_restore_entity(
-					    entity,
-					    state.hidden);
-				}
+				(void)guarded_restore_entity(
+				    system->GetEntity(id),
+				    state.hidden);
 			}
 		}
 		m_isolated.clear();
 	}
 
-	void native_entity_backend::queue_entity_for_isolation(
+	void native_entity_backend::queue_entity_for_control(
 	    Offsets::IEntity *entity,
 	    bool game_object_initialized,
 	    bool actor_class_confirmed)
 	{
-		if (!m_isolation_active || !entity || m_player_spawn_depth != 0)
+		if (!m_isolation_active || !entity || managed_human_spawn_active())
 			return;
 		const auto id = entity->GetId();
 		// Spawn callbacks run before actor-extension registration on some
@@ -881,9 +1176,10 @@ namespace kcd2mp::kcse
 			}
 		}
 		if (id != 0 && id != m_local_player_entity_id
-		    && !m_player_entities.contains(id) && !m_isolated.contains(id))
+		    && !m_player_entities.contains(id)
+		    && !m_isolated.contains(id))
 		{
-			auto [it, inserted] = m_pending_isolation.try_emplace(
+			auto [it, inserted] = m_pending_control.try_emplace(
 			    id,
 			    pending_entity{});
 			(void)inserted;
@@ -901,7 +1197,7 @@ namespace kcd2mp::kcse
 		if (system)
 		{
 			if (auto *entity = system->GetEntity(entity_id))
-				queue_entity_for_isolation(entity, true, false);
+				queue_entity_for_control(entity, true, false);
 		}
 	}
 
@@ -926,13 +1222,13 @@ namespace kcd2mp::kcse
 			auto *entity = iterator->Next();
 			if (!entity)
 				break;
-			queue_entity_for_isolation(entity, true, true);
+			queue_entity_for_control(entity, true, true);
 		}
 		iterator->Release();
 	}
 
 	void native_entity_backend::refresh_local_player_exclusion(
-	    Offsets::IEntitySystem &system)
+	    Offsets::IEntitySystem &)
 	{
 		auto *framework = CCryAction::GetInstance();
 		auto *entity = framework ? framework->GetClientEntity() : nullptr;
@@ -942,17 +1238,15 @@ namespace kcd2mp::kcse
 		if (current_id == 0)
 			return;
 		m_local_player_entity_id = current_id;
-		m_pending_isolation.erase(current_id);
-		const auto isolated = m_isolated.find(current_id);
-		if (isolated == m_isolated.end())
-			return;
-		if (auto *current = system.GetEntity(current_id))
+		m_pending_control.erase(current_id);
+		if (const auto isolated = m_isolated.find(current_id);
+		    isolated != m_isolated.end())
 		{
 			(void)guarded_restore_entity(
-			    current,
+			    entity,
 			    isolated->second.hidden);
+			m_isolated.erase(isolated);
 		}
-		m_isolated.erase(isolated);
 	}
 
 	void native_entity_backend::maintain_isolated_entities(
@@ -966,7 +1260,7 @@ namespace kcd2mp::kcse
 			auto *entity = system.GetEntity(id);
 			if (id == m_local_player_entity_id
 			    || m_player_entities.contains(id)
-			    || !should_isolate_actor(entity))
+			    || !should_isolate_npc_actor(entity))
 			{
 				if (entity)
 				{
@@ -977,7 +1271,7 @@ namespace kcd2mp::kcse
 				iterator = m_isolated.erase(iterator);
 				continue;
 			}
-			if (entity && guarded_entity_visible(entity))
+			if (guarded_entity_visible(entity))
 				(void)guarded_apply_entity_isolation(entity);
 			++iterator;
 		}
@@ -991,13 +1285,13 @@ namespace kcd2mp::kcse
 		if (m_sink_system)
 			m_sink_system->RemoveSink(&m_sink);
 		m_sink_system = &system;
-		constexpr std::uint32_t spawn_remove_reuse_subscriptions =
-		    (1U << 1) | (1U << 2) | (1U << 3);
+		constexpr std::uint32_t before_spawn_remove_reuse_subscriptions =
+		    (1U << 0) | (1U << 1) | (1U << 2) | (1U << 3);
 		constexpr std::uint64_t entity_event_subscriptions =
 		    (1ULL << entity_event_init) | (1ULL << entity_event_script);
 		system.AddSink(
 		    &m_sink,
-		    spawn_remove_reuse_subscriptions,
+		    before_spawn_remove_reuse_subscriptions,
 		    entity_event_subscriptions);
 	}
 
@@ -1023,29 +1317,68 @@ namespace kcd2mp::kcse
 		}
 	}
 
-	bool native_entity_backend::isolate_entity(Offsets::IEntity *entity)
+	bool native_entity_backend::isolate_npc_entity(Offsets::IEntity *entity)
 	{
-		if (!m_isolation_active || !entity || m_player_spawn_depth != 0)
+		if (!m_isolation_active || !entity || managed_human_spawn_active())
 			return false;
 		const auto id = entity->GetId();
 		if (id == m_local_player_entity_id
 		    || m_player_entities.contains(id)
 		    || m_isolated.contains(id)
-		    || !should_isolate_actor(entity))
+		    || !should_isolate_npc_actor(entity))
 			return false;
-		const entity_state state{entity->IsHidden()};
-		if (!guarded_apply_entity_isolation(entity))
+		auto *context = wh::game::S_GameContext::GetInstance();
+		auto *actor = context ? context->GetActorById(id) : nullptr;
+		if (actor
+		    && read_combat_state(actor->m_pCombatActor).combat_mode)
 		{
-			(void)guarded_restore_entity(
-			    entity,
-			    state.hidden);
+			// Let the native CombatScene finish its opponent and end-combat
+			// transitions before suspending the NPC. Hiding a live opponent is what
+			// previously left the player in a permanent raised-hands state.
+			m_pending_control.try_emplace(
+			    id,
+			    pending_entity{max_actor_registration_wait_frames, true});
+			KCD2MP_JOIN_TRACE(
+			    "join.entity-control.deferred",
+			    std::format(
+			        "entity_id={} reason=native-combat-active",
+			        id));
 			return false;
 		}
+
+		// Keep the Actor, Soul, scheduler and RandomEvent ownership intact. Vanilla
+		// systems retain GUID references to streamed NPCs and dereference them on
+		// later ticks; force-removing the Entity leaves those references dangling.
+		// Hiding only the positively classified NPC preserves that ownership graph
+		// while excluding it from rendering and normal entity updates.
+		const entity_state state{entity->IsHidden()};
+		join_trace::write_diagnostic(
+		    "entity-control.isolate.begin",
+		    std::format(
+		        "entity_id={} local_entity_id={} registered_players={}",
+		        id,
+		        m_local_player_entity_id,
+		        m_player_entities.size()));
+		if (!guarded_apply_entity_isolation(entity))
+		{
+			(void)guarded_restore_entity(entity, state.hidden);
+			join_trace::write_diagnostic(
+			    "entity-control.isolate.failed",
+			    std::format("entity_id={}", id));
+			return false;
+		}
+
 		m_isolated.emplace(id, state);
+		join_trace::write_diagnostic(
+		    "entity-control.isolate.complete",
+		    std::format(
+		        "entity_id={} isolated_total={} actor_preserved=true",
+		        id,
+		        m_isolated.size()));
 		return true;
 	}
 
-	bool native_entity_backend::should_isolate_actor(
+	bool native_entity_backend::should_isolate_npc_actor(
 	    Offsets::IEntity *entity) const
 	{
 		if (!entity)
@@ -1063,6 +1396,13 @@ namespace kcd2mp::kcse
 			return false;
 		}
 		auto *framework = CCryAction::GetInstance();
+		auto *client_entity = framework ? framework->GetClientEntity() : nullptr;
+		if (client_entity
+		    && static_cast<void *>(client_entity)
+		        == static_cast<void *>(entity))
+		{
+			return false;
+		}
 		auto *client_actor = framework ? framework->GetClientActor() : nullptr;
 		if (client_actor
 		    && static_cast<void *>(client_actor)
@@ -1076,6 +1416,20 @@ namespace kcd2mp::kcse
 			// A positive result protects every engine-recognized player. A failed
 			// player probe also stays active: NPC isolation must never risk
 			// disabling input, combat, inventory, camera, or player controllers.
+			return false;
+		}
+		if (guarded_is_player_scheduler_proxy(entity))
+		{
+			// KCD models the scheduler that drives player state/animation through
+			// special AI-backed proxy Entities. They can derive from C_Human without
+			// being IsPlayer(), so the ordinary Human+HasAI rule must not touch them.
+			// Suspending this proxy leaves player action transitions and
+			// player-relative MonsterLOD processing stuck.
+			KCD2MP_JOIN_TRACE(
+			    "join.entity-control.protected",
+			    std::format(
+			        "entity_id={} reason=player-scheduler-proxy",
+			        entity_id));
 			return false;
 		}
 		const auto human = guarded_actor_type_matches(actor, true);
@@ -1114,7 +1468,7 @@ namespace kcd2mp::kcse
 		const auto *event = static_cast<const native_entity_event *>(raw_event);
 		if (event->event == entity_event_init)
 		{
-			queue_entity_for_isolation(entity, true, false);
+			queue_entity_for_control(entity, true, false);
 		}
 	}
 
@@ -1125,7 +1479,7 @@ namespace kcd2mp::kcse
 		const auto id = entity->GetId();
 		m_isolated.erase(id);
 		m_player_entities.erase(id);
-		m_pending_isolation.erase(id);
+		m_pending_control.erase(id);
 		m_world_sync.entity_removed(entity);
 	}
 }

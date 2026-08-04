@@ -33,6 +33,7 @@ ADDRESS_LIBRARY_DATA = ADDRESS_LIBRARY_SUBMODULE / "kcd2_address_library"
 ADDRESS_LIBRARY_GLOB = "kcd_addresslib_*.bin"
 ADDRESS_LIBRARY_HEADER = struct.Struct("<4sIII")
 ADDRESS_LIBRARY_RECORD = struct.Struct("<II")
+CLIENT_FALLBACK_LANGUAGE_FILE = "en.lang"
 ADDRESS_LIBRARY_NAME = re.compile(
     r"^kcd_addresslib_(steam|gog|epic)_(.+)\.bin$", re.IGNORECASE
 )
@@ -995,7 +996,9 @@ def is_game_running() -> bool:
     return GAME_EXECUTABLE.lower() in completed.stdout.lower()
 
 
-def client_deployment_layout(result: BuildResult) -> Tuple[Tuple[Path, Path], ...]:
+def client_deployment_layout(
+    result: BuildResult, project_root: Path = PROJECT_ROOT
+) -> Tuple[Tuple[Path, Path], ...]:
     """Map client artifacts to paths relative to the KCD2 game root."""
 
     if result.kcse_loader_path is not None and not result.address_library_paths:
@@ -1032,6 +1035,27 @@ def client_deployment_layout(result: BuildResult) -> Tuple[Tuple[Path, Path], ..
         )
         for path in result.address_library_paths
     )
+    language_root = project_root / "data" / "lang"
+    language_files = tuple(sorted(language_root.glob("*.lang")))
+    fallback_language = language_root / CLIENT_FALLBACK_LANGUAGE_FILE
+    if fallback_language not in language_files:
+        raise BuildToolError(
+            "Client deployment is missing the fallback language file: {}".format(
+                fallback_language
+            )
+        )
+    targets.extend(
+        (
+            path,
+            Path("mods") / "KCD2MP" / "Lang" / path.name,
+        )
+        for path in language_files
+    )
+    language_readme = language_root / "README.md"
+    if language_readme.is_file():
+        targets.append(
+            (language_readme, Path("mods") / "KCD2MP" / "Lang" / "README.md")
+        )
     return tuple(targets)
 
 
@@ -1107,7 +1131,7 @@ def package_artifacts(
     if package_root in {project_root, project_root.parent}:
         raise BuildToolError("Package output must not replace the project directory.")
 
-    client_layout = client_deployment_layout(result)
+    client_layout = client_deployment_layout(result, project_root)
     _required_artifacts(client_layout, "package the client")
     if result.server_path is None or not result.server_path.is_file():
         raise BuildToolError("Cannot package the server: KCD2MPServer.exe is missing.")
@@ -1204,6 +1228,7 @@ def deploy_artifacts(
     result: BuildResult,
     game_root: Path,
     process_checker: Callable[[], bool] = is_game_running,
+    project_root: Path = PROJECT_ROOT,
 ) -> Path:
     normalized_root = normalize_game_root(game_root)
     destination = game_bin_dir(normalized_root)
@@ -1211,7 +1236,7 @@ def deploy_artifacts(
     if not executable.is_file():
         raise BuildToolError("Deployment target does not contain {}: {}".format(GAME_EXECUTABLE, destination))
 
-    layout = client_deployment_layout(result)
+    layout = client_deployment_layout(result, project_root)
     _required_artifacts(layout, "deploy")
     if process_checker():
         raise BuildToolError(

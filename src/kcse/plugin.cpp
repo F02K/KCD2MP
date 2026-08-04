@@ -5,6 +5,7 @@
 #include "multiplayer/protocol.hpp"
 
 #include <KCSE/KCSEAPI.h>
+#include <REL/Relocation.h>
 
 #include <algorithm>
 #include <chrono>
@@ -26,6 +27,26 @@ namespace
 	frame_clock::time_point g_next_remote_sync{};
 	std::uint32_t g_remote_sync_rate{};
 	std::size_t g_last_remote_player_count{};
+	std::uintptr_t g_original_blacksmithing_start{};
+
+	void blacksmithing_start_hook(void *session, std::uint32_t station_entity_id)
+	{
+		using function_type = void (*)(void *, std::uint32_t);
+		reinterpret_cast<function_type>(g_original_blacksmithing_start)(
+		    session,
+		    station_entity_id);
+		if (g_runtime)
+			g_runtime->on_blacksmithing_started(station_entity_id);
+	}
+
+	bool install_activity_hooks()
+	{
+		KCSE::AllocTrampoline(1 << 10);
+		g_original_blacksmithing_start =
+		    REL::Relocation<>{REL::ID(380114), 0x2E}.write_call<5>(
+		        blacksmithing_start_hook);
+		return g_original_blacksmithing_start != 0;
+	}
 
 	struct performance_window
 	{
@@ -237,6 +258,40 @@ namespace
 		}
 
 		const bool sandbox_active = g_runtime->sandbox_active();
+		if (client_status.state == kcd2mp::client_state::connected
+		    && sandbox_active)
+		{
+			if (const auto activity =
+			        g_runtime->take_local_activity_start())
+			{
+				if (!g_client->begin_local_activity(
+				        activity->kind,
+				        activity->station_guid))
+				{
+					g_runtime->cancel_local_activity();
+					g_runtime->show_multiplayer_notice(
+					    "Die Aktivitaet konnte nicht reserviert werden.");
+				}
+			}
+			if (g_client->take_activity_denial())
+				g_runtime->cancel_local_activity();
+			if (g_runtime->local_activity_end_pending()
+			    && g_client->end_local_activity(
+			        g_runtime->local_transform()))
+			{
+				g_runtime->acknowledge_local_activity_end();
+			}
+			if (g_runtime->local_player_dead())
+			{
+				g_client->report_local_death();
+			}
+			else if (client_status.sleeping
+			    && !g_runtime->local_player_laying())
+			{
+				(void)g_client->set_sleeping(false);
+			}
+			client_status = g_client->status();
+		}
 		const auto update_rates = g_client->update_rates();
 		const auto remote_sync_now = frame_clock::now();
 		if (client_status.state != kcd2mp::client_state::disconnected
@@ -262,7 +317,9 @@ namespace
 				    .transform = player.transform,
 				    .movement_mode = player.movement_mode,
 				    .has_avatar = player.has_avatar,
-				    .avatar = player.avatar});
+				    .avatar = player.avatar,
+				    .has_activity = player.has_activity,
+				    .activity = player.activity});
 			}
 			const auto synchronized =
 			    g_runtime->sync_remote_players(snapshots);
@@ -561,6 +618,47 @@ namespace
 		}
 	}
 
+	std::uint32_t __cdecl abi_attempt_sleep() noexcept
+	{
+		try
+		{
+			if (!g_client || !g_runtime)
+				return 0;
+			if (!g_runtime->local_player_laying())
+			{
+				g_runtime->show_multiplayer_notice(
+				    "Warten ist im Multiplayer deaktiviert.");
+				return 0;
+			}
+			const auto accepted = g_client->set_sleeping(true);
+			if (accepted)
+			{
+				const auto status = g_client->status();
+				g_runtime->show_multiplayer_notice(std::format(
+				    "Warte auf schlafende Spieler: {}/{}",
+				    status.sleeping_players + 1,
+				    status.sleeping_players_required));
+			}
+			return accepted ? 1U : 0U;
+		}
+		catch (...)
+		{
+			return 0;
+		}
+	}
+
+	std::uint32_t __cdecl abi_request_respawn() noexcept
+	{
+		try
+		{
+			return g_client && g_client->request_respawn() ? 1U : 0U;
+		}
+		catch (...)
+		{
+			return 0;
+		}
+	}
+
 	std::uint32_t __cdecl abi_get_status(
 	    kcd2mp::kcse::client_status_view *result) noexcept
 	{
@@ -588,6 +686,12 @@ namespace
 			copy_text(
 			    result->default_avatar_archetype_id,
 			    status.avatar_policy.default_archetype_id());
+			result->sleeping = status.sleeping ? 1U : 0U;
+			result->sleeping_players = status.sleeping_players;
+			result->sleeping_players_required =
+			    status.sleeping_players_required;
+			result->dead = status.dead ? 1U : 0U;
+			result->respawn_pending = status.respawn_pending ? 1U : 0U;
 			return 1;
 		}
 		catch (...)
@@ -719,6 +823,8 @@ namespace
 	    abi_disconnect,
 	    abi_send_chat,
 	    abi_select_avatar,
+	    abi_attempt_sleep,
+	    abi_request_respawn,
 	    abi_get_status,
 	    abi_copy_players,
 	    abi_copy_chat,
@@ -750,6 +856,14 @@ KCSE_EXPORT bool KCSEPlugin_Load(const KCSE::IKCSEInterface *kcse)
 	// so its network thread is never joined from DLL_PROCESS_DETACH.
 	g_runtime = new kcd2mp::kcse::native_runtime(*kcse);
 	g_client = new kcd2mp::multiplayer_client(*g_runtime);
+	if (!install_activity_hooks())
+	{
+		delete g_client;
+		delete g_runtime;
+		g_client = nullptr;
+		g_runtime = nullptr;
+		return false;
+	}
 	if (!messaging->RegisterListener("KCSE", on_kcse_message))
 	{
 		delete g_client;

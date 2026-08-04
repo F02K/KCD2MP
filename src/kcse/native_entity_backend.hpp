@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -34,6 +35,27 @@ namespace kcd2mp::kcse
 	class native_entity_backend
 	{
 	public:
+		class human_npc_spawn_scope
+		{
+		public:
+			human_npc_spawn_scope(const human_npc_spawn_scope &) = delete;
+			human_npc_spawn_scope &operator=(
+			    const human_npc_spawn_scope &) = delete;
+			human_npc_spawn_scope(human_npc_spawn_scope &&other) noexcept;
+			human_npc_spawn_scope &operator=(
+			    human_npc_spawn_scope &&other) noexcept;
+			~human_npc_spawn_scope();
+
+		private:
+			friend class native_entity_backend;
+			human_npc_spawn_scope(
+			    native_entity_backend &owner,
+			    std::uint64_t token) noexcept;
+
+			native_entity_backend *m_owner{};
+			std::uint64_t m_token{};
+		};
+
 		native_entity_backend();
 		~native_entity_backend();
 
@@ -50,9 +72,9 @@ namespace kcd2mp::kcse
 		    std::string &error);
 		void register_player_entity(std::uint32_t entity_id);
 		void unregister_player_entity(std::uint32_t entity_id);
-		void begin_player_spawn();
-		void end_player_spawn();
-		void process_pending_isolation();
+		[[nodiscard]] human_npc_spawn_scope authorize_human_npc_spawn(
+		    std::string entity_name);
+		void process_pending_entity_control();
 		[[nodiscard]] bool begin_world_sync(std::string &error);
 		void restore_world();
 		[[nodiscard]] std::vector<protocol::WorldObjectState>
@@ -97,18 +119,25 @@ namespace kcd2mp::kcse
 			native_entity_backend *m_owner{};
 		};
 
-		struct entity_state
-		{
-			bool hidden{};
-		};
 		struct pending_entity
 		{
 			std::uint16_t waited_frames{};
 			bool game_object_initialized{};
 		};
+		struct entity_state
+		{
+			bool hidden{};
+		};
+		struct human_npc_spawn_authorization
+		{
+			std::uint64_t token{};
+			std::string entity_name;
+			std::thread::id thread;
+			bool consumed{};
+		};
 		void ensure_sink_registered(Offsets::IEntitySystem &system);
 		void ensure_game_object_sink_registered(void *system);
-		void queue_entity_for_isolation(
+		void queue_entity_for_control(
 		    Offsets::IEntity *entity,
 		    bool game_object_initialized,
 		    bool actor_class_confirmed);
@@ -116,11 +145,14 @@ namespace kcd2mp::kcse
 		void refresh_local_player_exclusion(Offsets::IEntitySystem &system);
 		void refresh_actor_roster(Offsets::IEntitySystem &system);
 		void maintain_isolated_entities(Offsets::IEntitySystem &system);
-		[[nodiscard]] bool isolate_entity(Offsets::IEntity *entity);
-		[[nodiscard]] bool should_isolate_actor(
+		[[nodiscard]] bool isolate_npc_entity(Offsets::IEntity *entity);
+		[[nodiscard]] bool should_isolate_npc_actor(
 		    Offsets::IEntity *entity) const;
 		void entity_removed(Offsets::IEntity *entity);
 		void entity_event(Offsets::IEntity *entity, void *event);
+		[[nodiscard]] bool allow_human_npc_spawn(void *params);
+		[[nodiscard]] bool managed_human_spawn_active() const;
+		void end_human_npc_spawn_authorization(std::uint64_t token);
 
 		isolation_sink m_sink;
 		game_object_init_sink m_game_object_sink;
@@ -130,10 +162,12 @@ namespace kcd2mp::kcse
 		void *m_game_object_system{};
 		std::unordered_map<std::uint32_t, entity_state> m_isolated;
 		std::unordered_set<std::uint32_t> m_player_entities;
-		std::unordered_map<std::uint32_t, pending_entity> m_pending_isolation;
+		std::unordered_map<std::uint32_t, pending_entity> m_pending_control;
+		std::vector<human_npc_spawn_authorization>
+		    m_human_npc_spawn_authorizations;
 		std::uint32_t m_local_player_entity_id{};
-		std::uint32_t m_player_spawn_depth{};
 		std::uint32_t m_isolation_maintenance_frame{};
+		std::uint64_t m_next_human_npc_spawn_token{};
 		int m_last_actor_count{-1};
 		bool m_human_npcs_disabled{};
 		bool m_animal_npcs_disabled{};

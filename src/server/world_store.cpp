@@ -1,13 +1,19 @@
 #include "server/world_store.hpp"
 
+#include "property/catalog.hpp"
+#include "property/service.hpp"
+
 #include <toml++/toml.hpp>
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <ranges>
 #include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -113,6 +119,102 @@ namespace kcd2mp::server
 			value &= 0x7FFFFFFFFFFFFFFFULL;
 			return value == 0 ? 1 : value;
 		}
+
+		bool valid_property_catalog(
+		    const protocol::PropertyCatalog &catalog,
+		    std::string_view level_id)
+		{
+			if (catalog.schema() != property::catalog_schema
+			    || catalog.level_id() != level_id
+			    || catalog.content_fingerprint().empty())
+				return false;
+			std::unordered_set<std::string> property_ids;
+			std::unordered_set<std::uint64_t> resources;
+			for (const auto &definition : catalog.properties())
+			{
+				const bool has_marker_position =
+				    definition.has_marker_position();
+				const bool has_marker_entity =
+				    definition.marker_entity_guid() != 0;
+				if (definition.property_id().empty()
+				    || definition.level_id() != level_id
+				    || definition.anchor_guid().empty()
+				    || definition.inferred_name().empty()
+				    || definition.source_path().empty()
+				    || !std::isfinite(definition.discovery_confidence())
+				    || definition.discovery_confidence() < 0.0F
+				    || definition.discovery_confidence() > 1.0F
+				    || has_marker_position != has_marker_entity
+				    || (has_marker_position
+				        && (!std::isfinite(definition.marker_position().x())
+				            || !std::isfinite(definition.marker_position().y())
+				            || !std::isfinite(definition.marker_position().z())))
+				    || !property_ids.insert(definition.property_id()).second)
+					return false;
+				for (const auto &resource : definition.resources())
+				{
+					if (resource.entity_guid() == 0
+					    || resource.kind()
+					        == protocol::PROPERTY_RESOURCE_KIND_UNSPECIFIED
+					    || !protocol::PropertyResourceKind_IsValid(
+					        static_cast<int>(resource.kind()))
+					    || !resources.insert(resource.entity_guid()).second)
+						return false;
+				}
+			}
+			for (const auto &definition : catalog.properties())
+			{
+				if (!definition.parent_property_id().empty()
+				    && !property_ids.contains(definition.parent_property_id()))
+					return false;
+			}
+			return true;
+		}
+
+		bool valid_property_ledger(
+		    const protocol::PropertyLedger &ledger,
+		    const protocol::PropertyCatalog &catalog)
+		{
+			if (ledger.schema() != property::ledger_schema
+			    || ledger.revision() == 0)
+				return false;
+			std::unordered_set<std::string> properties;
+			for (const auto &definition : catalog.properties())
+				properties.insert(definition.property_id());
+			std::unordered_set<std::string> assignments;
+			for (const auto &assignment : ledger.assignments())
+			{
+				if (!is_uuid(assignment.assignment_id())
+				    || !properties.contains(assignment.property_id())
+				    || !is_uuid(assignment.subject_player_id())
+				    || (!assignment.granted_by_player_id().empty()
+				        && !is_uuid(assignment.granted_by_player_id()))
+				    || (!assignment.granted_by_assignment_id().empty()
+				        && !is_uuid(assignment.granted_by_assignment_id()))
+				    || assignment.role() == protocol::PROPERTY_ROLE_UNSPECIFIED
+				    || !protocol::PropertyRole_IsValid(
+				        static_cast<int>(assignment.role()))
+				    || assignment.created_at_ms() == 0
+				    || (assignment.expires_at_ms() != 0
+				        && assignment.expires_at_ms()
+				            <= assignment.created_at_ms())
+				    || !assignments.insert(assignment.assignment_id()).second)
+					return false;
+			}
+			for (const auto &assignment : ledger.assignments())
+			{
+				const bool owner =
+				    assignment.role() == protocol::PROPERTY_ROLE_OWNER;
+				if (owner != assignment.granted_by_player_id().empty()
+				    || owner != assignment.granted_by_assignment_id().empty())
+					return false;
+				if (!owner
+				    && !assignments.contains(
+				        assignment.granted_by_assignment_id()))
+					return false;
+			}
+			return true;
+		}
 	}
 
 	std::string random_hex(std::size_t byte_count)
@@ -138,6 +240,16 @@ namespace kcd2mp::server
 			stream << std::setw(2) << static_cast<unsigned int>(byte);
 		}
 		return stream.str();
+	}
+
+	std::string random_uuid_v4()
+	{
+		auto compact = random_hex(16);
+		compact[12] = '4';
+		compact[16] = '8';
+		return compact.substr(0, 8) + '-' + compact.substr(8, 4) + '-'
+		    + compact.substr(12, 4) + '-' + compact.substr(16, 4) + '-'
+		    + compact.substr(20, 12);
 	}
 
 	token_hash hash_token(std::string_view token)
@@ -210,6 +322,8 @@ namespace kcd2mp::server
 		load_profiles();
 		load_world_objects();
 		load_world_items();
+		load_property_catalog();
+		load_property_ledger();
 	}
 
 	const session_manifest &world_store::manifest() const
@@ -232,6 +346,16 @@ namespace kcd2mp::server
 	world_store::world_items() const
 	{
 		return m_world_items;
+	}
+
+	const protocol::PropertyCatalog &world_store::property_catalog() const
+	{
+		return m_property_catalog;
+	}
+
+	const protocol::PropertyLedger &world_store::property_ledger() const
+	{
+		return m_property_ledger;
 	}
 
 	std::optional<persisted_profile> world_store::find_by_token(
@@ -263,6 +387,18 @@ namespace kcd2mp::server
 		    : std::optional{*iterator};
 	}
 
+	std::optional<persisted_profile> world_store::find_by_persistent_id(
+	    std::string_view id) const
+	{
+		const auto iterator = std::ranges::find_if(
+		    m_profiles,
+		    [&](const persisted_profile &profile)
+		    { return profile.profile.persistent_id() == id; });
+		return iterator == m_profiles.end()
+		    ? std::nullopt
+		    : std::optional{*iterator};
+	}
+
 	player_id world_store::allocate_player_id()
 	{
 		const auto result = m_manifest.next_player_id++;
@@ -287,9 +423,20 @@ namespace kcd2mp::server
 	    const token_hash &identity_hash,
 	    const protocol::PlayerProfile &profile)
 	{
-		if (!is_valid_profile(profile) || profile.player_id() == 0)
+		if (!is_valid_profile(profile) || profile.player_id() == 0
+		    || !is_uuid(profile.persistent_id()))
 		{
 			throw std::invalid_argument("persistent player profile is invalid");
+		}
+		if (std::ranges::any_of(
+		        m_profiles,
+		        [&](const persisted_profile &stored)
+		        {
+			        return stored.profile.player_id() != profile.player_id()
+			            && stored.profile.persistent_id() == profile.persistent_id();
+		        }))
+		{
+			throw std::invalid_argument("persistent player identity is duplicated");
 		}
 		auto iterator = std::ranges::find_if(
 		    m_profiles,
@@ -346,6 +493,34 @@ namespace kcd2mp::server
 		atomic_replace(
 		    m_root / "world_items.pb",
 		    {reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()});
+	}
+
+	void world_store::save_property_catalog(
+	    const protocol::PropertyCatalog &catalog)
+	{
+		if (!valid_property_catalog(catalog, m_manifest.level_id))
+			throw std::invalid_argument("persistent property catalog is invalid");
+		std::string bytes;
+		if (!catalog.SerializeToString(&bytes))
+			throw std::runtime_error("could not serialize property catalog");
+		atomic_replace(
+		    m_root / "property_catalog.pb",
+		    {reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()});
+		m_property_catalog = catalog;
+	}
+
+	void world_store::save_property_ledger(
+	    const protocol::PropertyLedger &ledger)
+	{
+		if (!valid_property_ledger(ledger, m_property_catalog))
+			throw std::invalid_argument("persistent property ledger is invalid");
+		std::string bytes;
+		if (!ledger.SerializeToString(&bytes))
+			throw std::runtime_error("could not serialize property ledger");
+		atomic_replace(
+		    m_root / "property_ledger.pb",
+		    {reinterpret_cast<const std::byte *>(bytes.data()), bytes.size()});
+		m_property_ledger = ledger;
 	}
 
 	void world_store::load_or_create(const server_config &config)
@@ -433,6 +608,7 @@ namespace kcd2mp::server
 
 	void world_store::load_profiles()
 	{
+		std::unordered_set<std::string> persistent_ids;
 		for (const auto &entry :
 		     std::filesystem::directory_iterator(m_profiles_directory))
 		{
@@ -447,11 +623,28 @@ namespace kcd2mp::server
 			protocol::StoredPlayerProfile stored;
 			if ((!input && !input.eof()) || !stored.ParseFromString(bytes)
 			    || stored.identity_token_hash().size() != 32
-			    || !stored.has_profile() || !is_valid_profile(stored.profile())
+			    || !stored.has_profile()
 			    || stored.profile().player_id() == 0)
 			{
 				throw std::runtime_error(
 				    "invalid persistent profile: " + entry.path().string());
+			}
+			bool migrated_identity = false;
+			if (stored.profile().persistent_id().empty())
+			{
+				auto identity = random_uuid_v4();
+				while (persistent_ids.contains(identity))
+					identity = random_uuid_v4();
+				stored.mutable_profile()->set_persistent_id(std::move(identity));
+				migrated_identity = true;
+			}
+			if (!is_valid_profile(stored.profile())
+			    || !is_uuid(stored.profile().persistent_id())
+			    || !persistent_ids.insert(stored.profile().persistent_id()).second)
+			{
+				throw std::runtime_error(
+				    "invalid or duplicate persistent player identity: "
+				    + entry.path().string());
 			}
 			persisted_profile profile;
 			std::ranges::copy(
@@ -459,6 +652,8 @@ namespace kcd2mp::server
 			    reinterpret_cast<char *>(profile.identity_hash.data()));
 			profile.profile = std::move(*stored.mutable_profile());
 			m_profiles.push_back(std::move(profile));
+			if (migrated_identity)
+				write_profile(m_profiles.back());
 		}
 	}
 
@@ -505,6 +700,42 @@ namespace kcd2mp::server
 			if (!is_valid_world_item_state(item))
 				throw std::runtime_error("invalid persistent world item entry");
 			m_world_items.push_back(std::move(item));
+		}
+	}
+
+	void world_store::load_property_catalog()
+	{
+		const auto path = m_root / "property_catalog.pb";
+		if (!std::filesystem::exists(path))
+			return;
+		std::ifstream input(path, std::ios::binary);
+		const std::string bytes{
+		    std::istreambuf_iterator<char>(input),
+		    std::istreambuf_iterator<char>()};
+		if ((!input && !input.eof()) || !m_property_catalog.ParseFromString(bytes)
+		    || !valid_property_catalog(m_property_catalog, m_manifest.level_id))
+		{
+			throw std::runtime_error("invalid persistent property catalog");
+		}
+	}
+
+	void world_store::load_property_ledger()
+	{
+		const auto path = m_root / "property_ledger.pb";
+		if (!std::filesystem::exists(path))
+		{
+			m_property_ledger.set_schema(property::ledger_schema);
+			m_property_ledger.set_revision(1);
+			return;
+		}
+		std::ifstream input(path, std::ios::binary);
+		const std::string bytes{
+		    std::istreambuf_iterator<char>(input),
+		    std::istreambuf_iterator<char>()};
+		if ((!input && !input.eof()) || !m_property_ledger.ParseFromString(bytes)
+		    || !valid_property_ledger(m_property_ledger, m_property_catalog))
+		{
+			throw std::runtime_error("invalid persistent property ledger");
 		}
 	}
 

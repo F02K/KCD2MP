@@ -1,12 +1,14 @@
 #include "gui.hpp"
 
+#include "gui/native_multiplayer_menu.hpp"
 #include "gui/renderer.hpp"
 #include "hooks/hooking.hpp"
 #include "kcd2_address.hpp"
+#include "kcse/client_proxy.hpp"
 #include "lua/bindings/imgui_window.hpp"
 #include "lua_extensions/lua_manager_extension.hpp"
 #include "lua_extensions/lua_module_ext.hpp"
-#include "kcse/client_proxy.hpp"
+#include "multiplayer/ui_settings.hpp"
 #include "npc/catalog.hpp"
 
 #include <gui/widgets/imgui_extensions.hpp>
@@ -24,7 +26,10 @@ namespace big
 
 	namespace
 	{
-		bool g_show_multiplayer = true;
+		// The player-facing connection flow lives in KCD2's native Scaleform
+		// menu. Keep the ImGui panel available as an explicit developer fallback,
+		// but do not open it by default.
+		bool g_show_multiplayer = false;
 		bool g_show_developer_console = false;
 
 		struct developer_console_entry
@@ -220,23 +225,14 @@ namespace big
 				return;
 			}
 
-			static auto* saved_address = config::general().bind(
-			    "Multiplayer",
-			    "Address",
-			    std::string{"127.0.0.1:27020"},
-			    "Last Direct-IP server address.");
-			static auto* saved_name = config::general().bind(
-			    "Multiplayer",
-			    "Display Name",
-			    std::string{"Henry"},
-			    "Last multiplayer display name.");
 			static auto* saved_diagnostic_logging = config::general().bind(
 			    "Multiplayer",
 			    "Diagnostic Logging",
 			    false,
 			    "Write verbose KCD2MP join and performance diagnostics.");
-			static std::string address = saved_address->get_value();
-			static std::string display_name = saved_name->get_value();
+			auto& preferences = kcd2mp::ui_settings();
+			auto& address = preferences.address;
+			auto& display_name = preferences.display_name;
 			bool diagnostic_logging =
 			    saved_diagnostic_logging->get_value();
 			client.set_diagnostic_logging(diagnostic_logging);
@@ -278,7 +274,7 @@ namespace big
 				    "Join source: loaded native save (level %s)",
 				    loaded_level.c_str());
 				ImGui::TextWrapped(
-				    "The save must be on the server's level. Save and autosave are locked once the server bootstrap is accepted.");
+				    "No savegame is required. The server bootstrap starts the native target world; save and autosave are locked while connected.");
 			}
 			else
 			{
@@ -317,11 +313,11 @@ namespace big
 			ImGui::BeginDisabled(!disconnected);
 			if (ImGui::InputText("Address", &address))
 			{
-				saved_address->set_value(address);
+				preferences.persist_address();
 			}
 			if (ImGui::InputText("Name", &display_name))
 			{
-				saved_name->set_value(display_name);
+				preferences.persist_display_name();
 			}
 			ImGui::InputText(
 			    "Password",
@@ -2247,6 +2243,11 @@ namespace big
 
 	void gui::wndproc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
 	{
+		(void)native_multiplayer_menu::on_window_message(
+		    msg,
+		    wparam,
+		    lparam);
+
 		if (msg == WM_RBUTTONUP)
 		{
 			target_entity_on_screen_cursor();

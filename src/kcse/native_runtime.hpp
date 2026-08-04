@@ -8,15 +8,35 @@
 #include <KCSE/KCSEAPI.h>
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 
+namespace wh::playermodule
+{
+	class I_Minigame;
+}
+
+namespace wh::guimodule
+{
+	class C_UIMap;
+	struct S_EntityMapMark;
+}
+
 namespace kcd2mp::kcse
 {
+	struct local_activity_start
+	{
+		protocol::PlayerActivityKind kind{
+		    protocol::PLAYER_ACTIVITY_KIND_NONE};
+		std::uint64_t station_guid{};
+	};
+
 	class native_runtime final : public client_runtime
 	{
 	public:
@@ -24,6 +44,12 @@ namespace kcd2mp::kcse
 
 		void on_lifecycle(std::uint32_t message_type) noexcept;
 		[[nodiscard]] bool on_frame();
+		void on_blacksmithing_started(std::uint32_t station_entity_id);
+		[[nodiscard]] std::optional<local_activity_start>
+		take_local_activity_start();
+		[[nodiscard]] bool local_activity_end_pending() const noexcept;
+		void acknowledge_local_activity_end() noexcept;
+		void cancel_local_activity();
 
 		[[nodiscard]] runtime_descriptor descriptor() const override;
 		[[nodiscard]] runtime_gate capability() const override;
@@ -52,8 +78,15 @@ namespace kcd2mp::kcse
 		[[nodiscard]] bool apply_environment_state(
 		    const protocol::EnvironmentState &state,
 		    bool apply_weather) override;
+		[[nodiscard]] bool set_home_marker(
+		    const std::optional<protocol::PropertyHomeMarker> &marker) override;
 		[[nodiscard]] bool apply_authoritative_profile(
 		    const protocol::PlayerProfile &profile) override;
+		[[nodiscard]] bool respawn_local_player(
+		    const protocol::TransformState &spawn) override;
+		[[nodiscard]] bool local_player_dead() const;
+		[[nodiscard]] bool local_player_laying() const;
+		void show_multiplayer_notice(std::string_view message) override;
 
 		[[nodiscard]] std::optional<protocol::TransformState>
 		local_transform() const;
@@ -66,12 +99,39 @@ namespace kcd2mp::kcse
 		[[nodiscard]] std::uint64_t epoch() const noexcept;
 
 	private:
+		enum class world_start_stage
+		{
+			idle,
+			invoking_new_game,
+			waiting_for_lifecycle,
+			waiting_for_data,
+			waiting_for_level,
+			waiting_for_player,
+			probing_runtime,
+			activating,
+			failed
+		};
+
 		void invalidate_epoch_on_game_thread();
 		void refresh_cached_state();
+		[[nodiscard]] sandbox_start_result activate_loaded_sandbox(
+		    const protocol::ServerBootstrap &bootstrap);
+		[[nodiscard]] sandbox_start_result begin_native_world_start(
+		    const protocol::ServerBootstrap &bootstrap);
+		void advance_native_world_start();
+		void set_world_start_stage(
+		    world_start_stage stage,
+		    std::string diagnostic);
+		void fail_native_world_start(std::string error);
 		void restore_save_load();
 		void begin_native_unload(std::string_view reason);
 		void finish_native_unload_if_complete();
 		[[nodiscard]] bool native_world_unloaded() const;
+		void poll_local_activity();
+		void refresh_home_marker();
+		void remove_home_marker();
+		[[nodiscard]] wh::playermodule::I_Minigame *
+		find_local_minigame(protocol::PlayerActivityKind kind) const;
 
 		const KCSE::IKCSEInterface &m_kcse;
 		std::string m_address_library;
@@ -84,6 +144,9 @@ namespace kcd2mp::kcse
 		std::atomic<bool> m_data_loaded{};
 		std::atomic<bool> m_frame_seen{};
 		std::atomic<bool> m_multiplayer_requested{};
+		std::atomic<bool> m_expected_epoch_transition{};
+		std::atomic<bool> m_world_lifecycle_seen{};
+		std::atomic<bool> m_world_pre_data_seen{};
 
 		mutable std::mutex m_cache_mutex;
 		std::uint64_t m_capabilities{};
@@ -103,6 +166,21 @@ namespace kcd2mp::kcse
 		bool m_preparation_active{};
 		std::uint32_t m_preparation_frames{};
 		std::string m_probe_error;
+		world_start_stage m_world_start_stage{world_start_stage::idle};
+		std::optional<protocol::ServerBootstrap> m_world_start_bootstrap;
+		std::string m_world_start_level_id;
+		std::string m_world_start_level_name;
+		bool m_world_start_requires_lifecycle{};
+		std::chrono::steady_clock::time_point m_world_start_deadline{};
+		std::optional<local_activity_start> m_pending_activity_start;
+		protocol::PlayerActivityKind m_native_activity_kind{
+		    protocol::PLAYER_ACTIVITY_KIND_NONE};
+		bool m_activity_end_pending{};
+		std::optional<protocol::PropertyHomeMarker> m_home_marker;
+		std::chrono::steady_clock::time_point m_next_home_marker_attempt{};
+		std::shared_ptr<wh::guimodule::S_EntityMapMark> m_native_home_mark;
+		wh::guimodule::C_UIMap *m_native_home_map{};
+		bool m_home_filter_was_visible{};
 		native_entity_backend m_entities;
 		native_profile_backend m_profiles;
 		native_remote_avatar_backend m_remote_backend;

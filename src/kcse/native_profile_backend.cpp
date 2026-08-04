@@ -1,6 +1,8 @@
 #include "kcse/native_profile_backend.hpp"
 
+#include "kcse/native_avatar_combat.hpp"
 #include "kcse/native_equipment.hpp"
+#include "kcse/native_inventory.hpp"
 #include "kcse/join_trace.hpp"
 #include "multiplayer/avatar_visual.hpp"
 #include "npc/equipment_catalog.hpp"
@@ -26,66 +28,10 @@
 #include <format>
 #include <limits>
 #include <ranges>
-#include <unordered_map>
 #include <vector>
 
 namespace kcd2mp::kcse
 {
-	namespace
-	{
-		constexpr std::uint32_t item_equipped = 1U;
-
-		protocol::AvatarWeaponClass protocol_weapon(npc::weapon_class value)
-		{
-			switch (value)
-			{
-			case npc::weapon_class::one_handed:
-				return protocol::AVATAR_WEAPON_CLASS_ONE_HANDED;
-			case npc::weapon_class::two_handed:
-				return protocol::AVATAR_WEAPON_CLASS_TWO_HANDED;
-			case npc::weapon_class::polearm:
-				return protocol::AVATAR_WEAPON_CLASS_POLEARM;
-			case npc::weapon_class::bow:
-				return protocol::AVATAR_WEAPON_CLASS_BOW;
-			case npc::weapon_class::crossbow:
-				return protocol::AVATAR_WEAPON_CLASS_CROSSBOW;
-			case npc::weapon_class::none:
-				return protocol::AVATAR_WEAPON_CLASS_NONE;
-			}
-			return protocol::AVATAR_WEAPON_CLASS_NONE;
-		}
-
-		const npc::equipment_definition *equipment_for(
-		    const wh::entitymodule::C_Item &item)
-		{
-			return item.m_pClassData
-			    ? npc::runtime_equipment_catalog().find(
-			        wh::FormatGuid(item.m_pClassData->m_guid))
-			    : nullptr;
-		}
-
-		protocol::AvatarWeaponClass protocol_weapon_for(
-		    const wh::entitymodule::C_Item &item,
-		    std::string_view equipped_slot)
-		{
-			if (const auto *definition = equipment_for(item);
-			    definition && definition->weapon != npc::weapon_class::none)
-			{
-				return protocol_weapon(definition->weapon);
-			}
-			if (item.IsOfType(wh::entitymodule::E_ItemType::Missile))
-				return protocol::AVATAR_WEAPON_CLASS_BOW;
-			if (item.IsOfType(wh::entitymodule::E_ItemType::Melee))
-			{
-				return equipped_slot == "Oversized"
-				        || equipped_slot == "OversizedOff"
-				    ? protocol::AVATAR_WEAPON_CLASS_TWO_HANDED
-				    : protocol::AVATAR_WEAPON_CLASS_ONE_HANDED;
-			}
-			return protocol::AVATAR_WEAPON_CLASS_NONE;
-		}
-	}
-
 	native_profile_backend::native_profile_backend(
 	    native_entity_backend &entities) :
 	    m_entities(entities)
@@ -138,7 +84,7 @@ namespace kcd2mp::kcse
 		for (const auto *item : native->inventory->m_items)
 		{
 			if (!item || !item->m_pClassData || item->m_amount <= 0
-			    || (item->m_flags & item_equipped) == 0)
+			    || (item->m_flags & native_item_equipped) == 0)
 			{
 				continue;
 			}
@@ -172,30 +118,9 @@ namespace kcd2mp::kcse
 		auto avatar = *m_avatar_state;
 		const auto *human =
 		    reinterpret_cast<const wh::entitymodule::C_Human *>(local.actor);
-		const bool weapon_drawn =
-		    avatar.weapon_class() != protocol::AVATAR_WEAPON_CLASS_NONE
-		    && human->IsWeaponDrawn();
-		avatar.set_weapon_drawn(weapon_drawn);
-		avatar.set_stance(
-		    weapon_drawn ? protocol::AVATAR_STANCE_READY
-		                 : protocol::AVATAR_STANCE_RELAXED);
-		canonicalize_avatar_visual(avatar);
+		capture_native_avatar_combat(avatar, *human);
 		error.clear();
 		return avatar;
-	}
-
-	wh::entitymodule::C_Item *native_profile_backend::find_item(
-	    wh::entitymodule::C_Inventory &inventory,
-	    std::string_view instance_id) const
-	{
-		const auto found = std::ranges::find_if(
-		    inventory.m_items,
-		    [&](const auto *item)
-		    {
-			    return item
-			        && wh::FormatGuid(item->m_instanceGuid) == instance_id;
-		    });
-		return found == inventory.m_items.end() ? nullptr : *found;
 	}
 
 	std::optional<protocol::PlayerProfile>
@@ -302,7 +227,7 @@ namespace kcd2mp::kcse
 			wire->set_count(static_cast<std::uint32_t>(item->m_amount));
 			wire->set_quality(static_cast<float>(item->GetQuality()));
 			wire->set_condition(item->GetCondition());
-			if ((item->m_flags & item_equipped) != 0)
+			if ((item->m_flags & native_item_equipped) != 0)
 			{
 				const auto equipped_slot =
 				    resolved_equipped_slot(*native->equipment, *item);
@@ -329,38 +254,16 @@ namespace kcd2mp::kcse
 		        native_money_stacks));
 
 		auto avatar = m_avatar_state.value_or(result.avatar());
-		avatar.clear_equipment();
-		avatar.set_weapon_class(protocol::AVATAR_WEAPON_CLASS_NONE);
-		for (const auto &item : result.inventory())
-		{
-			if (!item.has_equipped_slot())
-				continue;
-			auto *visible = avatar.add_equipment();
-			visible->set_definition_id(item.definition_id());
-			visible->set_equipped_slot(item.equipped_slot());
-			if (const auto *native_item =
-			        find_item(*native->inventory, item.instance_id()))
-			{
-				const auto weapon =
-				    protocol_weapon_for(*native_item, item.equipped_slot());
-				if (weapon != protocol::AVATAR_WEAPON_CLASS_NONE)
-					avatar.set_weapon_class(weapon);
-			}
-		}
-		if (avatar.weapon_class() == protocol::AVATAR_WEAPON_CLASS_NONE)
-			avatar.set_weapon_drawn(false);
-		else if (const auto local = m_entities.player(); local.actor)
+		replace_avatar_equipment_from_profile(avatar, result);
+		if (const auto local = m_entities.player(); local.actor)
 		{
 			const auto *human =
 			    reinterpret_cast<const wh::entitymodule::C_Human *>(
 			        local.actor);
-			avatar.set_weapon_drawn(human->IsWeaponDrawn());
-			avatar.set_stance(
-			    avatar.weapon_drawn()
-			        ? protocol::AVATAR_STANCE_READY
-			        : protocol::AVATAR_STANCE_RELAXED);
+			capture_native_avatar_combat(avatar, *human);
 		}
-		canonicalize_avatar_visual(avatar);
+		else
+			canonicalize_avatar_visual(avatar);
 		m_avatar_state = avatar;
 		*result.mutable_avatar() = std::move(avatar);
 
@@ -437,15 +340,15 @@ namespace kcd2mp::kcse
 		const auto native = state(error);
 		if (!native)
 			return false;
-		auto *item = find_item(*native->inventory, instance_id);
+		auto *item = find_inventory_item(*native->inventory, instance_id);
 		if (!item)
 		{
 			error = "native item to unequip does not exist";
 			return false;
 		}
-		if ((item->m_flags & item_equipped) != 0)
+		if ((item->m_flags & native_item_equipped) != 0)
 			native->soul->m_inventorySoul.UnequipItem(item, true);
-		if ((item->m_flags & item_equipped) != 0)
+		if ((item->m_flags & native_item_equipped) != 0)
 		{
 			error = "native UnequipItem did not clear equipped state";
 			return false;
@@ -460,20 +363,20 @@ namespace kcd2mp::kcse
 		const auto native = state(error);
 		if (!native)
 			return false;
-		auto *item = find_item(*native->inventory, instance_id);
+		auto *item = find_inventory_item(*native->inventory, instance_id);
 		if (!item)
 		{
 			error = "native item to remove does not exist";
 			return false;
 		}
-		if ((item->m_flags & item_equipped) != 0
+		if ((item->m_flags & native_item_equipped) != 0
 		    && !unequip(instance_id, error))
 			return false;
 		native->inventory->RemoveItem(
 		    item,
 		    2,
 		    static_cast<std::uint32_t>(item->m_amount));
-		if (find_item(*native->inventory, instance_id))
+		if (find_inventory_item(*native->inventory, instance_id))
 		{
 			error = "native RemoveItem left the instance in inventory";
 			return false;
@@ -488,7 +391,7 @@ namespace kcd2mp::kcse
 		const auto native = state(error);
 		if (!native || !validate_item(item, error))
 			return false;
-		if (find_item(*native->inventory, item.instance_id()))
+		if (find_inventory_item(*native->inventory, item.instance_id()))
 		{
 			error = "native inventory already contains item instance";
 			return false;
@@ -511,7 +414,7 @@ namespace kcd2mp::kcse
 			return false;
 		}
 		created->SetInstanceGuid(instance);
-		if (!find_item(*native->inventory, item.instance_id()))
+		if (!find_inventory_item(*native->inventory, item.instance_id()))
 		{
 			error = "native item instance GUID registration failed";
 			return false;
@@ -526,7 +429,8 @@ namespace kcd2mp::kcse
 		const auto native = state(error);
 		if (!native)
 			return false;
-		auto *existing = find_item(*native->inventory, item.instance_id());
+		auto *existing = find_inventory_item(
+		    *native->inventory, item.instance_id());
 		if (!existing || !existing->m_pClassData
 		    || wh::FormatGuid(existing->m_pClassData->m_guid)
 		        != item.definition_id())
@@ -787,14 +691,14 @@ namespace kcd2mp::kcse
 		const auto native = state(error);
 		if (!native)
 			return false;
-		auto *item = find_item(*native->inventory, instance_id);
+		auto *item = find_inventory_item(*native->inventory, instance_id);
 		if (!item)
 		{
 			error = "native item to equip does not exist";
 			return false;
 		}
 		native->soul->m_inventorySoul.EquipItem(item, true);
-		if ((item->m_flags & item_equipped) == 0)
+		if ((item->m_flags & native_item_equipped) == 0)
 		{
 			error = "native EquipItem did not set equipped state";
 			return false;
@@ -895,7 +799,8 @@ namespace kcd2mp::kcse
 				    target_slot);
 				if (!target)
 					continue;
-				auto *item = find_item(*native->inventory, target->instance_id());
+				auto *item = find_inventory_item(
+				    *native->inventory, target->instance_id());
 				if (!item)
 				{
 					error = "QAM target item is missing from player inventory";
@@ -922,7 +827,8 @@ namespace kcd2mp::kcse
 				    target_slot);
 				if (!target)
 					continue;
-				auto *item = find_item(*native->inventory, target->instance_id());
+				auto *item = find_inventory_item(
+				    *native->inventory, target->instance_id());
 				if (!item)
 				{
 					error = "QAM target item is missing from player inventory";
@@ -961,25 +867,13 @@ namespace kcd2mp::kcse
 			error = "native local Human is unavailable";
 			return false;
 		}
-		auto *human =
-		    reinterpret_cast<wh::entitymodule::C_Human *>(local.actor);
-		const auto should_draw =
-		    avatar.weapon_class() != protocol::AVATAR_WEAPON_CLASS_NONE
-		    && (avatar.weapon_drawn()
-		        || avatar.stance() == protocol::AVATAR_STANCE_READY);
-		if (human->IsWeaponDrawn() != should_draw
-		    && !human->SetWeaponDrawn(should_draw))
-		{
-			error = should_draw
-			    ? "native Human rejected weapon draw"
-			    : "native Human rejected weapon holster";
-			return false;
-		}
 		m_avatar_state = avatar;
-		m_avatar_state->set_weapon_drawn(should_draw);
-		m_avatar_state->set_stance(
-		    should_draw ? protocol::AVATAR_STANCE_READY
-		                : protocol::AVATAR_STANCE_RELAXED);
+		canonicalize_avatar_visual(*m_avatar_state);
+		// The owner is authoritative for its native weapon/combat lifecycle.
+		// Applying a server echo here used to interrupt unarmed and end-combat
+		// transitions. capture_avatar_visual overlays the live native state before
+		// the next update is sent.
+		error.clear();
 		return true;
 	}
 

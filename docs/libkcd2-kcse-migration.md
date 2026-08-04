@@ -9,7 +9,7 @@ reference and is never used as a fallback.
 | Game tick and lifecycle | KCSE `PostUpdate` plus DataLoaded/LoadGame/SaveGame/NewGame runtime epochs | Implemented and covered by epoch/stale-handle tests |
 | Local player | `CCryAction::GetClientEntity` and `S_GameContext::GetActorById` | Typed slots and actor lookup |
 | Transform read/write | `IEntity::GetWorldTMPtr` and `IEntity::SetWorldTM` | VTable slot audit plus identical-write/readback active probe |
-| Entity isolation | Exact eight-slot `IEntitySystemSink`, verified Human/Animal AI-Actor classification, reversible visibility-only control | Spawn/remove/reuse tests and audited sink targets |
+| Entity isolation | Exact eight-slot `IEntitySystemSink`, verified Human/Animal AI-Actor classification, full `IEntitySystem::RemoveEntity` teardown, scheduler/player exclusions, and orphaned-combat recovery outside a 50 m PvP radius | Spawn/remove/reuse tests and audited sink/combat targets |
 | Remote avatar | Native `IActorSystem::CreateActor("NPC")`, shared Soul materialization, Actor/Soul/Human/Inventory readiness | Retry, timeout, fallback, stale epoch, external destroy, and cleanup tests |
 | Locomotion | Native Actor MovementController requests for Idle/Walk/Run plus interpolated world transform | Backend tests and runtime error propagation |
 | Inventory/equipment | Native item creation, logical instance GUID, count/quality/condition, slot-ordered equip/unequip/delete, draw/holster | Transaction and rollback tests plus active probe |

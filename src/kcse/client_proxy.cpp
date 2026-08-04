@@ -103,6 +103,18 @@ namespace kcd2mp::kcse
 		return api && api->select_avatar(archetype_id.c_str()) != 0;
 	}
 
+	bool ui_client_proxy::attempt_sleep() const
+	{
+		const auto *api = load();
+		return api && api->attempt_sleep() != 0;
+	}
+
+	bool ui_client_proxy::request_respawn() const
+	{
+		const auto *api = load();
+		return api && api->request_respawn() != 0;
+	}
+
 	void ui_client_proxy::set_diagnostic_logging(bool enabled) const
 	{
 		if (const auto *api = load())
@@ -131,6 +143,11 @@ namespace kcd2mp::kcse
 		result.level_id = value.level_id;
 		result.error = value.error;
 		result.avatar_archetype_id = value.avatar_archetype_id;
+		result.sleeping = value.sleeping != 0;
+		result.sleeping_players = value.sleeping_players;
+		result.sleeping_players_required = value.sleeping_players_required;
+		result.dead = value.dead != 0;
+		result.respawn_pending = value.respawn_pending != 0;
 		result.avatar_policy.set_default_archetype_id(
 		    value.default_avatar_archetype_id);
 		const auto count = api->copy_avatar_archetypes(nullptr, 0);

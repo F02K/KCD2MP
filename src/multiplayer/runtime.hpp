@@ -158,10 +158,23 @@ namespace kcd2mp
 		{
 			return true;
 		}
+		[[nodiscard]] virtual bool set_home_marker(
+		    const std::optional<protocol::PropertyHomeMarker> &)
+		{
+			return true;
+		}
 		[[nodiscard]] virtual bool apply_authoritative_profile(
 		    const protocol::PlayerProfile &)
 		{
 			return false;
+		}
+		[[nodiscard]] virtual bool respawn_local_player(
+		    const protocol::TransformState &)
+		{
+			return false;
+		}
+		virtual void show_multiplayer_notice(std::string_view)
+		{
 		}
 	};
 }

@@ -19,6 +19,7 @@ namespace
 	}
 	void __cdecl disconnect() noexcept {}
 	std::uint32_t __cdecl text(const char *) noexcept { return 1; }
+	std::uint32_t __cdecl action() noexcept { return 1; }
 	std::uint32_t __cdecl status(
 	    kcd2mp::kcse::client_status_view *) noexcept
 	{
@@ -66,10 +67,10 @@ int main()
 	static_assert(sizeof(fixed_string) == 64);
 	static_assert(sizeof(connect_request) == 516);
 	static_assert(sizeof(runtime_status) == 424);
-	static_assert(sizeof(client_status_view) == 672);
+	static_assert(sizeof(client_status_view) == 688);
 	static_assert(sizeof(remote_player_view) == 80);
 	static_assert(sizeof(chat_entry_view) == 336);
-	static_assert(sizeof(client_api) == 96);
+	static_assert(sizeof(client_api) == 112);
 #endif
 
 	client_api valid{
@@ -81,6 +82,8 @@ int main()
 	    disconnect,
 	    text,
 	    text,
+	    action,
+	    action,
 	    status,
 	    players,
 	    chat,

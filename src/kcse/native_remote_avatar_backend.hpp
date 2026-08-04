@@ -46,6 +46,13 @@ namespace kcd2mp::kcse
 		void remove(remote_avatar_handle avatar) override;
 
 	private:
+		enum class multiplayer_semantics_result
+		{
+			applied,
+			deferred,
+			failed
+		};
+
 		struct entry
 		{
 			player_id player{};
@@ -57,6 +64,11 @@ namespace kcd2mp::kcse
 			std::chrono::steady_clock::time_point
 			    shared_soul_applied_at{};
 			bool lifecycle_ready{};
+			bool display_name_applied{};
+			std::string display_name;
+			bool multiplayer_semantics_applied{};
+			std::chrono::steady_clock::time_point
+			    next_multiplayer_semantics_attempt{};
 			bool appearance_applied{};
 			bool transform_applied{};
 			protocol::TransformState last_transform;
@@ -75,6 +87,11 @@ namespace kcd2mp::kcse
 			std::string failure;
 			protocol::AvatarDescriptor appearance;
 			std::vector<std::string> item_instances;
+			bool activity_active{};
+			protocol::PlayerActivityKind activity_kind{
+			    protocol::PLAYER_ACTIVITY_KIND_NONE};
+			std::uint64_t activity_session_id{};
+			std::uint64_t activity_station_guid{};
 		};
 
 		[[nodiscard]] entry *find(remote_avatar_handle avatar);
@@ -89,6 +106,17 @@ namespace kcd2mp::kcse
 		    entry &avatar,
 		    std::string &error);
 		[[nodiscard]] bool drive_motion(
+		    entry &avatar,
+		    const remote_avatar_snapshot &player,
+		    std::string &error);
+		[[nodiscard]] bool apply_display_name(
+		    entry &avatar,
+		    const remote_avatar_snapshot &player,
+		    std::string &error);
+		[[nodiscard]] multiplayer_semantics_result apply_multiplayer_semantics(
+		    entry &avatar,
+		    std::string &error);
+		[[nodiscard]] bool apply_activity(
 		    entry &avatar,
 		    const remote_avatar_snapshot &player,
 		    std::string &error);

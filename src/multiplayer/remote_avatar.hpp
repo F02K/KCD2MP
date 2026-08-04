@@ -29,6 +29,8 @@ namespace kcd2mp
 		    protocol::MOVEMENT_MODE_IDLE};
 		bool has_avatar{};
 		protocol::AvatarDescriptor avatar;
+		bool has_activity{};
+		protocol::PlayerActivity activity;
 	};
 
 	enum class remote_avatar_state

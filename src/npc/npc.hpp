@@ -47,6 +47,7 @@ namespace kcd2mp::npc
 	enum class weapon_class
 	{
 		none,
+		unarmed,
 		one_handed,
 		two_handed,
 		polearm,

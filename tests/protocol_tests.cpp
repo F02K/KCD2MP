@@ -1,4 +1,5 @@
 #include "multiplayer/protocol.hpp"
+#include "multiplayer/world_catalog.hpp"
 
 #include <cassert>
 #include <chrono>
@@ -43,6 +44,16 @@ namespace
 
 int main()
 {
+	using kcd2mp::canonical_level_id;
+	using kcd2mp::find_native_world_level;
+	assert(find_native_world_level("2")->name == "trosecko");
+	assert(find_native_world_level("kutnohorsko")->id == "3");
+	assert(find_native_world_level("4")->production);
+	assert(!find_native_world_level("300")->production);
+	assert(!find_native_world_level("sandbox"));
+	assert(canonical_level_id("klaster") == "4");
+	assert(canonical_level_id("custom_level") == "custom_level");
+
 	using namespace kcd2mp;
 
 	assert(is_valid_display_name("Henry"));
@@ -108,6 +119,49 @@ int main()
 
 	protocol::Envelope no_payload;
 	assert(!encode(no_payload, reliability::reliable, &error));
+
+	protocol::Envelope activity_start;
+	auto *start_activity = activity_start.mutable_client_activity_start();
+	start_activity->set_kind(
+	    protocol::PLAYER_ACTIVITY_KIND_BLACKSMITHING);
+	start_activity->set_station_guid(0xAABBCCDDULL);
+	assert(encode(activity_start, reliability::reliable, &error));
+	auto invalid_activity_start = activity_start;
+	invalid_activity_start.mutable_client_activity_start()->set_kind(
+	    protocol::PLAYER_ACTIVITY_KIND_NONE);
+	assert(!encode(invalid_activity_start, reliability::reliable, &error));
+
+	protocol::Envelope activity_update;
+	auto *player_activity =
+	    activity_update.mutable_player_activity_updated();
+	player_activity->set_player_id(7);
+	auto *activity = player_activity->mutable_activity();
+	activity->set_kind(protocol::PLAYER_ACTIVITY_KIND_BLACKSMITHING);
+	activity->set_station_guid(0xAABBCCDDULL);
+	activity->set_session_id(11);
+	activity->set_revision(1);
+	activity->set_active(true);
+	assert(encode(activity_update, reliability::reliable, &error));
+	activity->set_session_id(0);
+	assert(!encode(activity_update, reliability::reliable, &error));
+
+	protocol::Envelope home_update;
+	auto *home_message = home_update.mutable_server_home_marker_updated();
+	home_message->set_active(true);
+	home_message->set_ledger_revision(2);
+	auto *home = home_message->mutable_marker();
+	home->set_property_id("3:fixture");
+	home->set_level_id("3");
+	home->set_display_name("Fixture house");
+	home->set_entity_guid(1);
+	home->set_role(protocol::PROPERTY_ROLE_OWNER);
+	home->mutable_position()->set_x(10.0F);
+	home->mutable_position()->set_y(20.0F);
+	home->mutable_position()->set_z(30.0F);
+	assert(encode(home_update, reliability::reliable, &error));
+	home->mutable_position()->set_x(
+	    std::numeric_limits<float>::infinity());
+	assert(!encode(home_update, reliability::reliable, &error));
 
 	protocol::Envelope invalid_enum;
 	auto *snapshot = invalid_enum.mutable_player_joined()->mutable_player();
@@ -252,6 +306,16 @@ int main()
 	    protocol::AVATAR_WEAPON_CLASS_NONE);
 	invalid_weapon_state.set_weapon_drawn(true);
 	assert(!is_valid_avatar_descriptor(invalid_weapon_state));
+	auto unarmed_avatar = *avatar;
+	unarmed_avatar.set_weapon_class(
+	    protocol::AVATAR_WEAPON_CLASS_UNARMED);
+	unarmed_avatar.set_weapon_drawn(true);
+	unarmed_avatar.set_active_weapon_set(
+	    protocol::AVATAR_WEAPON_SET_PRIMARY);
+	assert(is_valid_avatar_descriptor(unarmed_avatar));
+	unarmed_avatar.set_active_weapon_set(
+	    protocol::AVATAR_WEAPON_SET_SECONDARY);
+	assert(!is_valid_avatar_descriptor(unarmed_avatar));
 	auto oversized_avatar = *avatar;
 	for (std::size_t index = oversized_avatar.equipment_size();
 	     index <= max_avatar_equipment_items;

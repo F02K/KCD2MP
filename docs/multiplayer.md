@@ -84,6 +84,13 @@ the returned canonical state through the same native reconciler used for
 capture. Failed mutations roll back; a failed rollback initiates a safe world
 unload.
 
+Weapon presentation distinguishes the native primary, secondary, and oversized
+sets. A drawn empty primary set is transmitted as `UNARMED`, not as no weapon.
+The owner also reports the native `CombatActor` combat-mode and active-combat
+flags. These values are observations: authoritative profile reconciliation does
+not write draw, holster, or combat state back onto the owning player and cannot
+interrupt native end-combat transitions.
+
 Quests, dialogue, reputation, crimes, perks, horses, buffs, nutrition, fatigue,
 and general savegame state are outside the current profile contract.
 
@@ -173,10 +180,19 @@ the game's weather command so native profile blending remains intact.
 
 Shared NPC simulation is not implemented in `0.0.9`. The server can instruct
 clients to isolate human NPCs, animal NPCs, or both. Classification uses native
-`C_Human` and `C_Animal` RTTI; unknown Actors and non-AI helpers are not hidden.
+`C_Human` and `C_Animal` RTTI. Human removal additionally requires a registered
+AI object; the local client Entity/Actor, every engine-recognized player, remote
+player Entities, the native player/horse scheduler proxy Entities named by
+`wh_ai_PlayerSchedulerProxy` and `wh_ai_PlayerHorseSchedulerProxy`, unknown
+Actors, and non-AI helpers are always excluded.
 
 Isolation prevents each client from independently presenting and simulating its
-own unsynchronized population. It is a prototype safety measure, not NPC sync.
+own unsynchronized population while retaining the Actor, Soul, scheduler, and
+authored GUID ownership graph. A positively classified NPC is hidden instead of
+being force-removed. If its native `CombatActor` is in combat mode, isolation is
+deferred until the engine has completed its opponent and end-combat lifecycle.
+The multiplayer layer does not stop player combat actions, clear the player's
+opponent, or force a holster based on weapon stance or remote-player distance.
 
 ## NPCs: planned synchronization model
 

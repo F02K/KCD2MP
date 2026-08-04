@@ -1,9 +1,11 @@
 #include "kcse/remote_avatar_readiness.hpp"
 #include "multiplayer/remote_avatar.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cassert>
 #include <chrono>
+#include <ranges>
 #include <unordered_map>
 #include <vector>
 
@@ -155,7 +157,14 @@ int main()
 	assert(result.success);
 	assert(result.spawned == 2);
 	assert(manager.size() == 2);
+	assert(std::ranges::all_of(
+	    backend.players,
+	    [](const auto &entry)
+	    {
+		    return entry.second.display_name == "Remote";
+	    }));
 
+	players[0].display_name = "Renamed Remote";
 	players[0].transform.mutable_position()->set_x(11.0F);
 	players[0].movement_mode = protocol::MOVEMENT_MODE_RUN;
 	players[0].connected = false;
@@ -166,6 +175,8 @@ int main()
 	assert(backend.appearance_updates == 0);
 	assert(result.removed == 1);
 	assert(manager.size() == 1);
+	assert(backend.players.begin()->second.display_name
+	    == "Renamed Remote");
 
 	players[0].avatar.set_revision(2);
 	result = manager.sync(players);
@@ -203,6 +214,8 @@ int main()
 	assert(fallback_manager.size() == 1);
 	assert(fallback_backend.players.begin()->second.avatar.archetype_id()
 	    == npc::default_soul_id);
+	assert(fallback_backend.players.begin()->second.display_name
+	    == "Remote");
 
 	fallback_backend.desired_spawns_succeed = true;
 	fallback_backend.spawned_state = remote_avatar_state::pending;

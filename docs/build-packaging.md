@@ -6,6 +6,12 @@ Every successful build from `build.bat` produces a clean distribution tree at:
 out/package/<profile>/
 ```
 
+The raw CMake configuration directory also contains the language files in the
+runtime-relative layout `mods/KCD2MP/Lang/`. This applies both to builds started
+through `build.bat` and direct `cmake --build` invocations of the `KCD2MP`
+target. Translation-only changes are copied again on the next build without
+requiring the client DLL to be relinked.
+
 `<profile>` is `debug` or `release`. Existing package contents are replaced only
 after a new package has been staged successfully, so stale files from earlier
 builds cannot leak into a release.
@@ -24,6 +30,10 @@ out/package/release/
 |   |   |-- mods/KCD2MP/KCSE/Plugins/
 |   |   |   |-- KCD2MPKCSEClient.dll
 |   |   |   `-- KCD2MPKCSEClient.pdb
+|   |   |-- mods/KCD2MP/Lang/
+|   |   |   |-- de.lang
+|   |   |   |-- en.lang
+|   |   |   `-- README.md
 |   |   `-- KCSE/addresslib/
 |   |       `-- kcd_addresslib_*.bin
 |   `-- KCD2MP-Client-v0.0.9.zip

@@ -17,15 +17,15 @@ class SignatureArchitectureTests(unittest.TestCase):
         self.assertIn('set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")', cmake)
         self.assertIn("set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)", cmake)
 
-    def test_registry_is_the_single_source_for_65_signatures(self) -> None:
+    def test_registry_is_the_single_source_for_68_signatures(self) -> None:
         core = (
             PROJECT_ROOT / "src" / "signatures" / "signature_core.cpp"
         ).read_text(encoding="utf-8")
         init = (PROJECT_ROOT / "src" / "kcd2_init.cpp").read_text(encoding="utf-8")
         entries = re.findall(r'signature_spec\{"([^"]+)",\s*"([^"]+)"', core)
 
-        self.assertEqual(len(entries), 65)
-        self.assertEqual(len({name for name, _ in entries}), 65)
+        self.assertEqual(len(entries), 68)
+        self.assertEqual(len({name for name, _ in entries}), 68)
         self.assertIn("static_assert(signature_registry.size()", core)
         self.assertNotIn("kcd2_address::scan(", init)
         self.assertNotIn(".get_call()", init)
@@ -157,6 +157,59 @@ class StartupSafetyTests(unittest.TestCase):
             "cvar->SetFlags(current_flags | *overridden_flags)", source
         )
         self.assertIn('"join.environment.cvar.applied"', source)
+
+    def test_home_marker_resolution_is_constant_time_and_throttled(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_runtime.cpp"
+        ).read_text(encoding="utf-8")
+        header = (
+            PROJECT_ROOT / "src" / "kcse" / "native_runtime.hpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn(
+            "for (const auto &[wuid, object] : manager->m_objects", source
+        )
+        self.assertIn("XGenAIModule.GetMyWUID", source)
+        self.assertIn("manager->m_objects.find", source)
+        self.assertIn("now + std::chrono::seconds{1}", source)
+        self.assertIn("m_next_home_marker_attempt", header)
+
+    def test_npc_isolation_preserves_vanilla_ownership_graph(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_entity_backend.cpp"
+        ).read_text(encoding="utf-8")
+        header = (
+            PROJECT_ROOT / "src" / "kcse" / "native_entity_backend.hpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("RemoveEntity(", source)
+        self.assertNotIn("guarded_remove_entity", source)
+        self.assertIn("entity->Hide(true)", source)
+        self.assertIn("m_isolated", header)
+        self.assertIn("actor_preserved=true", source)
+
+    def test_human_npc_spawns_require_exact_kcd2mp_authorization(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_entity_backend.cpp"
+        ).read_text(encoding="utf-8")
+        header = (
+            PROJECT_ROOT / "src" / "kcse" / "native_entity_backend.hpp"
+        ).read_text(encoding="utf-8")
+        remote = (
+            PROJECT_ROOT / "src" / "kcse" / "native_remote_avatar_backend.cpp"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('(1U << 0) | (1U << 1)', source)
+        self.assertIn('spawn->class_name != "NPC"', source)
+        self.assertIn('spawn->class_name != "NPC_Female"', source)
+        self.assertIn("it->thread == thread", source)
+        self.assertIn("it->entity_name == spawn->entity_name", source)
+        self.assertIn("it->consumed = true", source)
+        self.assertIn("entity-control.spawn.blocked", source)
+        self.assertIn("human_npc_spawn_scope", header)
+        self.assertIn("authorize_human_npc_spawn(name)", remote)
+        self.assertNotIn("begin_player_spawn", remote)
+        self.assertNotIn("end_player_spawn", remote)
 
 
 if __name__ == "__main__":

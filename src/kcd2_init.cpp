@@ -7,7 +7,9 @@
 
 #include <config/config.hpp>
 #include <gui/gui.hpp>
+#include <gui/native_multiplayer_menu.hpp>
 #include <gui/renderer.hpp>
+#include <kcse/client_proxy.hpp>
 #include <logger/stack_trace.hpp>
 #include <lua_extensions/lua_manager_extension.hpp>
 #include <pugixml.hpp>
@@ -59,6 +61,7 @@ namespace big
 		}
 
 		render_imgui_frame();
+		native_multiplayer_menu::update();
 
 		lua_manager_extension::g_lua_manager_instance->process_file_watcher_queue();
 
@@ -365,12 +368,43 @@ namespace big
 
 	static void hook_PostInputEvent(char **a1, __int64 a2, __int64 a3, __int64 a4)
 	{
+		if (native_multiplayer_menu::blocks_game_input())
+		{
+			return;
+		}
 		if (big::g_gui && big::g_gui->is_open() && !big::g_gui->let_game_input_go_through_gui_layer)
 		{
 			return;
 		}
 
 		big::g_hooking->get_original<hook_PostInputEvent>()(a1, a2, a3, a4);
+	}
+
+	static void __fastcall hook_C_UIMenu_ShowPage(void *menu)
+	{
+		native_multiplayer_menu::before_show_page(menu);
+		big::g_hooking->get_original<hook_C_UIMenu_ShowPage>()(menu);
+	}
+
+	static void __fastcall hook_C_SkipTimeCutscene_Play(void *cutscene)
+	{
+		const auto status = kcd2mp::kcse::ui_client().status();
+		if (status.state == kcd2mp::client_state::connected)
+		{
+			(void)kcd2mp::kcse::ui_client().attempt_sleep();
+			return;
+		}
+		big::g_hooking->get_original<hook_C_SkipTimeCutscene_Play>()(
+		    cutscene);
+	}
+
+	static char __fastcall hook_C_FastTravel_StartTravel(void *fast_travel)
+	{
+		if (kcd2mp::kcse::ui_client().status().state
+		    == kcd2mp::client_state::connected)
+			return 0;
+		return big::g_hooking
+		    ->get_original<hook_C_FastTravel_StartTravel>()(fast_travel);
 	}
 
 	enum CryEngine_ELogType
@@ -2501,6 +2535,46 @@ namespace big
 				return;
 			}
 			big::hooking::detour_hook_helper::add<hook_PostInputEvent>("hook_hook_PostInputEvent", ptr);
+		}
+
+		{
+			const auto ptr = kcd2_address::resolved("C_UIMenu_ShowPage");
+			if (!ptr)
+			{
+				LOG(ERROR) << "Failed to find C_UIMenu::ShowPage";
+				return;
+			}
+			big::hooking::detour_hook_helper::add<hook_C_UIMenu_ShowPage>(
+			    "hook_C_UIMenu_ShowPage",
+			    ptr);
+		}
+
+		{
+			const auto ptr =
+			    kcd2_address::resolved("C_SkipTimeCutscene_Play");
+			if (!ptr)
+			{
+				LOG(ERROR) << "Failed to find C_SkipTimeCutscene::Play";
+				return;
+			}
+			big::hooking::detour_hook_helper::add<
+			    hook_C_SkipTimeCutscene_Play>(
+			    "hook_C_SkipTimeCutscene_Play",
+			    ptr);
+		}
+
+		{
+			const auto ptr =
+			    kcd2_address::resolved("C_FastTravel_StartTravel");
+			if (!ptr)
+			{
+				LOG(ERROR) << "Failed to find C_FastTravel::StartTravel";
+				return;
+			}
+			big::hooking::detour_hook_helper::add<
+			    hook_C_FastTravel_StartTravel>(
+			    "hook_C_FastTravel_StartTravel",
+			    ptr);
 		}
 
 		{

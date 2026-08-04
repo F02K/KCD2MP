@@ -5,8 +5,8 @@
 
 namespace kcd2mp::kcse
 {
-	inline constexpr std::uint32_t client_abi_version = 5;
-	inline constexpr std::uint64_t client_build_id = 0x000500006A350E20ULL;
+	inline constexpr std::uint32_t client_abi_version = 6;
+	inline constexpr std::uint64_t client_build_id = 0x000600006A350E20ULL;
 	inline constexpr wchar_t client_module_name[] = L"KCD2MPKCSEClient.dll";
 	inline constexpr char client_query_export[] = "KCD2MP_QueryClient";
 
@@ -58,6 +58,11 @@ namespace kcd2mp::kcse
 		char error[text_capacity]{};
 		char avatar_archetype_id[short_text_capacity]{};
 		char default_avatar_archetype_id[short_text_capacity]{};
+		std::uint32_t sleeping{};
+		std::uint32_t sleeping_players{};
+		std::uint32_t sleeping_players_required{1};
+		std::uint32_t dead{};
+		std::uint32_t respawn_pending{};
 	};
 
 	struct remote_player_view
@@ -89,6 +94,8 @@ namespace kcd2mp::kcse
 		std::uint32_t(__cdecl *send_chat)(const char *text) noexcept{};
 		std::uint32_t(__cdecl *select_avatar)(
 		    const char *archetype_id) noexcept{};
+		std::uint32_t(__cdecl *attempt_sleep)() noexcept{};
+		std::uint32_t(__cdecl *request_respawn)() noexcept{};
 		std::uint32_t(__cdecl *get_status)(
 		    client_status_view *result) noexcept{};
 		std::uint32_t(__cdecl *copy_players)(
@@ -114,6 +121,7 @@ namespace kcd2mp::kcse
 		    && api->build_id == client_build_id
 		    && api->get_runtime_status && api->connect && api->disconnect
 		    && api->send_chat && api->select_avatar && api->get_status
+		    && api->attempt_sleep && api->request_respawn
 		    && api->copy_players && api->copy_chat
 		    && api->copy_avatar_archetypes
 		    && api->set_diagnostic_logging;

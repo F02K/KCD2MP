@@ -43,6 +43,8 @@ namespace kcd2mp::server
 		float time_scale{15.0F};
 		std::uint32_t weather_id{1};
 		std::uint32_t weather_transition_seconds{30};
+		std::uint32_t sleeping_players_required{1};
+		double sleep_wake_hour{6.0};
 		bool disable_human_npcs{};
 		bool disable_animal_npcs{};
 		std::string default_avatar_archetype{
@@ -55,6 +57,9 @@ namespace kcd2mp::server
 		float movement_tolerance_m{2.0F};
 		std::filesystem::path world_directory{"world"};
 		std::filesystem::path starter_profile_path{"starter_profile.toml"};
+		// Optional KCD2 installation root. When configured, the server builds the
+		// level-wide property catalog once and persists it in world_directory.
+		std::filesystem::path property_game_root;
 		starter_profile_template starter_profile{
 		    default_starter_profile_template()};
 		std::optional<initial_spawn_config> initial_spawn;

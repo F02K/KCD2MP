@@ -59,6 +59,8 @@ namespace kcd2mp
 		protocol::MovementMode movement_mode{protocol::MOVEMENT_MODE_IDLE};
 		protocol::AvatarDescriptor avatar;
 		bool has_avatar{};
+		protocol::PlayerActivity activity;
+		bool has_activity{};
 	};
 
 	struct client_status
@@ -75,6 +77,11 @@ namespace kcd2mp
 		std::size_t game_queue_size{};
 		protocol::AvatarPolicy avatar_policy;
 		std::string avatar_archetype_id;
+		bool sleeping{};
+		std::uint32_t sleeping_players{};
+		std::uint32_t sleeping_players_required{1};
+		bool dead{};
+		bool respawn_pending{};
 	};
 
 	struct client_update_rates
@@ -96,6 +103,15 @@ namespace kcd2mp
 		void fail(std::string error);
 		[[nodiscard]] bool send_chat(std::string text);
 		[[nodiscard]] bool select_avatar(std::string archetype_id);
+		[[nodiscard]] bool set_sleeping(bool sleeping);
+		void report_local_death();
+		[[nodiscard]] bool request_respawn();
+		[[nodiscard]] bool begin_local_activity(
+		    protocol::PlayerActivityKind kind,
+		    std::uint64_t station_guid);
+		[[nodiscard]] bool end_local_activity(
+		    std::optional<protocol::TransformState> final_transform = std::nullopt);
+		[[nodiscard]] std::optional<std::string> take_activity_denial();
 		void runtime_epoch_changed();
 		[[nodiscard]] bool reserve_local_avatar_sample(
 		    std::chrono::steady_clock::time_point now =
@@ -155,6 +171,24 @@ namespace kcd2mp
 		{
 			protocol::ClientWorldItemUpdate message;
 		};
+		struct sleep_command
+		{
+			bool sleeping{};
+		};
+		struct death_command
+		{
+		};
+		struct respawn_command
+		{
+		};
+		struct activity_start_command
+		{
+			protocol::ClientActivityStart message;
+		};
+		struct activity_end_command
+		{
+			protocol::ClientActivityEnd message;
+		};
 		using network_command = std::variant<
 		    connect_command,
 		    disconnect_command,
@@ -165,7 +199,12 @@ namespace kcd2mp
 		    profile_command,
 		    avatar_command,
 		    world_object_command,
-		    world_item_command>;
+		    world_item_command,
+		    sleep_command,
+		    death_command,
+		    respawn_command,
+		    activity_start_command,
+		    activity_end_command>;
 
 		struct timed_transform
 		{
@@ -225,6 +264,9 @@ namespace kcd2mp
 		std::optional<protocol::AvatarDescriptor> m_pending_avatar;
 		std::optional<protocol::AvatarDescriptor> m_desired_avatar;
 		std::optional<std::string> m_desired_archetype;
+		std::optional<protocol::PlayerActivity> m_local_activity;
+		std::optional<protocol::ClientActivityStart> m_pending_activity_start;
+		std::optional<std::string> m_activity_denial;
 		bool m_avatar_update_pending{};
 		std::optional<protocol::ServerBootstrap> m_pending_bootstrap;
 		std::optional<client_options> m_pending_connect;
@@ -243,6 +285,7 @@ namespace kcd2mp
 		std::uint32_t m_profile_snapshot_interval_seconds{15};
 		std::uint64_t m_environment_revision{};
 		std::uint64_t m_weather_revision{};
+		std::uint64_t m_sleep_revision{};
 		std::chrono::steady_clock::time_point m_last_environment_applied{};
 
 		mutable std::mutex m_network_mutex;

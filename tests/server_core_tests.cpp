@@ -308,7 +308,9 @@ int main()
 		       "initial_time_of_day_hours = 21.5\n"
 		       "time_scale = 30.0\n"
 		       "weather_id = 8\n"
-		       "weather_transition_seconds = 12\n";
+		       "weather_transition_seconds = 12\n"
+		       "sleeping_players_required = 3\n"
+		       "sleep_wake_hour = 7.25\n";
 		output.close();
 		const auto parsed = load_server_config(path);
 		assert(parsed.disable_human_npcs);
@@ -319,6 +321,8 @@ int main()
 		assert(parsed.time_scale == 30.0F);
 		assert(parsed.weather_id == 8);
 		assert(parsed.weather_transition_seconds == 12);
+		assert(parsed.sleeping_players_required == 3);
+		assert(parsed.sleep_wake_hour == 7.25);
 	}
 
 	temporary_world environment_world;
@@ -371,6 +375,84 @@ int main()
 			        && message.envelope.world_snapshot().environment().weather_id()
 			            == 13;
 		    }));
+	}
+
+	temporary_world sleep_and_respawn_world;
+	{
+		auto config = config_for(sleep_and_respawn_world.path);
+		config.sleeping_players_required = 2;
+		config.sleep_wake_hour = 6.5;
+		server_core core(config);
+		(void)connect_new_player(core, 94, start, 1, nullptr, "Henry");
+		(void)connect_new_player(core, 95, start + 10ms, 2, nullptr, "Hans");
+
+		protocol::Envelope sleep;
+		sleep.mutable_client_sleep_state()->set_sleeping(true);
+		core.on_message(94, sleep, start + 20ms);
+		auto outbound = core.take_outbound();
+		assert(std::ranges::count_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.envelope.has_server_sleep_state()
+			        && message.envelope.server_sleep_state().sleeping_players() == 1
+			        && message.envelope.server_sleep_state().required_players() == 2
+			        && !message.envelope.server_sleep_state().time_skipped();
+		    }) == 2);
+		assert(std::ranges::none_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    { return message.envelope.has_server_environment_updated(); }));
+
+		core.on_message(95, sleep, start + 21ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::count_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.envelope.has_server_environment_updated()
+			        && std::abs(message.envelope.server_environment_updated()
+			                        .state()
+			                        .time_of_day_hours()
+			                    - 6.5)
+			            < 0.000001;
+		    }) == 2);
+		assert(std::ranges::count_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.envelope.has_server_sleep_state()
+			        && message.envelope.server_sleep_state().sleeping_players() == 0
+			        && message.envelope.server_sleep_state().required_players() == 2
+			        && message.envelope.server_sleep_state().time_skipped();
+		    }) == 2);
+
+		protocol::Envelope respawn;
+		respawn.mutable_client_respawn_request();
+		core.on_message(94, respawn, start + 22ms);
+		assert(core.take_outbound().empty());
+
+		protocol::Envelope death;
+		death.mutable_client_death();
+		core.on_message(94, death, start + 23ms);
+		assert(core.take_outbound().empty());
+		core.on_message(94, respawn, start + 24ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::count_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 94
+			        && message.envelope.has_server_respawn()
+			        && message.envelope.server_respawn().spawn().position().x()
+			            == 10.0F
+			        && message.envelope.server_respawn().spawn().position().y()
+			            == 20.0F
+			        && message.envelope.server_respawn().spawn().position().z()
+			            == 30.0F;
+		    }) == 1);
+		core.on_message(94, respawn, start + 25ms);
+		assert(core.take_outbound().empty());
 	}
 	{
 		const auto path = parsed_config_world.path / "split-server.toml";
@@ -459,6 +541,7 @@ int main()
 	temporary_world persistent_world;
 	std::string identity_token;
 	player_id persistent_id{};
+	std::string persistent_uuid;
 	{
 		auto counter = 0;
 		protocol::PlayerProfile enrolled_profile;
@@ -475,6 +558,9 @@ int main()
 		    1,
 		    &enrolled_profile);
 		persistent_id = core.players().front().id;
+		persistent_uuid = core.players().front().persistent_id;
+		assert(is_uuid(persistent_uuid));
+		assert(enrolled_profile.persistent_id() == persistent_uuid);
 		core.on_message(1, client_transform(100), start + 3ms);
 		assert(core.players().front().last_sequence == 100);
 
@@ -518,6 +604,7 @@ int main()
 		assert(!reclaimed.issued_identity_token().empty());
 		assert(reclaimed.profile().revision() == 2);
 		assert(reclaimed.profile().money_subunits() == 7);
+		assert(reclaimed.profile().persistent_id() == persistent_uuid);
 		identity_token = reclaimed.issued_identity_token();
 	}
 
@@ -535,6 +622,7 @@ int main()
 		assert(bootstrap.profile().player_id() == persistent_id);
 		assert(bootstrap.profile().revision() == 2);
 		assert(bootstrap.profile().money_subunits() == 7);
+		assert(bootstrap.profile().persistent_id() == persistent_uuid);
 		restarted.on_message(10, ready(bootstrap), start + 1002ms);
 		(void)restarted.take_outbound();
 		restarted.on_message(
@@ -728,6 +816,8 @@ int main()
 		avatar->set_weapon_class(
 		    protocol::AVATAR_WEAPON_CLASS_ONE_HANDED);
 		avatar->set_weapon_drawn(true);
+		avatar->set_active_weapon_set(
+		    protocol::AVATAR_WEAPON_SET_PRIMARY);
 		auto *item = avatar->add_equipment();
 		item->set_definition_id(
 		    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
@@ -1094,6 +1184,87 @@ int main()
 		    outbound,
 		    41,
 		    protocol::REJECT_REASON_BOOTSTRAP_FAILED));
+	}
+
+	temporary_world activity_world;
+	{
+		server_core core(config_for(activity_world.path));
+		(void)connect_new_player(core, 60, start, 1, nullptr, "Henry");
+		(void)connect_new_player(core, 61, start + 10ms, 2, nullptr, "Hans");
+
+		protocol::Envelope first_start;
+		auto *request = first_start.mutable_client_activity_start();
+		request->set_kind(protocol::PLAYER_ACTIVITY_KIND_BLACKSMITHING);
+		request->set_station_guid(0xAABBCCDDULL);
+		core.on_message(60, first_start, start + 20ms);
+		auto outbound = core.take_outbound();
+		const auto granted = std::ranges::find_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 60
+			        && message.envelope.has_activity_granted();
+		    });
+		assert(granted != outbound.end());
+		const auto session_id =
+		    granted->envelope.activity_granted().activity().session_id();
+		assert(session_id != 0);
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 61
+			        && message.envelope.has_player_activity_updated()
+			        && message.envelope.player_activity_updated()
+			               .activity()
+			               .active();
+		    }));
+
+		core.on_message(61, first_start, start + 21ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().connection == 61);
+		assert(outbound.front().envelope.has_activity_denied());
+
+		protocol::Envelope first_end;
+		first_end.mutable_client_activity_end()->set_session_id(session_id);
+		core.on_message(60, first_end, start + 22ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::count_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.envelope.has_player_activity_updated()
+			        && !message.envelope.player_activity_updated()
+			                .activity()
+			                .active();
+		    }) == 2);
+
+		core.on_message(61, first_start, start + 23ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 61
+			        && message.envelope.has_activity_granted();
+		    }));
+		core.on_transport_disconnected(
+		    61,
+		    true,
+		    "temporary disconnect",
+		    start + 24ms);
+		outbound = core.take_outbound();
+		assert(std::ranges::any_of(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 60
+			        && message.envelope.has_player_activity_updated()
+			        && !message.envelope.player_activity_updated()
+			                .activity()
+			                .active();
+		    }));
 	}
 
 	return 0;

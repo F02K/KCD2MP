@@ -1,5 +1,6 @@
 #include "multiplayer/client.hpp"
 #include "multiplayer/avatar_visual.hpp"
+#include "multiplayer/world_catalog.hpp"
 #include "kcse/join_trace.hpp"
 
 #include <algorithm>
@@ -70,6 +71,8 @@ namespace kcd2mp
 				return "ServerBootstrap";
 			if (envelope.has_server_accepted())
 				return "ServerAccepted";
+			if (envelope.has_server_home_marker_updated())
+				return "ServerHomeMarkerUpdated";
 			if (envelope.has_server_rejected())
 				return "ServerRejected";
 			if (envelope.has_world_snapshot())
@@ -106,6 +109,12 @@ namespace kcd2mp
 				return "WorldItemUpdated";
 			if (envelope.has_server_environment_updated())
 				return "ServerEnvironmentUpdated";
+			if (envelope.has_activity_granted())
+				return "ActivityGranted";
+			if (envelope.has_activity_denied())
+				return "ActivityDenied";
+			if (envelope.has_player_activity_updated())
+				return "PlayerActivityUpdated";
 			if (envelope.has_server_shutdown())
 				return "ServerShutdown";
 			if (envelope.has_pong())
@@ -176,7 +185,8 @@ namespace kcd2mp
 			    "join.runtime-gate.rejected",
 			    "can_start_join=false");
 			std::scoped_lock lock(m_state_mutex);
-			m_status.error = "Join requires a fully loaded native save.";
+			m_status.error =
+			    "KCSE is not ready to connect from the native menu yet.";
 			kcse::join_trace::finish_join(m_status.error);
 			return false;
 		}
@@ -233,6 +243,9 @@ namespace kcd2mp
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
 			m_desired_archetype.reset();
+			m_local_activity.reset();
+			m_pending_activity_start.reset();
+			m_activity_denial.reset();
 			m_pending_bootstrap.reset();
 			m_profile_update_pending = false;
 			m_avatar_update_pending = false;
@@ -243,6 +256,7 @@ namespace kcd2mp
 			m_profile_snapshot_interval_seconds = 15;
 			m_environment_revision = 0;
 			m_weather_revision = 0;
+			m_sleep_revision = 0;
 			m_last_environment_applied = {};
 			m_resume_token.clear();
 			m_pending_connect = std::move(options);
@@ -329,8 +343,120 @@ namespace kcd2mp
 		return true;
 	}
 
+	bool multiplayer_client::set_sleeping(bool sleeping)
+	{
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::connected || m_status.dead
+			    || m_status.sleeping == sleeping)
+				return false;
+			m_status.sleeping = sleeping;
+		}
+		queue_network(sleep_command{sleeping});
+		return true;
+	}
+
+	void multiplayer_client::report_local_death()
+	{
+		bool should_report{};
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state == client_state::connected && !m_status.dead)
+			{
+				m_status.dead = true;
+				m_status.respawn_pending = false;
+				m_status.sleeping = false;
+				should_report = true;
+			}
+		}
+		if (should_report)
+		{
+			queue_network(sleep_command{false});
+			queue_network(death_command{});
+		}
+	}
+
+	bool multiplayer_client::request_respawn()
+	{
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::connected || !m_status.dead
+			    || m_status.respawn_pending)
+				return false;
+			m_status.respawn_pending = true;
+		}
+		queue_network(respawn_command{});
+		return true;
+	}
+
+	bool multiplayer_client::begin_local_activity(
+	    protocol::PlayerActivityKind kind,
+	    std::uint64_t station_guid)
+	{
+		protocol::ClientActivityStart message;
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::connected || m_status.dead
+			    || kind == protocol::PLAYER_ACTIVITY_KIND_NONE
+			    || station_guid == 0 || m_local_activity
+			    || m_pending_activity_start)
+			{
+				return false;
+			}
+			message.set_kind(kind);
+			message.set_station_guid(station_guid);
+			m_pending_activity_start = message;
+			m_activity_denial.reset();
+		}
+		queue_network(activity_start_command{std::move(message)});
+		return true;
+	}
+
+	bool multiplayer_client::end_local_activity(
+	    std::optional<protocol::TransformState> final_transform)
+	{
+		protocol::ClientActivityEnd message;
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::connected || !m_local_activity
+			    || !m_local_activity->active())
+			{
+				return false;
+			}
+			message.set_session_id(m_local_activity->session_id());
+			if (final_transform)
+				*message.mutable_final_transform() = std::move(*final_transform);
+		}
+		queue_network(activity_end_command{std::move(message)});
+		return true;
+	}
+
+	std::optional<std::string> multiplayer_client::take_activity_denial()
+	{
+		std::scoped_lock lock(m_state_mutex);
+		auto result = std::move(m_activity_denial);
+		m_activity_denial.reset();
+		return result;
+	}
+
 	void multiplayer_client::runtime_epoch_changed()
 	{
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_pending_bootstrap
+			    && m_status.state == client_state::loading_sandbox)
+			{
+				m_remote_players.clear();
+				m_local_correction.reset();
+				KCD2MP_JOIN_TRACE(
+				    "join.runtime-epoch.expected",
+				    std::format(
+				        "session_id={} target_level={}",
+				        m_pending_bootstrap->session_id(),
+				        m_pending_bootstrap->level_id()));
+				return;
+			}
+		}
 		m_game_commands.clear();
 		if (m_runtime.sandbox_active())
 			m_runtime.end_sandbox();
@@ -349,9 +475,13 @@ namespace kcd2mp
 			m_deferred_world_items.clear();
 			m_environment_revision = 0;
 			m_weather_revision = 0;
+			m_sleep_revision = 0;
 			m_last_environment_applied = {};
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
+			m_local_activity.reset();
+			m_pending_activity_start.reset();
+			m_activity_denial.reset();
 			m_profile.reset();
 			m_pending_profile.reset();
 			m_local_avatar.reset();
@@ -451,7 +581,9 @@ namespace kcd2mp
 		}
 		if (avatar_update)
 			queue_network(avatar_command{std::move(*avatar_update)});
-		if (connected && current_level != expected_level)
+		if (connected
+		    && canonical_level_id(current_level)
+		        != canonical_level_id(expected_level))
 		{
 			set_state(
 			    client_state::disconnected,
@@ -1120,6 +1252,54 @@ namespace kcd2mp
 							        envelope,
 							        reliability::reliable);
 						    }
+						    else if constexpr (
+						        std::is_same_v<type, sleep_command>)
+						    {
+							    protocol::Envelope envelope;
+							    envelope.mutable_client_sleep_state()->set_sleeping(
+							        typed.sleeping);
+							    (void)send_envelope(
+							        envelope,
+							        reliability::reliable);
+						    }
+						    else if constexpr (
+						        std::is_same_v<type, death_command>)
+						    {
+							    protocol::Envelope envelope;
+							    envelope.mutable_client_death();
+							    (void)send_envelope(
+							        envelope,
+							        reliability::reliable);
+						    }
+			else if constexpr (
+			    std::is_same_v<type, respawn_command>)
+						    {
+							    protocol::Envelope envelope;
+							    envelope.mutable_client_respawn_request();
+							    (void)send_envelope(
+							        envelope,
+				    reliability::reliable);
+			}
+			else if constexpr (
+			    std::is_same_v<type, activity_start_command>)
+			{
+				protocol::Envelope envelope;
+				*envelope.mutable_client_activity_start() =
+				    std::move(typed.message);
+				(void)send_envelope(
+				    envelope,
+				    reliability::reliable);
+			}
+			else if constexpr (
+			    std::is_same_v<type, activity_end_command>)
+			{
+				protocol::Envelope envelope;
+				*envelope.mutable_client_activity_end() =
+				    std::move(typed.message);
+				(void)send_envelope(
+				    envelope,
+				    reliability::reliable);
+			}
 					    },
 					    command);
 				}
@@ -1227,6 +1407,14 @@ namespace kcd2mp
 				m_deferred_world_items.clear();
 				m_environment_revision = 0;
 				m_weather_revision = 0;
+				m_sleep_revision = 0;
+				m_status.sleeping = false;
+				m_status.sleeping_players = 0;
+				m_status.sleeping_players_required = 1;
+				m_status.dead = false;
+				m_status.respawn_pending = false;
+				m_local_activity.reset();
+				m_pending_activity_start.reset();
 				m_last_environment_applied = {};
 				final_error = m_status.error;
 			}
@@ -1261,6 +1449,7 @@ namespace kcd2mp
 				return;
 			}
 			profile.set_player_id(m_profile->player_id());
+			profile.set_persistent_id(m_profile->persistent_id());
 			profile.set_revision(m_profile->revision());
 			profile.set_display_name(m_profile->display_name());
 			profile.set_level_id(m_profile->level_id());
@@ -1371,6 +1560,15 @@ namespace kcd2mp
 		{
 			m_status.avatar_policy =
 			    envelope.server_accepted().avatar_policy();
+			std::optional<protocol::PropertyHomeMarker> home_marker;
+			if (envelope.server_accepted().has_home_marker())
+				home_marker = envelope.server_accepted().home_marker();
+			lock.unlock();
+			const bool marker_accepted =
+			    m_runtime.set_home_marker(home_marker);
+			lock.lock();
+			if (!marker_accepted)
+				m_status.error = "home marker is waiting for the native map runtime";
 			for (const auto &player : envelope.server_accepted().players())
 			{
 				accept_snapshot_player(player, now);
@@ -1381,6 +1579,18 @@ namespace kcd2mp
 			        "players={}",
 			        envelope.server_accepted().players_size()));
 			kcse::join_trace::finish_join("connected");
+		}
+		else if (envelope.has_server_home_marker_updated())
+		{
+			const auto &updated = envelope.server_home_marker_updated();
+			std::optional<protocol::PropertyHomeMarker> marker;
+			if (updated.active() && updated.has_marker())
+				marker = updated.marker();
+			lock.unlock();
+			const bool accepted = m_runtime.set_home_marker(marker);
+			lock.lock();
+			if (!accepted)
+				m_status.error = "home marker is waiting for the native map runtime";
 		}
 		else if (envelope.has_server_bootstrap())
 		{
@@ -1542,6 +1752,100 @@ namespace kcd2mp
 			m_environment_revision = state.revision();
 			m_weather_revision = state.weather_revision();
 			m_last_environment_applied = now;
+		}
+		else if (envelope.has_server_sleep_state())
+		{
+			const auto &state = envelope.server_sleep_state();
+			if (state.revision() <= m_sleep_revision)
+				return;
+			m_sleep_revision = state.revision();
+			m_status.sleeping_players = state.sleeping_players();
+			m_status.sleeping_players_required = state.required_players();
+			if (state.time_skipped())
+				m_status.sleeping = false;
+			const auto notice = state.time_skipped()
+			    ? std::string{"Die Nacht wurde uebersprungen."}
+			    : std::format(
+			          "Schlafende Spieler: {}/{}",
+			          state.sleeping_players(),
+			          state.required_players());
+			lock.unlock();
+			if (state.sleeping_players() != 0 || state.time_skipped())
+				m_runtime.show_multiplayer_notice(notice);
+			lock.lock();
+		}
+		else if (envelope.has_server_respawn())
+		{
+			const auto spawn = envelope.server_respawn().spawn();
+			lock.unlock();
+			const bool applied = m_runtime.respawn_local_player(spawn);
+			lock.lock();
+			if (!applied)
+			{
+				m_status.state = client_state::closing;
+				m_status.error = "could not revive the native local player";
+				queue_network(disconnect_command{});
+				return;
+			}
+			m_status.dead = false;
+			m_status.respawn_pending = false;
+			m_local_correction.reset();
+		}
+		else if (envelope.has_activity_granted())
+		{
+			const auto &activity = envelope.activity_granted().activity();
+			if (!m_pending_activity_start
+			    || m_pending_activity_start->kind() != activity.kind()
+			    || m_pending_activity_start->station_guid()
+			        != activity.station_guid())
+			{
+				m_status.state = client_state::closing;
+				m_status.error = "server granted an unexpected activity session";
+				queue_network(disconnect_command{});
+				return;
+			}
+			m_pending_activity_start.reset();
+			m_local_activity = activity;
+		}
+		else if (envelope.has_activity_denied())
+		{
+			const auto &denied = envelope.activity_denied();
+			if (!m_pending_activity_start
+			    || m_pending_activity_start->kind() != denied.kind()
+			    || m_pending_activity_start->station_guid()
+			        != denied.station_guid())
+			{
+				return;
+			}
+			m_pending_activity_start.reset();
+			m_activity_denial = denied.reason();
+			const auto notice = std::string{"Aktivitaet abgelehnt: "}
+			    + denied.reason();
+			lock.unlock();
+			m_runtime.show_multiplayer_notice(notice);
+			lock.lock();
+		}
+		else if (envelope.has_player_activity_updated())
+		{
+			const auto &message = envelope.player_activity_updated();
+			if (message.player_id() == m_status.local_player_id)
+			{
+				if (message.activity().active())
+					m_local_activity = message.activity();
+				else
+					m_local_activity.reset();
+				m_pending_activity_start.reset();
+				return;
+			}
+			auto &remote = m_remote_players[message.player_id()];
+			remote.rendered.id = message.player_id();
+			remote.rendered.activity = message.activity();
+			remote.rendered.has_activity = message.activity().active();
+			if (message.has_final_transform())
+			{
+				remote.rendered.transform = message.final_transform();
+				remote.rendered.has_transform = true;
+			}
 		}
 		else if (envelope.has_state_correction())
 		{
@@ -1975,6 +2279,12 @@ namespace kcd2mp
 			player.rendered.avatar = snapshot.avatar();
 			player.rendered.has_avatar = true;
 		}
+		player.rendered.has_activity =
+		    snapshot.has_activity() && snapshot.activity().active();
+		if (snapshot.has_activity())
+			player.rendered.activity = snapshot.activity();
+		else
+			player.rendered.activity.Clear();
 		if (!snapshot.transform_valid() || !snapshot.has_transform())
 		{
 			return;

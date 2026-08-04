@@ -20,6 +20,16 @@ enum AvatarWeaponClass {
   AVATAR_WEAPON_CLASS_POLEARM = 3;
   AVATAR_WEAPON_CLASS_BOW = 4;
   AVATAR_WEAPON_CLASS_CROSSBOW = 5;
+  // KCD2 models fists as virtual weapon class 12. It is not equivalent to
+  // having no active weapon set.
+  AVATAR_WEAPON_CLASS_UNARMED = 6;
+}
+
+enum AvatarWeaponSet {
+  AVATAR_WEAPON_SET_NONE = 0;
+  AVATAR_WEAPON_SET_PRIMARY = 1;
+  AVATAR_WEAPON_SET_SECONDARY = 2;
+  AVATAR_WEAPON_SET_OVERSIZED = 3;
 }
 
 enum RejectReason {
@@ -78,11 +88,33 @@ message AvatarDescriptor {
   AvatarStance stance = 4;
   AvatarWeaponClass weapon_class = 5;
   bool weapon_drawn = 6;
+  // The native weapon controller set which is currently drawn. NONE means
+  // holstered; an empty drawn PRIMARY set resolves to UNARMED.
+  AvatarWeaponSet active_weapon_set = 7;
+  // These are observations of the native CombatActor. They are replicated for
+  // remote presentation and diagnostics, never written back onto the owner.
+  bool combat_mode = 8;
+  bool active_in_combat = 9;
 }
 
 message AvatarPolicy {
   string default_archetype_id = 1;
   repeated string allowed_archetype_ids = 2;
+}
+
+enum PlayerActivityKind {
+  PLAYER_ACTIVITY_KIND_NONE = 0;
+  PLAYER_ACTIVITY_KIND_BLACKSMITHING = 1;
+  PLAYER_ACTIVITY_KIND_SHARPENING = 2;
+  PLAYER_ACTIVITY_KIND_ALCHEMY = 3;
+}
+
+message PlayerActivity {
+  PlayerActivityKind kind = 1;
+  uint64 station_guid = 2;
+  uint64 session_id = 3;
+  uint64 revision = 4;
+  bool active = 5;
 }
 
 message PlayerSnapshot {
@@ -93,6 +125,10 @@ message PlayerSnapshot {
   bool transform_valid = 5;
   bool connected = 6;
   AvatarDescriptor avatar = 7;
+  PlayerActivity activity = 8;
+  // Stable public identity assigned once by the server. Unlike player_id this
+  // remains suitable for long-lived RP contracts and property assignments.
+  string persistent_id = 9;
 }
 
 message ClientRuntimeCapabilities {
@@ -177,6 +213,9 @@ message PlayerProfile {
   // Tenths of one Groschen, constrained to 0..9.
   uint32 money_subunits = 12;
   repeated QuickAccessSlot quick_access_slots = 13;
+  // Server-generated UUIDv4. The authentication token remains private and is
+  // deliberately not used as a public RP identity.
+  string persistent_id = 14;
 }
 
 message EnvironmentState {
@@ -311,6 +350,79 @@ message StoredPlayerProfile {
   PlayerProfile profile = 2;
 }
 
+enum PropertyResourceKind {
+  PROPERTY_RESOURCE_KIND_UNSPECIFIED = 0;
+  PROPERTY_RESOURCE_KIND_DOOR = 1;
+  PROPERTY_RESOURCE_KIND_CONTAINER = 2;
+  PROPERTY_RESOURCE_KIND_BED = 3;
+  PROPERTY_RESOURCE_KIND_WORKSTATION = 4;
+}
+
+message PropertyResource {
+  uint64 entity_guid = 1;
+  PropertyResourceKind kind = 2;
+}
+
+message PropertyDefinition {
+  string property_id = 1;
+  string level_id = 2;
+  string anchor_guid = 3;
+  string parent_property_id = 4;
+  string inferred_name = 5;
+  string source_path = 6;
+  float discovery_confidence = 7;
+  repeated PropertyResource resources = 8;
+  // Preferred in-world point for a native Home marker. This is discovered
+  // from the property's SchedulerHub (or its crime-area anchor as fallback).
+  Vec3 marker_position = 9;
+  uint64 marker_entity_guid = 10;
+}
+
+message PropertyCatalog {
+  uint32 schema = 1;
+  string level_id = 2;
+  string content_fingerprint = 3;
+  repeated PropertyDefinition properties = 4;
+}
+
+enum PropertyRole {
+  PROPERTY_ROLE_UNSPECIFIED = 0;
+  PROPERTY_ROLE_OWNER = 1;
+  PROPERTY_ROLE_STEWARD = 2;
+  PROPERTY_ROLE_RESIDENT = 3;
+  PROPERTY_ROLE_EMPLOYEE = 4;
+  PROPERTY_ROLE_GUARD = 5;
+  PROPERTY_ROLE_GUEST = 6;
+}
+
+message PropertyRoleAssignment {
+  string assignment_id = 1;
+  string property_id = 2;
+  string subject_player_id = 3;
+  PropertyRole role = 4;
+  string granted_by_player_id = 5;
+  uint64 created_at_ms = 6;
+  uint64 expires_at_ms = 7;
+  // Delegation provenance. Removing or expiring this assignment also
+  // invalidates every role derived from it.
+  string granted_by_assignment_id = 8;
+}
+
+message PropertyLedger {
+  uint32 schema = 1;
+  uint64 revision = 2;
+  repeated PropertyRoleAssignment assignments = 3;
+}
+
+message PropertyHomeMarker {
+  string property_id = 1;
+  string level_id = 2;
+  string display_name = 3;
+  Vec3 position = 4;
+  uint64 entity_guid = 5;
+  PropertyRole role = 6;
+}
+
 message ServerAccepted {
   uint64 player_id = 1;
   string resume_token = 2;
@@ -322,6 +434,13 @@ message ServerAccepted {
   repeated PlayerSnapshot players = 8;
   uint32 profile_snapshot_interval_seconds = 9;
   AvatarPolicy avatar_policy = 10;
+  PropertyHomeMarker home_marker = 11;
+}
+
+message ServerHomeMarkerUpdated {
+  PropertyHomeMarker marker = 1;
+  bool active = 2;
+  uint64 ledger_revision = 3;
 }
 
 message ServerRejected {
@@ -351,6 +470,53 @@ message WorldSnapshot {
 
 message ServerEnvironmentUpdated {
   EnvironmentState state = 1;
+}
+
+message ClientSleepState {
+  bool sleeping = 1;
+}
+
+message ServerSleepState {
+  uint64 revision = 1;
+  uint32 sleeping_players = 2;
+  uint32 required_players = 3;
+  bool time_skipped = 4;
+}
+
+message ClientDeath {
+}
+
+message ClientRespawnRequest {
+}
+
+message ServerRespawn {
+  TransformState spawn = 1;
+}
+
+message ClientActivityStart {
+  PlayerActivityKind kind = 1;
+  uint64 station_guid = 2;
+}
+
+message ClientActivityEnd {
+  uint64 session_id = 1;
+  TransformState final_transform = 2;
+}
+
+message ActivityGranted {
+  PlayerActivity activity = 1;
+}
+
+message ActivityDenied {
+  PlayerActivityKind kind = 1;
+  uint64 station_guid = 2;
+  string reason = 3;
+}
+
+message PlayerActivityUpdated {
+  uint64 player_id = 1;
+  PlayerActivity activity = 2;
+  TransformState final_transform = 3;
 }
 
 message StateCorrection {
@@ -448,5 +614,16 @@ message Envelope {
     WorldItemAccepted world_item_accepted = 33;
     WorldItemRejected world_item_rejected = 34;
     WorldItemUpdated world_item_updated = 35;
+    ClientSleepState client_sleep_state = 36;
+    ServerSleepState server_sleep_state = 37;
+    ClientDeath client_death = 38;
+    ClientRespawnRequest client_respawn_request = 39;
+    ServerRespawn server_respawn = 40;
+    ClientActivityStart client_activity_start = 41;
+    ClientActivityEnd client_activity_end = 42;
+    ActivityGranted activity_granted = 43;
+    ActivityDenied activity_denied = 44;
+    PlayerActivityUpdated player_activity_updated = 45;
+    ServerHomeMarkerUpdated server_home_marker_updated = 46;
   }
 }

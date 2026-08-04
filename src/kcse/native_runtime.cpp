@@ -1,18 +1,31 @@
 #include "kcse/native_runtime.hpp"
 #include "kcse/join_trace.hpp"
 #include "multiplayer/profile_reconciler.hpp"
+#include "multiplayer/world_catalog.hpp"
 
 #include <REL/Module.h>
 #include <REL/ID.h>
 #include <crysystem/CCryAction.h>
 #include <crysystem/SSystemGlobalEnvironment.h>
+#include <crysystem/ScriptAnyValue.h>
 #include <game/S_GameContext.h>
+#include <entitymodule/C_Actor.h>
+#include <guimodule/C_GUIModule.h>
+#include <guimodule/C_UIBase.h>
+#include <guimodule/C_UIGameOver.h>
+#include <guimodule/C_UIMap.h>
+#include <guimodule/C_UIMenu.h>
 #include <playermodule/C_FastTravel.h>
 #include <playermodule/C_MinigameManager.h>
 #include <playermodule/C_PlayerModule.h>
 #include <playermodule/I_Minigame.h>
 #include <Offsets/vtables/ICVar.h>
 #include <Offsets/vtables/IConsole.h>
+#include <Offsets/RTTI.h>
+#include <xgenaimodule/C_AIObjectManager.h>
+#include <xgenaimodule/I_AIPuppet.h>
+#include <xgenaimodule/C_LinkableObject.h>
+#include <xgenaimodule/C_XGenAIModule.h>
 
 #include <algorithm>
 #include <chrono>
@@ -39,6 +52,154 @@ namespace kcd2mp::kcse
 			const auto text = REL::Module::get().segment(REL::Segment::textx);
 			const auto value = reinterpret_cast<std::uintptr_t>(address);
 			return value >= text.address() && value - text.address() < text.size();
+		}
+
+		wh::guimodule::C_UIMenu *find_main_menu() noexcept
+		{
+			auto *module = wh::guimodule::C_GUIModule::GetInstance();
+			if (!module)
+				return nullptr;
+
+			// Do not use C_GUIModule::GetUIElementsByName() here. That native
+			// property getter constructs a game-owned std::map in caller storage;
+			// moving and destroying that container in the KCSE DLL crosses module
+			// allocator/CRT boundaries and has produced STATUS_HEAP_CORRUPTION at
+			// join time. The module's vector is stable for the duration of this
+			// game-thread callback, and a vtable comparison needs no allocation or
+			// ownership transfer.
+			const auto menu_vtable = REL::ID(1021).address();
+			for (const auto &element : module->m_uiElements)
+			{
+				auto *candidate = element.get();
+				if (!candidate)
+					continue;
+				const auto vtable = *reinterpret_cast<const std::uintptr_t *>(
+				    candidate);
+				if (vtable == menu_vtable)
+				{
+					return reinterpret_cast<wh::guimodule::C_UIMenu *>(
+					    candidate);
+				}
+			}
+			return nullptr;
+		}
+
+		wh::guimodule::C_UIMenu *guarded_find_main_menu() noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return find_main_menu();
+			}
+			__except (KCD2MP_JOIN_SEH_FILTER(
+			    "join.world.FindMainMenu.seh"))
+			{
+				return nullptr;
+			}
+#else
+			return find_main_menu();
+#endif
+		}
+
+		bool hide_game_over() noexcept
+		{
+			auto *module = wh::guimodule::C_GUIModule::GetInstance();
+			if (!module)
+				return false;
+
+			// C_UIGameOver owns the separate black-screen fader used by the
+			// initial death overlay. Closing C_UIMenu only removes the save/load
+			// page; it does not release this fader because the retail flow normally
+			// does that while loading a save. Multiplayer respawn has to invoke the
+			// screen's native Hide path explicitly.
+			const auto game_over_vtable = REL::ID(762).address();
+			const auto game_over_interface_vtable = REL::ID(760).address();
+			for (const auto &element : module->m_uiElements)
+			{
+				auto *candidate = element.get();
+				if (!candidate
+				    || *reinterpret_cast<const std::uintptr_t *>(candidate)
+			        != game_over_vtable)
+					continue;
+
+				auto *game_over = reinterpret_cast<
+				    wh::guimodule::C_UIGameOver *>(candidate);
+				auto *interface = static_cast<
+				    wh::playermodule::I_UIGameOver *>(game_over);
+				auto **vtable = *reinterpret_cast<void ***>(interface);
+				if (!vtable
+				    || reinterpret_cast<std::uintptr_t>(vtable)
+			        != game_over_interface_vtable
+				    || !in_whgame_text(vtable[1]))
+					return false;
+				interface->Hide();
+				return true;
+			}
+			return false;
+		}
+
+		bool guarded_hide_game_over() noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return hide_game_over();
+			}
+			__except (KCD2MP_JOIN_SEH_FILTER(
+			    "join.respawn.HideGameOver.seh"))
+			{
+				return false;
+			}
+#else
+			return hide_game_over();
+#endif
+		}
+
+		bool start_debug_new_game(
+		    wh::guimodule::C_UISaveLoad *save_load,
+		    const char *level_name) noexcept
+		{
+			if (!save_load || !level_name || !*level_name)
+				return false;
+
+			// The third parameter is a CryStringT<char> BY VALUE. WHGame destroys
+			// that parameter in REL::ID(141236) after forwarding its character
+			// buffer (Steam 0x181847140..0x181847154). Declaring it as a pointer
+			// bypasses MSVC's by-value copy and makes the callee release our local
+			// object, which is then released a second time by the wrapper and
+			// corrupts the CryString heap during asynchronous level loading.
+			using start_new_game = void(__fastcall *)(
+			    wh::guimodule::C_UISaveLoad *,
+			    int,
+			    CryStringT<char>,
+			    const char *);
+			const auto address = REL::ID(141236).address();
+			if (!in_whgame_text(reinterpret_cast<const void *>(address)))
+				return false;
+			reinterpret_cast<start_new_game>(address)(
+			    save_load,
+			    1,
+			    CryStringT<char>{},
+			    level_name);
+			return true;
+		}
+
+		bool guarded_start_debug_new_game(
+		    wh::guimodule::C_UISaveLoad *save_load,
+		    const char *level_name) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return start_debug_new_game(save_load, level_name);
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER("join.world.StartNewGame.seh"))
+			{
+				return false;
+			}
+#else
+			return start_debug_new_game(save_load, level_name);
+#endif
 		}
 
 #ifdef _WIN32
@@ -94,6 +255,192 @@ namespace kcd2mp::kcse
 			environment->pConsole->ExecuteString(command, true, false);
 			return true;
 #endif
+		}
+
+		bool execute_script(std::string_view script) noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pScriptSystem || script.empty())
+				return false;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				return environment->pScriptSystem->ExecuteBuffer(
+				    script.data(),
+				    script.size(),
+				    "KCD2MP multiplayer rule",
+				    nullptr);
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#endif
+		}
+
+		std::optional<std::uint64_t> read_home_marker_wuid() noexcept
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pScriptSystem)
+				return std::nullopt;
+			ScriptAnyValue value;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				const auto read = environment->pScriptSystem->GetGlobalAny(
+				    "KCD2MP_HomeMarkerWUID", value);
+				environment->pScriptSystem->SetGlobalToNull(
+				    "KCD2MP_HomeMarkerWUID");
+				if (read && value.type == ANY_THANDLE && value.nHandle != 0)
+					return static_cast<std::uint64_t>(value.nHandle);
+#ifdef _WIN32
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER("home-marker.read-wuid.seh"))
+			{
+				return std::nullopt;
+			}
+#endif
+			return std::nullopt;
+		}
+
+		wh::xgenaimodule::C_LinkableObject *find_linkable_object_by_wuid(
+		    std::uint64_t wuid) noexcept
+		{
+			if (wuid == 0)
+				return nullptr;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				auto *module = wh::xgenaimodule::C_XGenAIModule::GetInstance();
+				auto *manager = module && module->m_pSingletons
+				    ? static_cast<wh::xgenaimodule::C_AIObjectManager *>(
+				          module->m_pSingletons->GetAIObjectManager())
+				    : nullptr;
+				if (!manager)
+					return nullptr;
+				const auto found = manager->m_objects.find(
+				    wh::framework::WUID{wuid});
+				if (found == manager->m_objects.end() || !found->second)
+					return nullptr;
+				return kcd_cast<wh::xgenaimodule::C_LinkableObject *>(
+				    found->second);
+#ifdef _WIN32
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER("home-marker.resolve-linkable.seh"))
+			{
+				return nullptr;
+			}
+#endif
+			return nullptr;
+		}
+
+		wh::xgenaimodule::C_LinkableObject *find_linkable_object(
+		    std::uint32_t entity_id)
+		{
+			if (entity_id == 0)
+				return nullptr;
+
+			// Ask the game's script binding for the exact WUID owned by this
+			// streamed entity.  The old implementation walked every AI object on
+			// every frame and called through each puppet/host vtable.  Besides being
+			// O(all AI objects), that raced object streaming and could dereference a
+			// half-destroyed situation-area object when the player approached home.
+			const auto query = std::format(
+			    "KCD2MP_HomeMarkerWUID=nil; do local e=System.GetEntity({}); "
+			    "if e and XGenAIModule and XGenAIModule.GetMyWUID then "
+			    "local ok,w=pcall(XGenAIModule.GetMyWUID,e); "
+			    "if ok then KCD2MP_HomeMarkerWUID=w end end end",
+			    entity_id);
+			if (!execute_script(query))
+				return nullptr;
+			const auto wuid = read_home_marker_wuid();
+			return wuid ? find_linkable_object_by_wuid(*wuid) : nullptr;
+		}
+
+		struct home_marker_apply_result
+		{
+			wh::guimodule::C_UIMap *map{};
+			std::shared_ptr<wh::guimodule::S_EntityMapMark> mark;
+			std::uint32_t entity_id{};
+			bool filter_was_visible{};
+		};
+
+		bool apply_home_marker_native(
+		    const protocol::PropertyHomeMarker &marker,
+		    home_marker_apply_result &result)
+		{
+			auto *environment = SSystemGlobalEnvironment::GetInstance();
+			if (!environment || !environment->pEntitySystem)
+				return false;
+			result.entity_id = environment->pEntitySystem->FindEntityByGuid(
+			    marker.entity_guid());
+			auto *object = find_linkable_object(result.entity_id);
+			result.map = wh::guimodule::C_UIMap::GetInstance();
+			if (!object || !result.map)
+				return false;
+			result.map->GetOrCreateEntityMark(
+			    result.mark,
+			    wh::guimodule::E_MarkType::Home,
+			    object,
+			    2);
+			if (!result.mark)
+				return false;
+			result.filter_was_visible = result.map->IsPoiFilterVisible(
+			    wh::guimodule::E_MarkType::Home);
+			result.map->RegisterEntityMark(result.mark);
+			if (!result.filter_was_visible)
+				result.map->SetPoiMarkersVisible(
+				    wh::guimodule::E_MarkType::Home, true);
+			return true;
+		}
+
+		bool guarded_apply_home_marker(
+		    const protocol::PropertyHomeMarker &marker,
+		    home_marker_apply_result &result) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return apply_home_marker_native(marker, result);
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER("home-marker.apply.seh"))
+			{
+				return false;
+			}
+#else
+			return apply_home_marker_native(marker, result);
+#endif
+		}
+
+		void remove_home_entity_mark(
+		    wh::guimodule::C_UIMap *map,
+		    std::shared_ptr<wh::guimodule::S_EntityMapMark> &mark)
+		{
+			// Native C_UIMap::RemoveEntityMark, the same release path used by
+			// C_ShowMapMarker::Untrigger.
+			using function = void(__fastcall *)(
+			    wh::guimodule::C_UIMap *,
+			    std::shared_ptr<wh::guimodule::S_EntityMapMark> *);
+			static REL::Relocation<function> native{REL::ID(55367)};
+			native(map, &mark);
+		}
+
+		std::string lua_string(std::string_view value)
+		{
+			std::string result{"\""};
+			result.reserve(value.size() + 2);
+			for (const auto character : value)
+			{
+				if (character == '\\' || character == '\"')
+					result.push_back('\\');
+				result.push_back(character);
+			}
+			result.push_back('\"');
+			return result;
 		}
 
 		bool environment_runtime_available() noexcept
@@ -330,7 +677,7 @@ namespace kcd2mp::kcse
 		std::scoped_lock lock(m_cache_mutex);
 		m_capabilities = runtime_capability_kcse;
 		m_diagnostic =
-		    "Waiting for KCSE PostUpdate and a fully loaded native save.";
+		    "Waiting for KCSE PostUpdate; no savegame is required.";
 	}
 
 	void native_runtime::on_lifecycle(std::uint32_t message_type) noexcept
@@ -339,14 +686,18 @@ namespace kcd2mp::kcse
 		{
 		case KCSE::IMessagingInterface::kMessage_DataLoaded:
 			m_data_loaded.store(true, std::memory_order_release);
+			m_world_lifecycle_seen.store(true, std::memory_order_release);
 			m_epoch_invalidated.store(true, std::memory_order_release);
 			break;
 		case KCSE::IMessagingInterface::kMessage_PreDataLoaded:
 			m_data_loaded.store(false, std::memory_order_release);
+			m_world_pre_data_seen.store(true, std::memory_order_release);
+			m_world_lifecycle_seen.store(true, std::memory_order_release);
 			m_epoch_invalidated.store(true, std::memory_order_release);
 			break;
 		case KCSE::IMessagingInterface::kMessage_LoadGame:
 		case KCSE::IMessagingInterface::kMessage_NewGame:
+			m_world_lifecycle_seen.store(true, std::memory_order_release);
 			m_epoch_invalidated.store(true, std::memory_order_release);
 			break;
 		default:
@@ -364,13 +715,16 @@ namespace kcd2mp::kcse
 		        m_epoch_invalidated.load(std::memory_order_acquire),
 		        m_data_loaded.load(std::memory_order_acquire)));
 		m_frame_seen.store(true, std::memory_order_release);
-		m_entities.process_pending_isolation();
+		m_entities.process_pending_entity_control();
 		m_remote_backend.advance_frame();
 		const auto changed =
 		    m_epoch_invalidated.exchange(false, std::memory_order_acq_rel);
 		if (changed)
 			invalidate_epoch_on_game_thread();
 		refresh_cached_state();
+		refresh_home_marker();
+		poll_local_activity();
+		advance_native_world_start();
 		finish_native_unload_if_complete();
 		KCD2MP_JOIN_TRACE(
 		    "join.kcse.frame.complete",
@@ -378,11 +732,117 @@ namespace kcd2mp::kcse
 		return changed;
 	}
 
+	void native_runtime::on_blacksmithing_started(
+	    std::uint32_t station_entity_id)
+	{
+		if (!sandbox_active() || station_entity_id == 0)
+			return;
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		auto *station = environment && environment->pEntitySystem
+		    ? environment->pEntitySystem->GetEntity(station_entity_id)
+		    : nullptr;
+		if (!station || station->GetGuid() == 0)
+			return;
+		m_pending_activity_start = local_activity_start{
+		    protocol::PLAYER_ACTIVITY_KIND_BLACKSMITHING,
+		    station->GetGuid()};
+		m_native_activity_kind =
+		    protocol::PLAYER_ACTIVITY_KIND_BLACKSMITHING;
+		m_activity_end_pending = false;
+		KCD2MP_JOIN_TRACE(
+		    "activity.blacksmithing.started",
+		    std::format(
+		        "station_entity_id={} station_guid={}",
+		        station_entity_id,
+		        station->GetGuid()));
+	}
+
+	std::optional<local_activity_start>
+	native_runtime::take_local_activity_start()
+	{
+		auto result = std::move(m_pending_activity_start);
+		m_pending_activity_start.reset();
+		return result;
+	}
+
+	bool native_runtime::local_activity_end_pending() const noexcept
+	{
+		return m_activity_end_pending;
+	}
+
+	void native_runtime::acknowledge_local_activity_end() noexcept
+	{
+		m_activity_end_pending = false;
+	}
+
+	void native_runtime::cancel_local_activity()
+	{
+		if (auto *session = find_local_minigame(m_native_activity_kind))
+			session->RequestExit();
+		m_pending_activity_start.reset();
+		m_native_activity_kind = protocol::PLAYER_ACTIVITY_KIND_NONE;
+		m_activity_end_pending = false;
+	}
+
+	wh::playermodule::I_Minigame *native_runtime::find_local_minigame(
+	    protocol::PlayerActivityKind kind) const
+	{
+		wh::playermodule::E_MinigameType::Type native_kind{};
+		switch (kind)
+		{
+		case protocol::PLAYER_ACTIVITY_KIND_BLACKSMITHING:
+			native_kind = wh::playermodule::E_MinigameType::Blacksmithing;
+			break;
+		case protocol::PLAYER_ACTIVITY_KIND_SHARPENING:
+			native_kind = wh::playermodule::E_MinigameType::Sharpening;
+			break;
+		case protocol::PLAYER_ACTIVITY_KIND_ALCHEMY:
+			native_kind = wh::playermodule::E_MinigameType::Alchemy;
+			break;
+		case protocol::PLAYER_ACTIVITY_KIND_NONE:
+		default:
+			return nullptr;
+		}
+		auto *context = wh::game::S_GameContext::GetInstance();
+		auto player = m_entities.player();
+		if (!context || !context->m_pPlayerModule
+		    || !context->m_pPlayerModule->m_pMinigameManager
+		    || !player.entity)
+		{
+			return nullptr;
+		}
+		return context->m_pPlayerModule->m_pMinigameManager
+		    ->FindOrCreateSession(
+		        player.entity->GetId(),
+		        native_kind,
+		        false,
+		        false);
+	}
+
+	void native_runtime::poll_local_activity()
+	{
+		if (m_native_activity_kind == protocol::PLAYER_ACTIVITY_KIND_NONE
+		    || m_activity_end_pending)
+		{
+			return;
+		}
+		auto *session = find_local_minigame(m_native_activity_kind);
+		if (session && !session->IsFinished())
+			return;
+		KCD2MP_JOIN_TRACE(
+		    "activity.local.finished",
+		    std::format(
+		        "kind={}",
+		        static_cast<int>(m_native_activity_kind)));
+		m_native_activity_kind = protocol::PLAYER_ACTIVITY_KIND_NONE;
+		m_activity_end_pending = true;
+	}
+
 	runtime_descriptor native_runtime::descriptor() const
 	{
 		std::scoped_lock lock(m_cache_mutex);
 		return {
-		    m_capabilities,
+		    m_capabilities | known_client_runtime_capabilities,
 		    m_kcse.GetKCSEVersion(),
 		    m_kcse.GetGameVersion(),
 		    m_kcse.GetReleaseIndex(),
@@ -404,21 +864,30 @@ namespace kcd2mp::kcse
 			    false,
 			    "Multiplayer runtime is idle; click Connect to initialize it."};
 		}
-		const auto missing =
-		    required_client_runtime_capabilities & ~m_capabilities;
-		if (missing == 0)
+		const auto address_library_ready = !m_address_library.empty()
+		    && !m_address_library_distribution.empty()
+		    && m_address_library_format != 0
+		    && m_address_library_entries != 0
+		    && m_address_library_sha256.size() == 64;
+		if (m_frame_seen.load(std::memory_order_acquire)
+		    && address_library_ready && !m_unload_pending)
 			return {true, false, {}};
-		return {false, !m_probe_failed, m_diagnostic};
+		return {
+		    false,
+		    true,
+		    "Waiting for the KCSE game-thread and Address Library bootstrap."};
 	}
 
 	bool native_runtime::can_start_join() const
 	{
 		std::scoped_lock lock(m_cache_mutex);
-		return m_data_loaded.load(std::memory_order_acquire)
-		    && m_frame_seen.load(std::memory_order_acquire)
-		    && m_local_transform.has_value()
-		    && !m_level_id.empty()
-		    && m_transition_safe;
+		return m_frame_seen.load(std::memory_order_acquire)
+		    && !m_address_library.empty()
+		    && !m_address_library_distribution.empty()
+		    && m_address_library_format != 0
+		    && m_address_library_entries != 0
+		    && m_address_library_sha256.size() == 64
+		    && !m_unload_pending;
 	}
 
 	bool native_runtime::prepare_multiplayer()
@@ -433,10 +902,8 @@ namespace kcd2mp::kcse
 		if (!can_start_join())
 		{
 			std::scoped_lock lock(m_cache_mutex);
-			m_diagnostic = !m_transition_blocker.empty()
-			    ? m_transition_blocker
-			    : "Load a native save and wait for the local player before "
-			      "connecting.";
+			m_diagnostic =
+			    "KCSE has not reached a safe game-thread frame yet.";
 			KCD2MP_JOIN_TRACE(
 			    "join.runtime.prepare.rejected",
 			    m_diagnostic);
@@ -445,8 +912,9 @@ namespace kcd2mp::kcse
 		m_multiplayer_requested.store(true, std::memory_order_release);
 		{
 			std::scoped_lock lock(m_cache_mutex);
-			m_diagnostic =
-			    "Initializing native multiplayer runtime capabilities.";
+			m_diagnostic = m_local_transform
+			    ? "Initializing native multiplayer runtime capabilities."
+			    : "Connecting before world creation; awaiting server bootstrap.";
 		}
 		KCD2MP_JOIN_TRACE(
 		    "join.runtime.prepare.requested",
@@ -461,6 +929,8 @@ namespace kcd2mp::kcse
 		if (!m_multiplayer_requested.exchange(false, std::memory_order_acq_rel)
 		    && !m_preparation_active)
 			return;
+		remove_home_marker();
+		m_home_marker.reset();
 		m_remote_avatars.clear();
 		m_remote_backend.clear();
 		m_remote_backend.reset_active_probe();
@@ -471,9 +941,18 @@ namespace kcd2mp::kcse
 		m_probe_complete = false;
 		m_probe_failed = false;
 		m_probe_error.clear();
+		m_expected_epoch_transition.store(false, std::memory_order_release);
+		m_world_lifecycle_seen.store(false, std::memory_order_release);
+		m_world_pre_data_seen.store(false, std::memory_order_release);
 		m_transition_safe = false;
 		m_transition_blocker.clear();
 		std::scoped_lock lock(m_cache_mutex);
+		m_world_start_bootstrap.reset();
+		m_world_start_level_id.clear();
+		m_world_start_level_name.clear();
+		m_world_start_requires_lifecycle = false;
+		m_world_start_deadline = {};
+		m_world_start_stage = world_start_stage::idle;
 		if (!m_sandbox_active && !m_unload_pending)
 		{
 			m_sandbox_progress = {};
@@ -483,6 +962,67 @@ namespace kcd2mp::kcse
 	}
 
 	sandbox_start_result native_runtime::begin_sandbox(
+	    const protocol::ServerBootstrap &bootstrap)
+	{
+		const auto target = find_native_world_level(bootstrap.level_id());
+		if (!target)
+		{
+			return {
+			    false,
+			    "Server level '" + bootstrap.level_id()
+			        + "' is not registered in the native KCD2 level catalog."};
+		}
+
+		bool loaded_target{};
+		bool has_player{};
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			loaded_target = m_data_loaded.load(std::memory_order_acquire)
+			    && m_level_id == target->id;
+			has_player = m_local_transform.has_value();
+		}
+		if (loaded_target && has_player)
+		{
+			std::uint64_t capabilities{};
+			{
+				std::scoped_lock lock(m_cache_mutex);
+				capabilities = m_capabilities;
+			}
+			if ((required_client_runtime_capabilities & ~capabilities) == 0)
+				return activate_loaded_sandbox(bootstrap);
+
+			std::scoped_lock lock(m_cache_mutex);
+			m_world_start_bootstrap = bootstrap;
+			m_world_start_level_id = std::string(target->id);
+			m_world_start_level_name = std::string(target->name);
+			m_world_start_requires_lifecycle = false;
+			m_world_start_deadline = std::chrono::steady_clock::now()
+			    + std::chrono::seconds(
+			        std::clamp(bootstrap.timeout_seconds(), 30U, 600U));
+			m_world_start_stage = world_start_stage::probing_runtime;
+			m_sandbox_progress = {};
+			m_sandbox_progress.phase = sandbox_phase::loading;
+			m_diagnostic =
+			    "Loaded target world is waiting for native capability validation.";
+			KCD2MP_JOIN_TRACE(
+			    "join.world.loaded-probe",
+			    std::format(
+			        "target_level={} missing=0x{:X}",
+			        target->id,
+			        required_client_runtime_capabilities & ~capabilities));
+			return {true, {}};
+		}
+		if (has_player)
+		{
+			return {
+			    false,
+			    "A different native level is already active. Return to the title "
+			    "screen before joining; synchronized live travel is not enabled yet."};
+		}
+		return begin_native_world_start(bootstrap);
+	}
+
+	sandbox_start_result native_runtime::activate_loaded_sandbox(
 	    const protocol::ServerBootstrap &bootstrap)
 	{
 		KCD2MP_JOIN_TRACE(
@@ -511,7 +1051,8 @@ namespace kcd2mp::kcse
 			    "local transform is nil");
 			return {false, "Native player is not ready."};
 		}
-		if (bootstrap.level_id().empty() || bootstrap.level_id() != m_level_id)
+		const auto requested_level = canonical_level_id(bootstrap.level_id());
+		if (requested_level.empty() || requested_level != m_level_id)
 		{
 			KCD2MP_JOIN_TRACE(
 			    "join.sandbox.native.rejected",
@@ -519,7 +1060,7 @@ namespace kcd2mp::kcse
 			        "level mismatch requested=\"{}\" current=\"{}\"",
 			        bootstrap.level_id(),
 			        m_level_id));
-			return {false, "Loaded native save does not match the server level."};
+			return {false, "Loaded native world does not match the server level."};
 		}
 		if ((m_capabilities & runtime_capability_profile_apply) == 0
 		    || !bootstrap.has_profile())
@@ -722,8 +1263,18 @@ namespace kcd2mp::kcse
 			}
 		}
 		m_sandbox_active = true;
+		(void)execute_script(
+		    "if player and player.EnableFastTravel then "
+		    "player:EnableFastTravel(false) end");
 		m_sandbox_progress.phase = sandbox_phase::ready;
 		m_sandbox_progress.initial_spawn = spawn;
+		m_world_start_bootstrap.reset();
+		m_world_start_level_id.clear();
+		m_world_start_level_name.clear();
+		m_world_start_requires_lifecycle = false;
+		m_world_start_deadline = {};
+		m_world_start_stage = world_start_stage::idle;
+		m_expected_epoch_transition.store(false, std::memory_order_release);
 		KCD2MP_JOIN_TRACE(
 		    "join.sandbox.native.ready",
 		    std::format(
@@ -732,6 +1283,196 @@ namespace kcd2mp::kcse
 		        spawn.position().y(),
 		        spawn.position().z()));
 		return {true, {}};
+	}
+
+	sandbox_start_result native_runtime::begin_native_world_start(
+	    const protocol::ServerBootstrap &bootstrap)
+	{
+		const auto target = find_native_world_level(bootstrap.level_id());
+		if (!target)
+			return {false, "Native world target is not registered."};
+		if (!bootstrap.has_profile())
+			return {false, "Server bootstrap has no authoritative profile."};
+
+		auto *menu = guarded_find_main_menu();
+		if (!menu || menu->m_saveLoad.m_flag72 != 0)
+		{
+			return {
+			    false,
+			    "The native main-menu New Game controller is not ready."};
+		}
+
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			if (m_world_start_bootstrap)
+				return {false, "A native world start is already in progress."};
+			m_world_start_bootstrap = bootstrap;
+			m_world_start_level_id = std::string(target->id);
+			m_world_start_level_name = std::string(target->name);
+			m_world_start_requires_lifecycle = true;
+			const auto timeout = std::chrono::seconds(
+			    std::clamp(bootstrap.timeout_seconds(), 30U, 600U));
+			m_world_start_deadline = std::chrono::steady_clock::now() + timeout;
+			m_sandbox_progress = {};
+			m_sandbox_progress.phase = sandbox_phase::loading;
+			m_world_start_stage = world_start_stage::invoking_new_game;
+			m_diagnostic = "Invoking native New Game for level "
+			    + m_world_start_level_name + ".";
+		}
+		m_expected_epoch_transition.store(true, std::memory_order_release);
+		m_world_lifecycle_seen.store(false, std::memory_order_release);
+		m_world_pre_data_seen.store(false, std::memory_order_release);
+		KCD2MP_JOIN_TRACE(
+		    "join.world.new-game.invoke",
+		    std::format(
+		        "level_id={} level_name={} menu={} save_load={} rel_id=141236",
+		        target->id,
+		        target->name,
+		        static_cast<void *>(menu),
+		        static_cast<void *>(&menu->m_saveLoad)));
+		if (!guarded_start_debug_new_game(
+		        &menu->m_saveLoad,
+		        m_world_start_level_name.c_str()))
+		{
+			fail_native_world_start(
+			    "The native Warhorse New Game entry rejected the request.");
+			return {false, poll_sandbox().error};
+		}
+		set_world_start_stage(
+		    world_start_stage::waiting_for_lifecycle,
+		    "Native New Game accepted; waiting for lifecycle events.");
+		return {true, {}};
+	}
+
+	void native_runtime::advance_native_world_start()
+	{
+		std::optional<protocol::ServerBootstrap> bootstrap;
+		world_start_stage stage{};
+		bool requires_lifecycle{};
+		std::string target_id;
+		std::chrono::steady_clock::time_point deadline;
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			if (!m_world_start_bootstrap)
+				return;
+			bootstrap = m_world_start_bootstrap;
+			stage = m_world_start_stage;
+			requires_lifecycle = m_world_start_requires_lifecycle;
+			target_id = m_world_start_level_id;
+			deadline = m_world_start_deadline;
+		}
+		if (stage == world_start_stage::failed
+		    || stage == world_start_stage::activating)
+			return;
+		if (std::chrono::steady_clock::now() >= deadline)
+		{
+			fail_native_world_start(
+			    "Native world start timed out before player readiness.");
+			return;
+		}
+
+		if (requires_lifecycle
+		    && !m_world_lifecycle_seen.load(std::memory_order_acquire))
+		{
+			set_world_start_stage(
+			    world_start_stage::waiting_for_lifecycle,
+			    "Waiting for native NewGame/PreDataLoaded lifecycle events.");
+			return;
+		}
+		if (!m_data_loaded.load(std::memory_order_acquire))
+		{
+			set_world_start_stage(
+			    world_start_stage::waiting_for_data,
+			    "Native loading is active; waiting for DataLoaded.");
+			return;
+		}
+
+		std::uint64_t capabilities{};
+		std::string current_level;
+		bool player_ready{};
+		bool transition_safe{};
+		bool probe_failed{};
+		std::string probe_error;
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			capabilities = m_capabilities;
+			current_level = m_level_id;
+			player_ready = m_local_transform.has_value();
+			transition_safe = m_transition_safe;
+			probe_failed = m_probe_failed.load(std::memory_order_acquire);
+			probe_error = m_probe_error;
+		}
+		if (current_level != target_id)
+		{
+			set_world_start_stage(
+			    world_start_stage::waiting_for_level,
+			    "DataLoaded fired; waiting for wh_sys_BaseLevelId="
+			        + target_id + ".");
+			return;
+		}
+		if (!player_ready || !transition_safe)
+		{
+			set_world_start_stage(
+			    world_start_stage::waiting_for_player,
+			    "Target level is loaded; waiting for native player modules.");
+			return;
+		}
+		if (probe_failed)
+		{
+			fail_native_world_start(
+			    probe_error.empty()
+			        ? "Native multiplayer readiness probe failed after New Game."
+			        : probe_error);
+			return;
+		}
+		const auto missing =
+		    required_client_runtime_capabilities & ~capabilities;
+		if (missing != 0)
+		{
+			set_world_start_stage(
+			    world_start_stage::probing_runtime,
+			    std::format(
+			        "Player is ready; validating native capabilities (missing 0x{:X}).",
+			        missing));
+			return;
+		}
+
+		set_world_start_stage(
+		    world_start_stage::activating,
+		    "Native world is ready; applying authoritative server state.");
+		const auto result = activate_loaded_sandbox(*bootstrap);
+		if (!result.started)
+			fail_native_world_start(result.error);
+	}
+
+	void native_runtime::set_world_start_stage(
+	    world_start_stage stage,
+	    std::string diagnostic)
+	{
+		bool changed{};
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			if (!m_world_start_bootstrap || m_world_start_stage == stage)
+				return;
+			m_world_start_stage = stage;
+			m_diagnostic = diagnostic;
+			changed = true;
+		}
+		if (changed)
+			KCD2MP_JOIN_TRACE("join.world.stage", diagnostic);
+	}
+
+	void native_runtime::fail_native_world_start(std::string error)
+	{
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_world_start_stage = world_start_stage::failed;
+			m_sandbox_progress.phase = sandbox_phase::failed;
+			m_sandbox_progress.error = error;
+			m_diagnostic = error;
+		}
+		m_expected_epoch_transition.store(false, std::memory_order_release);
+		KCD2MP_JOIN_TRACE("join.world.failed", error);
 	}
 
 	sandbox_poll_result native_runtime::poll_sandbox()
@@ -748,18 +1489,37 @@ namespace kcd2mp::kcse
 
 	void native_runtime::end_sandbox()
 	{
+		remove_home_marker();
+		m_home_marker.reset();
+		m_pending_activity_start.reset();
+		m_native_activity_kind = protocol::PLAYER_ACTIVITY_KIND_NONE;
+		m_activity_end_pending = false;
+		bool should_unload{};
 		{
 			std::scoped_lock lock(m_cache_mutex);
-			if (!m_sandbox_active || m_unload_pending)
+			if ((!m_sandbox_active && !m_world_start_bootstrap)
+			    || m_unload_pending)
 				return;
+			should_unload = true;
 			m_sandbox_progress.phase = sandbox_phase::unloading;
 			m_sandbox_progress.error.clear();
+			m_world_start_bootstrap.reset();
+			m_world_start_level_id.clear();
+			m_world_start_level_name.clear();
+			m_world_start_requires_lifecycle = false;
+			m_world_start_deadline = {};
+			m_world_start_stage = world_start_stage::idle;
 		}
+		m_expected_epoch_transition.store(false, std::memory_order_release);
+		(void)execute_script(
+		    "if player and player.EnableFastTravel then "
+		    "player:EnableFastTravel(true) end");
 		m_remote_avatars.clear();
 		m_remote_backend.clear();
 		m_entities.restore_world();
 		m_profiles.reset();
-		begin_native_unload("Native sandbox world unload is in progress.");
+		if (should_unload)
+			begin_native_unload("Native sandbox world unload is in progress.");
 	}
 
 	std::string native_runtime::current_level_id() const
@@ -899,6 +1659,82 @@ namespace kcd2mp::kcse
 		return true;
 	}
 
+	bool native_runtime::set_home_marker(
+	    const std::optional<protocol::PropertyHomeMarker> &marker)
+	{
+		if (marker
+		    && (marker->property_id().empty() || marker->level_id().empty()
+		        || !marker->has_position() || marker->entity_guid() == 0
+		        || !std::isfinite(marker->position().x())
+		        || !std::isfinite(marker->position().y())
+		        || !std::isfinite(marker->position().z())))
+			return false;
+		if (m_home_marker && marker
+		    && m_home_marker->SerializeAsString() == marker->SerializeAsString())
+			return true;
+		remove_home_marker();
+		m_home_marker = marker;
+		refresh_home_marker();
+		return true;
+	}
+
+	void native_runtime::refresh_home_marker()
+	{
+		if (!m_home_marker || m_native_home_mark || !sandbox_active()
+		    || canonical_level_id(current_level_id())
+		        != canonical_level_id(m_home_marker->level_id()))
+			return;
+		const auto now = std::chrono::steady_clock::now();
+		if (now < m_next_home_marker_attempt)
+			return;
+		// A property's anchor may legitimately not be streamed yet.  Retrying
+		// once per frame turns that normal state into a full-time Lua/entity/AI
+		// lookup and was the source of the severe frame-rate drop.
+		m_next_home_marker_attempt = now + std::chrono::seconds{1};
+		home_marker_apply_result result;
+		if (!guarded_apply_home_marker(*m_home_marker, result))
+			return;
+		m_home_filter_was_visible = result.filter_was_visible;
+		m_native_home_map = result.map;
+		m_native_home_mark = std::move(result.mark);
+		KCD2MP_JOIN_TRACE(
+		    "property.home-marker.applied",
+		    std::format(
+		        "property_id=\"{}\" entity_guid={} entity_id={} name=\"{}\"",
+		        m_home_marker->property_id(),
+		        m_home_marker->entity_guid(),
+		        result.entity_id,
+		        m_home_marker->display_name()));
+	}
+
+	void native_runtime::remove_home_marker()
+	{
+		m_next_home_marker_attempt = {};
+		if (!m_native_home_mark)
+			return;
+#ifdef _WIN32
+		__try
+		{
+#endif
+			auto *current = wh::guimodule::C_UIMap::GetInstance();
+			if (current && current == m_native_home_map)
+			{
+				remove_home_entity_mark(current, m_native_home_mark);
+				if (!m_home_filter_was_visible)
+					current->SetPoiMarkersVisible(
+					    wh::guimodule::E_MarkType::Home, false);
+			}
+#ifdef _WIN32
+		}
+		__except(KCD2MP_JOIN_SEH_FILTER("home-marker.remove.seh"))
+		{
+		}
+#endif
+		m_native_home_mark.reset();
+		m_native_home_map = nullptr;
+		m_home_filter_was_visible = false;
+	}
+
 	bool native_runtime::apply_authoritative_profile(
 	    const protocol::PlayerProfile &profile)
 	{
@@ -914,6 +1750,90 @@ namespace kcd2mp::kcse
 		m_profiles.set_wire_identity(profile);
 		(void)execute_console_command("cheat_own_stolen_items");
 		return true;
+	}
+
+	bool native_runtime::respawn_local_player(
+	    const protocol::TransformState &spawn)
+	{
+		if (!is_finite_transform(spawn))
+			return false;
+		KCD2MP_JOIN_TRACE(
+		    "join.respawn.native.begin",
+		    std::format(
+		        "spawn=({:.3f},{:.3f},{:.3f})",
+		        spawn.position().x(),
+		        spawn.position().y(),
+		        spawn.position().z()));
+		if (!execute_script(
+		        "if player and player.actor then "
+		        "player.actor:Revive(false); "
+		        "player.actor:SetHealth(player.actor:GetMaxHealth()) end"))
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = "Native player revive script failed.";
+			return false;
+		}
+		const auto corrected = apply_local_correction(spawn);
+		const auto game_over_hidden = guarded_hide_game_over();
+		KCD2MP_JOIN_TRACE(
+		    "join.respawn.native.complete",
+		    std::format(
+		        "corrected={} game_over_hidden={}",
+		        corrected,
+		        game_over_hidden));
+		if (!game_over_hidden)
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic =
+			    "Native player revived, but the game-over fader could not be hidden.";
+		}
+		return corrected;
+	}
+
+	bool native_runtime::local_player_dead() const
+	{
+		const auto *actor = m_entities.player().actor;
+		return actor && actor->m_health <= 0.0F;
+	}
+
+	bool native_runtime::local_player_laying() const
+	{
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		if (!environment || !environment->pScriptSystem)
+			return false;
+		constexpr std::string_view query =
+		    "KCD2MP_PlayerLaying = player and player.IsLaying "
+		    "and player:IsLaying() or false";
+		if (!execute_script(query))
+			return false;
+		bool result{};
+		ScriptAnyValue value;
+#ifdef _WIN32
+		__try
+		{
+#endif
+			if (environment->pScriptSystem->GetGlobalAny(
+			    "KCD2MP_PlayerLaying",
+			    value))
+				(void)value.CopyTo(result);
+			environment->pScriptSystem->SetGlobalToNull(
+			    "KCD2MP_PlayerLaying");
+#ifdef _WIN32
+		}
+		__except(EXCEPTION_EXECUTE_HANDLER)
+		{
+			return false;
+		}
+#endif
+		return result;
+	}
+
+	void native_runtime::show_multiplayer_notice(
+	    std::string_view message)
+	{
+		const auto script = "if Game and Game.SendInfoText then "
+		    "Game.SendInfoText(" + lua_string(message) + ", false) end";
+		(void)execute_script(script);
 	}
 
 	std::optional<protocol::TransformState>
@@ -984,13 +1904,20 @@ namespace kcd2mp::kcse
 
 	void native_runtime::invalidate_epoch_on_game_thread()
 	{
-		m_multiplayer_requested.store(false, std::memory_order_release);
+		remove_home_marker();
+		m_pending_activity_start.reset();
+		m_native_activity_kind = protocol::PLAYER_ACTIVITY_KIND_NONE;
+		m_activity_end_pending = false;
+		const auto expected_transition =
+		    m_expected_epoch_transition.load(std::memory_order_acquire);
+		if (!expected_transition)
+			m_multiplayer_requested.store(false, std::memory_order_release);
 		m_remote_avatars.clear();
 		m_remote_backend.clear();
 		m_entities.restore_world();
 		m_profiles.reset();
 		m_remote_backend.reset_active_probe();
-		if (!m_unload_pending)
+		if (!m_unload_pending && !expected_transition)
 			restore_save_load();
 		m_epoch.fetch_add(1, std::memory_order_acq_rel);
 		std::scoped_lock lock(m_cache_mutex);
@@ -1003,10 +1930,22 @@ namespace kcd2mp::kcse
 		m_preparation_active = false;
 		m_preparation_frames = 0;
 		m_probe_error.clear();
-		if (!m_unload_pending)
+		if (!m_unload_pending && !expected_transition)
 		{
 			m_sandbox_active = false;
 			m_sandbox_progress = {};
+		}
+		if (expected_transition)
+		{
+			m_sandbox_progress.phase = sandbox_phase::loading;
+			m_diagnostic =
+			    "Expected native world transition invalidated the old runtime epoch.";
+			KCD2MP_JOIN_TRACE(
+			    "join.world.epoch.expected",
+			    std::format(
+			        "new_epoch={} target_level={}",
+			        m_epoch.load(std::memory_order_acquire),
+			        m_world_start_level_id));
 		}
 	}
 
@@ -1124,7 +2063,9 @@ namespace kcd2mp::kcse
 		        m_probe_complete,
 		        m_probe_failed.load(std::memory_order_acquire),
 		        m_preparation_frames));
-		if (multiplayer_requested && !m_preparation_active)
+		if (multiplayer_requested
+		    && (capabilities & runtime_capability_local_player) != 0
+		    && !m_preparation_active)
 		{
 			m_remote_backend.reset_active_probe();
 			m_probe_transform_verified = false;
@@ -1275,9 +2216,10 @@ namespace kcd2mp::kcse
 		        m_level_id));
 		if ((capabilities & runtime_capability_local_player) == 0)
 		{
-			m_diagnostic =
-			    "Load a native save; CryAction/GameContext has no client "
-			    "Actor yet.";
+			if (!m_world_start_bootstrap)
+				m_diagnostic =
+				    "No native player is loaded; the server bootstrap can start "
+				    "a save-free world.";
 		}
 		else if (!multiplayer_requested)
 		{

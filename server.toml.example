@@ -4,7 +4,8 @@ port = 27020
 name = "KCD2MP Server"
 password = ""
 max_players = 8
-level_id = "replace-with-the-level-id-shown-by-the-client"
+# 2 = trosecko, 3 = kutnohorsko, 4 = klaster
+level_id = "3"
 required_content_hash = ""
 tick_rate = 30
 snapshot_rate = 20
@@ -22,6 +23,13 @@ movement_tolerance_m = 2.0
 world_directory = "world"
 starter_profile = "starter_profile.toml"
 
+[property]
+# Optional KCD2 installation directory. On the first start of a world the
+# server scans Data/Levels/<configured level>/level.pak and writes a reusable
+# property_catalog.pb. Leave empty on a dedicated host and copy that generated
+# file into its world_directory instead.
+game_root = ""
+
 [environment]
 # Server-authoritative normal day cycle. The default ratio is 15 game seconds
 # per real second, matching the retail game's normal time speed.
@@ -29,6 +37,10 @@ initial_time_of_day_hours = 8.0
 time_scale = 15.0
 weather_id = 1
 weather_transition_seconds = 30
+# Number of connected players that must be in a bed before the shared clock
+# advances. The effective requirement is capped at the online player count.
+sleeping_players_required = 1
+sleep_wake_hour = 6.0
 
 # Optional. If omitted, the first authenticated client initializes the spawn.
 # [server.initial_spawn]

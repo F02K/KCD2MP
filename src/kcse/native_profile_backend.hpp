@@ -10,7 +10,6 @@
 namespace wh::entitymodule
 {
 	class C_Inventory;
-	class C_Item;
 	class C_EquipmentManager;
 }
 
@@ -88,10 +87,6 @@ namespace kcd2mp::kcse
 
 		[[nodiscard]] std::optional<native_state> state(
 		    std::string &error) const;
-		[[nodiscard]] wh::entitymodule::C_Item *find_item(
-		    wh::entitymodule::C_Inventory &inventory,
-		    std::string_view instance_id) const;
-
 		native_entity_backend &m_entities;
 		std::optional<protocol::PlayerProfile> m_wire_identity;
 		std::optional<protocol::AvatarDescriptor> m_avatar_state;

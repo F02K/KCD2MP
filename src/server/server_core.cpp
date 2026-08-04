@@ -1,5 +1,7 @@
 #include "server/server_core.hpp"
 
+#include "property/catalog.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -47,6 +49,14 @@ namespace kcd2mp::server
 			validate_server_config(config);
 			return config;
 		}
+
+		std::uint64_t unix_milliseconds()
+		{
+			return static_cast<std::uint64_t>(
+			    std::chrono::duration_cast<std::chrono::milliseconds>(
+			        std::chrono::system_clock::now().time_since_epoch())
+			        .count());
+		}
 	}
 
 	server_core::server_core(
@@ -64,6 +74,31 @@ namespace kcd2mp::server
 	    m_environment_weather_transition_ms(
 	        m_config.weather_transition_seconds * 1000U)
 	{
+		const auto catalog_needs_markers = std::ranges::none_of(
+		    m_store.property_catalog().properties(),
+		    [](const protocol::PropertyDefinition &definition)
+		    {
+			    return definition.has_marker_position()
+			        && definition.marker_entity_guid() != 0;
+		    });
+		if ((m_store.property_catalog().properties().empty()
+		        || catalog_needs_markers)
+		    && !m_config.property_game_root.empty())
+		{
+			protocol::PropertyCatalog catalog;
+			std::string error;
+			const auto path = property::level_pak_path(
+			    m_config.property_game_root, m_store.manifest().level_id);
+			if (!property::scan_level_pak(
+			        path, m_store.manifest().level_id, catalog, error))
+			{
+				throw std::runtime_error(
+				    "automatic property discovery failed: " + error);
+			}
+			m_store.save_property_catalog(catalog);
+		}
+		m_properties.reset(
+		    m_store.property_catalog(), m_store.property_ledger());
 		for (const auto &object : m_store.world_objects())
 			m_world_objects.emplace(object.entity_guid(), object);
 		for (const auto &item : m_store.world_items())
@@ -114,8 +149,10 @@ namespace kcd2mp::server
 			return;
 		}
 		persist_player(*player, now);
+		release_activity(*player);
 		if (allow_reconnect)
 		{
+			remove_sleep_vote(player->id);
 			player->connection.reset();
 			player->reconnect_deadline =
 			    now + std::chrono::seconds(m_config.reconnect_grace_seconds);
@@ -165,6 +202,28 @@ namespace kcd2mp::server
 				break;
 			case protocol::Envelope::kPing:
 				handle_ping(*player, envelope.ping(), now);
+				break;
+			case protocol::Envelope::kClientSleepState:
+				handle_sleep_state(
+				    *player,
+				    envelope.client_sleep_state(),
+				    now);
+				break;
+			case protocol::Envelope::kClientDeath:
+				handle_death(*player);
+				break;
+			case protocol::Envelope::kClientRespawnRequest:
+				handle_respawn_request(*player, now);
+				break;
+			case protocol::Envelope::kClientActivityStart:
+				handle_activity_start(
+				    *player,
+				    envelope.client_activity_start());
+				break;
+			case protocol::Envelope::kClientActivityEnd:
+				handle_activity_end(
+				    *player,
+				    envelope.client_activity_end());
 				break;
 			default:
 				reject(
@@ -555,6 +614,102 @@ namespace kcd2mp::server
 		return code;
 	}
 
+	const protocol::PropertyCatalog &server_core::property_catalog() const
+	{
+		return m_properties.catalog();
+	}
+
+	const protocol::PropertyLedger &server_core::property_ledger() const
+	{
+		return m_properties.ledger();
+	}
+
+	bool server_core::assign_property_owner(
+	    std::string_view property_id,
+	    player_id target,
+	    std::string &error)
+	{
+		const auto profile = m_store.find_by_player_id(target);
+		if (!profile)
+		{
+			error = "target player profile does not exist";
+			return false;
+		}
+		if (!m_properties.system_assign_owner(
+		        property_id,
+		        profile->profile.persistent_id(),
+		        random_uuid_v4(),
+		        unix_milliseconds(),
+		        error))
+			return false;
+		m_store.save_property_ledger(m_properties.ledger());
+		broadcast_home_markers();
+		return true;
+	}
+
+	bool server_core::grant_property_role(
+	    player_id actor,
+	    std::string_view property_id,
+	    player_id target,
+	    protocol::PropertyRole role,
+	    std::uint64_t expires_at_ms,
+	    std::string &error)
+	{
+		const auto actor_profile = m_store.find_by_player_id(actor);
+		const auto target_profile = m_store.find_by_player_id(target);
+		if (!actor_profile || !target_profile)
+		{
+			error = "actor or target player profile does not exist";
+			return false;
+		}
+		if (!m_properties.grant_role(
+		        actor_profile->profile.persistent_id(),
+		        property_id,
+		        target_profile->profile.persistent_id(),
+		        role,
+		        random_uuid_v4(),
+		        unix_milliseconds(),
+		        expires_at_ms,
+		        error))
+			return false;
+		m_store.save_property_ledger(m_properties.ledger());
+		broadcast_home_markers();
+		return true;
+	}
+
+	bool server_core::revoke_property_role(
+	    player_id actor,
+	    std::string_view assignment_id,
+	    std::string &error)
+	{
+		const auto actor_profile = m_store.find_by_player_id(actor);
+		if (!actor_profile)
+		{
+			error = "actor player profile does not exist";
+			return false;
+		}
+		if (!m_properties.revoke_role(
+		        actor_profile->profile.persistent_id(),
+		        assignment_id,
+		        unix_milliseconds(),
+		        error))
+			return false;
+		m_store.save_property_ledger(m_properties.ledger());
+		broadcast_home_markers();
+		return true;
+	}
+
+	bool server_core::system_revoke_property_role(
+	    std::string_view assignment_id,
+	    std::string &error)
+	{
+		if (!m_properties.system_revoke_role(assignment_id, error))
+			return false;
+		m_store.save_property_ledger(m_properties.ledger());
+		broadcast_home_markers();
+		return true;
+	}
+
 	std::vector<outbound_message> server_core::take_outbound()
 	{
 		auto result = std::move(m_outbound);
@@ -570,6 +725,7 @@ namespace kcd2mp::server
 		{
 			result.push_back({
 			    id,
+			    player.profile.persistent_id(),
 			    player.display_name,
 			    player.dummy || player.connection.has_value(),
 			    player.has_transform,
@@ -838,6 +994,7 @@ namespace kcd2mp::server
 			    pending.display_name,
 			    m_store.manifest().level_id);
 			apply_default_avatar(created);
+			created.set_persistent_id(random_uuid_v4());
 			if (m_store.manifest().spawn_valid)
 			{
 				created.set_transform_valid(true);
@@ -872,6 +1029,7 @@ namespace kcd2mp::server
 			    profile->profile.display_name(),
 			    m_store.manifest().level_id);
 			apply_default_avatar(refreshed);
+			refreshed.set_persistent_id(profile->profile.persistent_id());
 			profile->profile = std::move(refreshed);
 			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
@@ -1074,7 +1232,9 @@ namespace kcd2mp::server
 	{
 		if (!message.has_profile() || !is_valid_profile(message.profile())
 		    || message.base_revision() != player.profile.revision()
-		    || message.profile().player_id() != player.id)
+		    || message.profile().player_id() != player.id
+		    || message.profile().persistent_id()
+		        != player.profile.persistent_id())
 		{
 			protocol::Envelope rejected;
 			auto *response = rejected.mutable_profile_rejected();
@@ -1107,6 +1267,7 @@ namespace kcd2mp::server
 			}
 		}
 		accepted.set_player_id(player.id);
+		accepted.set_persistent_id(player.profile.persistent_id());
 		accepted.set_display_name(player.display_name);
 		accepted.set_level_id(m_store.manifest().level_id);
 		accepted.set_revision(player.profile.revision() + 1);
@@ -1142,12 +1303,14 @@ namespace kcd2mp::server
 	    player_session &player,
 	    const protocol::ClientWorldObjectUpdate &message)
 	{
-		const auto reject_state = [&](const protocol::WorldObjectState &state)
+		const auto reject_state = [&](
+		    const protocol::WorldObjectState &state,
+		    std::string_view reason = "world object revision conflict")
 		{
 			protocol::Envelope rejected;
 			auto *response = rejected.mutable_world_object_rejected();
 			*response->mutable_authoritative_state() = state;
-			response->set_reason("world object revision conflict");
+			response->set_reason(reason);
 			queue(
 			    *player.connection,
 			    std::move(rejected),
@@ -1164,6 +1327,30 @@ namespace kcd2mp::server
 		}
 
 		const auto guid = message.state().entity_guid();
+		const auto requested = message.state().kind()
+		        == protocol::WORLD_OBJECT_KIND_CONTAINER
+		    ? property::capability::use_container
+		    : property::capability::enter;
+		if (!m_properties.authorize(
+		        player.profile.persistent_id(),
+		        guid,
+		        requested,
+		        unix_milliseconds()))
+		{
+			protocol::WorldObjectState authoritative = message.state();
+			if (const auto current = m_world_objects.find(guid);
+			    current != m_world_objects.end())
+				authoritative = current->second;
+			else
+			{
+				authoritative.set_revision(1);
+				authoritative.set_opened(false);
+				authoritative.set_has_inventory(false);
+				authoritative.clear_inventory();
+			}
+			reject_state(authoritative, "property access denied");
+			return;
+		}
 		auto found = m_world_objects.find(guid);
 		if (found != m_world_objects.end()
 		    && (message.base_revision() != found->second.revision()
@@ -1565,6 +1752,215 @@ namespace kcd2mp::server
 		queue(*player.connection, std::move(envelope), reliability::reliable);
 	}
 
+	std::uint32_t server_core::effective_sleep_requirement() const
+	{
+		const auto eligible = static_cast<std::uint32_t>(std::ranges::count_if(
+		    m_players,
+		    [](const auto &entry)
+		    {
+			    const auto &player = entry.second;
+			    return !player.dummy && player.connection.has_value()
+			        && !player.dead;
+		    }));
+		return eligible == 0
+		    ? 1U
+		    : std::min(m_config.sleeping_players_required, eligible);
+	}
+
+	void server_core::broadcast_sleep_state(bool time_skipped)
+	{
+		protocol::Envelope envelope;
+		auto *state = envelope.mutable_server_sleep_state();
+		state->set_revision(m_sleep_revision);
+		state->set_sleeping_players(static_cast<std::uint32_t>(
+		    m_sleeping_players.size()));
+		state->set_required_players(effective_sleep_requirement());
+		state->set_time_skipped(time_skipped);
+		broadcast(std::move(envelope), reliability::reliable);
+	}
+
+	void server_core::remove_sleep_vote(player_id id)
+	{
+		if (m_sleeping_players.erase(id) == 0)
+			return;
+		++m_sleep_revision;
+		broadcast_sleep_state();
+	}
+
+	void server_core::handle_sleep_state(
+	    player_session &player,
+	    const protocol::ClientSleepState &message,
+	    time_point now)
+	{
+		if (player.dead)
+			return;
+		const bool changed = message.sleeping()
+		    ? m_sleeping_players.insert(player.id).second
+		    : m_sleeping_players.erase(player.id) != 0;
+		if (!changed)
+			return;
+		++m_sleep_revision;
+		if (message.sleeping()
+		    && m_sleeping_players.size() >= effective_sleep_requirement())
+		{
+			advance_environment_clock(now);
+			m_environment_anchor_hours = m_config.sleep_wake_hour;
+			m_environment_anchor_time = now;
+			++m_environment_revision;
+			broadcast_environment(now);
+			m_sleeping_players.clear();
+			++m_sleep_revision;
+			broadcast_sleep_state(true);
+			return;
+		}
+		broadcast_sleep_state();
+	}
+
+	void server_core::handle_death(player_session &player)
+	{
+		if (player.dead)
+			return;
+		player.dead = true;
+		remove_sleep_vote(player.id);
+		release_activity(player);
+	}
+
+	void server_core::handle_respawn_request(
+	    player_session &player,
+	    time_point now)
+	{
+		if (!player.dead || !player.connection
+		    || !m_store.manifest().spawn_valid)
+			return;
+		auto spawn = m_store.manifest().spawn;
+		spawn.set_sequence(std::max(
+		    spawn.sequence(),
+		    player.last_sequence + 1));
+		spawn.set_client_time_ms(milliseconds(now));
+		player.dead = false;
+		player.has_transform = true;
+		player.transform = spawn;
+		player.last_sequence = spawn.sequence();
+		player.last_transform_at = now;
+		player.profile.set_transform_valid(true);
+		*player.profile.mutable_last_transform() = spawn;
+		persist_player(player, now);
+
+		protocol::Envelope envelope;
+		*envelope.mutable_server_respawn()->mutable_spawn() = spawn;
+		queue(*player.connection, std::move(envelope), reliability::reliable);
+		++m_sleep_revision;
+		broadcast_sleep_state();
+	}
+
+	void server_core::handle_activity_start(
+	    player_session &player,
+	    const protocol::ClientActivityStart &message)
+	{
+		auto deny = [&](std::string reason)
+		{
+			if (!player.connection)
+				return;
+			protocol::Envelope envelope;
+			auto *denied = envelope.mutable_activity_denied();
+			denied->set_kind(message.kind());
+			denied->set_station_guid(message.station_guid());
+			denied->set_reason(std::move(reason));
+			queue(
+			    *player.connection,
+			    std::move(envelope),
+			    reliability::reliable);
+		};
+
+		if (player.dead)
+		{
+			deny("dead players cannot use activity stations");
+			return;
+		}
+		if (player.activity.active())
+		{
+			deny("player already owns an activity session");
+			return;
+		}
+		if (const auto occupied = m_station_owners.find(message.station_guid());
+		    occupied != m_station_owners.end() && occupied->second != player.id)
+		{
+			deny("activity station is already in use");
+			return;
+		}
+
+		auto session_id = m_next_activity_session_id++;
+		if (session_id == 0)
+			session_id = m_next_activity_session_id++;
+		auto activity = player.activity;
+		activity.set_kind(message.kind());
+		activity.set_station_guid(message.station_guid());
+		activity.set_session_id(session_id);
+		activity.set_revision(activity.revision() + 1);
+		activity.set_active(true);
+		player.activity = activity;
+		m_station_owners.insert_or_assign(message.station_guid(), player.id);
+
+		if (player.connection)
+		{
+			protocol::Envelope granted;
+			*granted.mutable_activity_granted()->mutable_activity() = activity;
+			queue(
+			    *player.connection,
+			    std::move(granted),
+			    reliability::reliable);
+		}
+		protocol::Envelope updated;
+		auto *broadcast_update = updated.mutable_player_activity_updated();
+		broadcast_update->set_player_id(player.id);
+		*broadcast_update->mutable_activity() = activity;
+		broadcast(
+		    std::move(updated),
+		    reliability::reliable,
+		    player.connection);
+	}
+
+	void server_core::handle_activity_end(
+	    player_session &player,
+	    const protocol::ClientActivityEnd &message)
+	{
+		if (!player.activity.active()
+		    || player.activity.session_id() != message.session_id())
+		{
+			return;
+		}
+		release_activity(
+		    player,
+		    message.has_final_transform() ? &message.final_transform() : nullptr);
+	}
+
+	void server_core::release_activity(
+	    player_session &player,
+	    const protocol::TransformState *final_transform)
+	{
+		if (!player.activity.active())
+			return;
+
+		if (const auto owner = m_station_owners.find(
+		        player.activity.station_guid());
+		    owner != m_station_owners.end() && owner->second == player.id)
+		{
+			m_station_owners.erase(owner);
+		}
+		auto ended = player.activity;
+		ended.set_active(false);
+		ended.set_revision(ended.revision() + 1);
+		player.activity = ended;
+
+		protocol::Envelope updated;
+		auto *broadcast_update = updated.mutable_player_activity_updated();
+		broadcast_update->set_player_id(player.id);
+		*broadcast_update->mutable_activity() = ended;
+		if (final_transform)
+			*broadcast_update->mutable_final_transform() = *final_transform;
+		broadcast(std::move(updated), reliability::reliable);
+	}
+
 	void server_core::reject(
 	    connection_id connection,
 	    protocol::RejectReason reason,
@@ -1596,6 +1992,8 @@ namespace kcd2mp::server
 			return;
 		}
 		persist_player(iterator->second, now);
+		remove_sleep_vote(id);
+		release_activity(iterator->second);
 		const auto connection = iterator->second.connection;
 		if (connection && close != close_kind::none)
 		{
@@ -1626,6 +2024,9 @@ namespace kcd2mp::server
 		accepted->set_profile_snapshot_interval_seconds(
 		    m_config.profile_snapshot_interval_seconds);
 		*accepted->mutable_avatar_policy() = avatar_policy();
+		if (const auto marker = m_properties.home_marker_for(
+		        player.profile.persistent_id(), unix_milliseconds()))
+			*accepted->mutable_home_marker() = *marker;
 		for (const auto &[id, session] : m_players)
 		{
 			(void)id;
@@ -1633,6 +2034,37 @@ namespace kcd2mp::server
 		}
 		queue(*player.connection, std::move(envelope), reliability::reliable);
 		send_entity_control(*player.connection);
+		protocol::Envelope sleep;
+		auto *sleep_state = sleep.mutable_server_sleep_state();
+		sleep_state->set_revision(m_sleep_revision);
+		sleep_state->set_sleeping_players(static_cast<std::uint32_t>(
+		    m_sleeping_players.size()));
+		sleep_state->set_required_players(effective_sleep_requirement());
+		queue(*player.connection, std::move(sleep), reliability::reliable);
+	}
+
+	void server_core::broadcast_home_markers()
+	{
+		const auto now = unix_milliseconds();
+		for (const auto &[id, player] : m_players)
+		{
+			(void)id;
+			if (!player.connection)
+				continue;
+			protocol::Envelope envelope;
+			auto *updated = envelope.mutable_server_home_marker_updated();
+			updated->set_ledger_revision(m_properties.ledger().revision());
+			if (const auto marker = m_properties.home_marker_for(
+			        player.profile.persistent_id(), now))
+			{
+				updated->set_active(true);
+				*updated->mutable_marker() = *marker;
+			}
+			queue(
+			    *player.connection,
+			    std::move(envelope),
+			    reliability::reliable);
+		}
 	}
 
 	void server_core::send_entity_control(connection_id connection)
@@ -2000,6 +2432,8 @@ namespace kcd2mp::server
 	{
 		protocol::PlayerSnapshot snapshot;
 		snapshot.set_player_id(player.id);
+		if (!player.profile.persistent_id().empty())
+			snapshot.set_persistent_id(player.profile.persistent_id());
 		snapshot.set_display_name(player.display_name);
 		snapshot.set_transform_valid(player.has_transform);
 		snapshot.set_connected(
@@ -2013,6 +2447,8 @@ namespace kcd2mp::server
 		{
 			*snapshot.mutable_avatar() = player.avatar;
 		}
+		if (player.activity.active())
+			*snapshot.mutable_activity() = player.activity;
 		return snapshot;
 	}
 }

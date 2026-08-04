@@ -235,6 +235,9 @@ list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]kcse[/\\\\]plugin\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]kcse[/\\\\]native_.*\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]multiplayer[/\\\\]client\\.cpp$")
 list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]multiplayer[/\\\\]identity_store\\.cpp$")
+list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]gui[/\\\\]native_multiplayer_menu\\.cpp$")
+list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]gui[/\\\\]native_ingame_menu_api\\.cpp$")
+list(FILTER SRC_MAIN EXCLUDE REGEX "[/\\\\]gui[/\\\\]native_ui_localization\\.cpp$")
 
 if (NOT TARGET Zydis)
     message(FATAL_ERROR
@@ -325,6 +328,23 @@ target_compile_definitions(KCD2MPNetworking PRIVATE
 )
 set_property(TARGET KCD2MPNetworking PROPERTY COMPILE_WARNING_AS_ERROR ON)
 
+add_library(KCD2MPProperty STATIC
+    "${SRC_DIR}/property/catalog.cpp"
+    "${SRC_DIR}/property/catalog.hpp"
+    "${SRC_DIR}/property/service.cpp"
+    "${SRC_DIR}/property/service.hpp"
+)
+set_property(TARGET KCD2MPProperty PROPERTY CXX_STANDARD 23)
+target_include_directories(KCD2MPProperty PUBLIC "${SRC_DIR}")
+target_link_libraries(KCD2MPProperty PUBLIC KCD2MPProtocol)
+target_link_libraries(KCD2MPProperty PRIVATE pugixml::pugixml zip)
+target_compile_definitions(KCD2MPProperty PRIVATE
+    "_CRT_SECURE_NO_WARNINGS"
+    "NOMINMAX"
+    "WIN32_LEAN_AND_MEAN"
+)
+set_property(TARGET KCD2MPProperty PROPERTY COMPILE_WARNING_AS_ERROR ON)
+
 add_library(KCD2MPServerCore STATIC
     "${SRC_DIR}/server/server_config.cpp"
     "${SRC_DIR}/server/server_config.hpp"
@@ -339,6 +359,7 @@ set_property(TARGET KCD2MPServerCore PROPERTY CXX_STANDARD 23)
 target_include_directories(KCD2MPServerCore PUBLIC "${SRC_DIR}")
 target_link_libraries(KCD2MPServerCore PUBLIC
     KCD2MPProtocol
+    KCD2MPProperty
     tomlplusplus::tomlplusplus
     bcrypt
 )
@@ -374,11 +395,62 @@ add_custom_command(TARGET KCD2MPServer POST_BUILD
         "$<TARGET_FILE_DIR:KCD2MPServer>/npc_archetypes.json"
 )
 
+# The native Scaleform menu uses CryEngine ABI types and must therefore be
+# compiled with libKCD2's PCH instead of the main module's ROM/ImGui PCH.
+if(KCD2MP_BUILD_KCSE)
+    add_library(KCD2MPNativeMultiplayerMenu OBJECT
+		"${SRC_DIR}/gui/ingame_menu.hpp"
+		"${SRC_DIR}/gui/native_ingame_menu_api.cpp"
+		"${SRC_DIR}/gui/native_ingame_menu_api.hpp"
+		"${SRC_DIR}/gui/native_ui_localization.cpp"
+		"${SRC_DIR}/gui/native_ui_localization.hpp"
+        "${SRC_DIR}/gui/native_multiplayer_menu.cpp"
+        "${SRC_DIR}/gui/native_multiplayer_menu.hpp"
+    )
+    set_property(TARGET KCD2MPNativeMultiplayerMenu PROPERTY CXX_STANDARD 23)
+    set_property(TARGET KCD2MPNativeMultiplayerMenu PROPERTY CXX_STANDARD_REQUIRED ON)
+    target_precompile_headers(KCD2MPNativeMultiplayerMenu PRIVATE
+        "${KCD2MP_LIBKCD2_ROOT}/.buildenv/PCH.h"
+    )
+    target_include_directories(KCD2MPNativeMultiplayerMenu PRIVATE
+        "${SRC_DIR}"
+        "${KCD2MP_LIBKCD2_ROOT}/include"
+        "${KCD2MP_LIBKCD2_ROOT}/include/CryEngine/CryCommon"
+    )
+    target_compile_definitions(KCD2MPNativeMultiplayerMenu PRIVATE
+        "KCD2MP_NATIVE_MULTIPLAYER_MENU"
+        "_ITERATOR_DEBUG_LEVEL=0"
+        "FORCE_STANDARD_ASSERT"
+        "_CRT_SECURE_NO_WARNINGS"
+        "NOMINMAX"
+        "WIN32_LEAN_AND_MEAN"
+    )
+    target_compile_options(KCD2MPNativeMultiplayerMenu PRIVATE
+        /utf-8 /W4 /wd4100 /wd4819 /permissive
+    )
+    target_link_libraries(KCD2MPNativeMultiplayerMenu PRIVATE
+        kcd_re
+        KCD2MPProtocol
+        KCD2MPNetworking
+    )
+    set_property(TARGET KCD2MPNativeMultiplayerMenu PROPERTY COMPILE_WARNING_AS_ERROR ON)
+endif()
+
 add_library(KCD2MP MODULE
     "${SRC_MAIN}"
     "${GENERATED_VERSION_SOURCE}"
     "${GENERATED_RESOURCE_FILE}"
 )
+
+if(KCD2MP_BUILD_KCSE)
+    target_sources(KCD2MP PRIVATE
+        $<TARGET_OBJECTS:KCD2MPNativeMultiplayerMenu>
+    )
+    target_compile_definitions(KCD2MP PRIVATE
+        "KCD2MP_NATIVE_MULTIPLAYER_MENU"
+    )
+    target_link_libraries(KCD2MP PRIVATE kcd_re)
+endif()
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set_property(TARGET KCD2MP PROPERTY CXX_STANDARD 23)
@@ -410,14 +482,24 @@ target_link_libraries(KCD2MP PRIVATE
 
 if(KCD2MP_BUILD_KCSE)
     add_library(KCD2MPKCSENativeRuntime OBJECT
+		"${SRC_DIR}/kcse/native_avatar_combat.cpp"
+		"${SRC_DIR}/kcse/native_avatar_combat.hpp"
+		"${SRC_DIR}/kcse/native_combat_observer.cpp"
+		"${SRC_DIR}/kcse/native_combat_observer.hpp"
         "${SRC_DIR}/kcse/native_entity_backend.cpp"
         "${SRC_DIR}/kcse/native_entity_backend.hpp"
 		"${SRC_DIR}/kcse/native_equipment.hpp"
+		"${SRC_DIR}/kcse/native_inventory.cpp"
+		"${SRC_DIR}/kcse/native_inventory.hpp"
         "${SRC_DIR}/kcse/native_profile_backend.cpp"
         "${SRC_DIR}/kcse/native_profile_backend.hpp"
 		"${SRC_DIR}/kcse/native_remote_avatar_backend.cpp"
 		"${SRC_DIR}/kcse/native_remote_avatar_backend.hpp"
+		"${SRC_DIR}/kcse/native_remote_avatar_equipment.cpp"
+		"${SRC_DIR}/kcse/native_remote_avatar_equipment.hpp"
 		"${SRC_DIR}/kcse/remote_avatar_readiness.hpp"
+		"${SRC_DIR}/kcse/native_weapon_controller.cpp"
+		"${SRC_DIR}/kcse/native_weapon_controller.hpp"
 		"${SRC_DIR}/kcse/native_runtime.cpp"
         "${SRC_DIR}/kcse/native_runtime.hpp"
 		"${SRC_DIR}/kcse/native_world_object_sync.cpp"
@@ -522,6 +604,42 @@ target_compile_definitions(KCD2MP PRIVATE
     "WIN32_LEAN_AND_MEAN"
 )
 
+# Keep the raw CMake build output usable as a client artifact tree as well.
+# The runtime resolves translations below <game-root>/mods/KCD2MP/Lang, so the
+# same relative layout is emitted beside the other build artifacts. The custom
+# target intentionally runs on every KCD2MP build, allowing translation-only
+# edits to be picked up without relinking the DLL.
+set(KCD2MP_LANGUAGE_ROOT "${PROJECT_SOURCE_DIR}/data/lang")
+file(GLOB KCD2MP_LANGUAGE_FILES CONFIGURE_DEPENDS
+    "${KCD2MP_LANGUAGE_ROOT}/*.lang"
+)
+if(NOT EXISTS "${KCD2MP_LANGUAGE_ROOT}/en.lang")
+    message(FATAL_ERROR
+        "KCD2MP requires data/lang/en.lang as its localization fallback."
+    )
+endif()
+if(EXISTS "${KCD2MP_LANGUAGE_ROOT}/README.md")
+    list(APPEND KCD2MP_LANGUAGE_FILES
+        "${KCD2MP_LANGUAGE_ROOT}/README.md"
+    )
+endif()
+
+add_custom_target(KCD2MPLanguageFiles
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+        "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
+    DEPENDS ${KCD2MP_LANGUAGE_FILES}
+    COMMENT "Bundling KCD2MP language files"
+    VERBATIM
+)
+foreach(KCD2MP_LANGUAGE_FILE IN LISTS KCD2MP_LANGUAGE_FILES)
+    add_custom_command(TARGET KCD2MPLanguageFiles POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${KCD2MP_LANGUAGE_FILE}"
+            "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
+    )
+endforeach()
+add_dependencies(KCD2MP KCD2MPLanguageFiles)
+
 if (MSVC)
     if (FINAL)
         # Aggresive inlining (Release)
@@ -573,6 +691,13 @@ target_compile_definitions(KCD2MPSignatureAudit PRIVATE
 target_link_libraries(KCD2MPSignatureAudit PRIVATE KCD2MPSignatureCore bcrypt)
 set_property(TARGET KCD2MPSignatureAudit PROPERTY COMPILE_WARNING_AS_ERROR ON)
 
+add_executable(KCD2MPPropertyCatalog
+    "${PROJECT_SOURCE_DIR}/tools/property_catalog_main.cpp"
+)
+set_property(TARGET KCD2MPPropertyCatalog PROPERTY CXX_STANDARD 23)
+target_link_libraries(KCD2MPPropertyCatalog PRIVATE KCD2MPProperty)
+set_property(TARGET KCD2MPPropertyCatalog PROPERTY COMPILE_WARNING_AS_ERROR ON)
+
 include(CTest)
 if (BUILD_TESTING)
     add_executable(KCD2MPSignatureCoreTests "${PROJECT_SOURCE_DIR}/tests/signature_core_tests.cpp")
@@ -607,6 +732,18 @@ if (BUILD_TESTING)
     )
     set_property(TARGET KCD2MPServerCoreTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPServerCoreTests COMMAND KCD2MPServerCoreTests)
+
+    add_executable(KCD2MPPropertyTests
+        "${PROJECT_SOURCE_DIR}/tests/property_tests.cpp"
+    )
+    set_property(TARGET KCD2MPPropertyTests PROPERTY CXX_STANDARD 23)
+    target_link_libraries(KCD2MPPropertyTests PRIVATE
+        KCD2MPServerCore
+        KCD2MPProperty
+        zip
+    )
+    set_property(TARGET KCD2MPPropertyTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPPropertyTests COMMAND KCD2MPPropertyTests)
 
     add_executable(KCD2MPGameCommandQueueTests
         "${PROJECT_SOURCE_DIR}/tests/game_command_queue_tests.cpp"
@@ -686,6 +823,27 @@ if (BUILD_TESTING)
     set_property(TARGET KCD2MPAvatarVisualTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPAvatarVisualTests COMMAND KCD2MPAvatarVisualTests)
 
+	add_executable(KCD2MPIngameMenuTests
+		"${PROJECT_SOURCE_DIR}/tests/ingame_menu_tests.cpp"
+	)
+	set_property(TARGET KCD2MPIngameMenuTests PROPERTY CXX_STANDARD 23)
+	target_include_directories(KCD2MPIngameMenuTests PRIVATE "${SRC_DIR}")
+	set_property(TARGET KCD2MPIngameMenuTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+	add_test(NAME KCD2MPIngameMenuTests COMMAND KCD2MPIngameMenuTests)
+
+	add_executable(KCD2MPLocalizationTests
+		"${PROJECT_SOURCE_DIR}/tests/localization_tests.cpp"
+		"${SRC_DIR}/gui/localization.cpp"
+		"${SRC_DIR}/gui/localization.hpp"
+	)
+	set_property(TARGET KCD2MPLocalizationTests PROPERTY CXX_STANDARD 23)
+	target_include_directories(KCD2MPLocalizationTests PRIVATE "${SRC_DIR}")
+	target_compile_definitions(KCD2MPLocalizationTests PRIVATE
+		"KCD2MP_SOURCE_DIR=\"${PROJECT_SOURCE_DIR}\""
+	)
+	set_property(TARGET KCD2MPLocalizationTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+	add_test(NAME KCD2MPLocalizationTests COMMAND KCD2MPLocalizationTests)
+
     add_executable(KCD2MPProfileReconcilerTests
         "${PROJECT_SOURCE_DIR}/tests/profile_reconciler_tests.cpp"
     )
@@ -744,6 +902,7 @@ if (BUILD_TESTING)
             KCD2MPEnginePathTests
             KCD2MPProtocolTests
             KCD2MPServerCoreTests
+            KCD2MPPropertyTests
             KCD2MPGameCommandQueueTests
             KCD2MPEntityControlTests
             KCD2MPRuntimeHandleTests
@@ -753,6 +912,8 @@ if (BUILD_TESTING)
             KCD2MPNpcCatalogTests
             KCD2MPEquipmentCatalogTests
             KCD2MPAvatarVisualTests
+			KCD2MPIngameMenuTests
+			KCD2MPLocalizationTests
             KCD2MPProfileReconcilerTests
             KCD2MPEngineConsoleQueueTests
             KCD2MPNetworkingTests

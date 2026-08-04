@@ -1,6 +1,7 @@
 #pragma once
 
 #include "multiplayer/protocol.hpp"
+#include "property/service.hpp"
 #include "server/server_config.hpp"
 #include "server/world_store.hpp"
 
@@ -9,6 +10,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -37,6 +39,7 @@ namespace kcd2mp::server
 	struct player_view
 	{
 		player_id id{};
+		std::string persistent_id;
 		std::string display_name;
 		bool connected{};
 		bool has_transform{};
@@ -88,6 +91,26 @@ namespace kcd2mp::server
 		[[nodiscard]] std::optional<std::string> create_profile_claim(
 		    player_id id,
 		    time_point now);
+		[[nodiscard]] const protocol::PropertyCatalog &property_catalog() const;
+		[[nodiscard]] const protocol::PropertyLedger &property_ledger() const;
+		[[nodiscard]] bool assign_property_owner(
+		    std::string_view property_id,
+		    player_id target,
+		    std::string &error);
+		[[nodiscard]] bool grant_property_role(
+		    player_id actor,
+		    std::string_view property_id,
+		    player_id target,
+		    protocol::PropertyRole role,
+		    std::uint64_t expires_at_ms,
+		    std::string &error);
+		[[nodiscard]] bool revoke_property_role(
+		    player_id actor,
+		    std::string_view assignment_id,
+		    std::string &error);
+		[[nodiscard]] bool system_revoke_property_role(
+		    std::string_view assignment_id,
+		    std::string &error);
 
 		[[nodiscard]] std::vector<outbound_message> take_outbound();
 		[[nodiscard]] std::vector<player_view> players() const;
@@ -137,6 +160,8 @@ namespace kcd2mp::server
 			protocol::AvatarDescriptor avatar;
 			protocol::PlayerProfile profile;
 			time_point last_persisted_at;
+			bool dead{};
+			protocol::PlayerActivity activity;
 		};
 
 		struct profile_claim
@@ -187,6 +212,21 @@ namespace kcd2mp::server
 		    player_session &player,
 		    const protocol::Ping &message,
 		    time_point now);
+		void handle_sleep_state(
+		    player_session &player,
+		    const protocol::ClientSleepState &message,
+		    time_point now);
+		void handle_death(player_session &player);
+		void handle_respawn_request(player_session &player, time_point now);
+		void handle_activity_start(
+		    player_session &player,
+		    const protocol::ClientActivityStart &message);
+		void handle_activity_end(
+		    player_session &player,
+		    const protocol::ClientActivityEnd &message);
+		void release_activity(
+		    player_session &player,
+		    const protocol::TransformState *final_transform = nullptr);
 		void reject(
 		    connection_id connection,
 		    protocol::RejectReason reason,
@@ -200,8 +240,12 @@ namespace kcd2mp::server
 		void send_entity_control(connection_id connection);
 		void send_world_objects(connection_id connection);
 		void send_world_items(connection_id connection);
+		void broadcast_home_markers();
 		void advance_environment_clock(time_point now);
 		void broadcast_environment(time_point now);
+		void broadcast_sleep_state(bool time_skipped = false);
+		void remove_sleep_vote(player_id id);
+		[[nodiscard]] std::uint32_t effective_sleep_requirement() const;
 		void apply_default_avatar(protocol::PlayerProfile &profile);
 		[[nodiscard]] bool avatar_allowed(
 		    const protocol::AvatarDescriptor &avatar) const;
@@ -237,6 +281,7 @@ namespace kcd2mp::server
 		server_config m_config;
 		token_generator m_generate_token;
 		world_store m_store;
+		property::service m_properties;
 		std::uint64_t m_server_tick{};
 		time_point m_last_snapshot{};
 		std::unordered_map<connection_id, pending_connection> m_pending;
@@ -259,6 +304,10 @@ namespace kcd2mp::server
 		time_point m_environment_anchor_time{};
 		time_point m_current_time{};
 		bool m_environment_clock_started{};
+		std::unordered_set<player_id> m_sleeping_players;
+		std::uint64_t m_sleep_revision{1};
+		std::unordered_map<std::uint64_t, player_id> m_station_owners;
+		std::uint64_t m_next_activity_session_id{1};
 		std::vector<outbound_message> m_outbound;
 	};
 }

@@ -143,14 +143,22 @@ Available server commands include `status`, `players`, `kick`, `say`,
 
 ## Joining from the game
 
-1. Start KCD2 and load a normal save through the game's UI.
-2. Open **Multiplayer -> Open Multiplayer** in the KCD2MP frontend.
-3. Enter the server address and connect.
+1. Start KCD2 and choose **Multiplayer** in the main menu or pause menu.
+2. Select **Server**, **Name**, or **Password** to edit the value. Confirm with
+   Enter, cancel with Escape, and paste with Ctrl+V.
+3. Choose **Connect**. No savegame is required: from the title screen the
+   server bootstrap starts KCD2's native New Game path directly in the configured
+   level. From the pause menu, an already loaded matching level is adopted.
 
-The native client adopts the loaded world only when its level matches the
-server. It then applies the multiplayer profile and sends `WorldReady`. Failed
-native prerequisites stop the join with a concrete error instead of falling
-back to unsafe signatures, generated Lua, or guessed entity names.
+The in-game UI follows KCD2's current `g_language` setting. Editable UTF-8
+translations are installed in `<game-root>\mods\KCD2MP\Lang\`; English is the
+fallback when no file exists for the selected game language.
+
+The client waits for `NewGame`, `PreDataLoaded`, `DataLoaded`, the target
+`wh_sys_BaseLevelId`, the local actor, and the native capability probe before it
+applies the multiplayer profile and sends `WorldReady`. A different active level
+is rejected until synchronized live travel is enabled. Failed native prerequisites
+time out with a concrete loading phase instead of forcing the loading screen away.
 
 ## Manual installation
 
@@ -162,6 +170,7 @@ For manual deployment:
    `<game-root>\mods\KCD2MP\KCSE\Plugins\`.
 4. Copy the matching Address Library table to
    `<game-root>\KCSE\addresslib\`.
+5. Copy `data\lang\*.lang` to `<game-root>\mods\KCD2MP\Lang\`.
 
 The default Steam binary directory is:
 

@@ -123,6 +123,13 @@ namespace kcd2mp::server
 			    *environment,
 			    "weather_transition_seconds",
 			    config.weather_transition_seconds);
+			config.sleeping_players_required = checked_integer(
+			    *environment,
+			    "sleeping_players_required",
+			    config.sleeping_players_required);
+			config.sleep_wake_hour =
+			    (*environment)["sleep_wake_hour"].value_or(
+			        config.sleep_wake_hour);
 		}
 		// The aggregate key remains a backwards-compatible fallback. Explicit
 		// category keys override it independently.
@@ -163,6 +170,11 @@ namespace kcd2mp::server
 		config.starter_profile_path =
 		    (*server)["starter_profile"].value_or(
 		        config.starter_profile_path.string());
+		if (const auto *property = document["property"].as_table())
+		{
+			config.property_game_root =
+			    (*property)["game_root"].value_or(std::string{});
+		}
 		if (config.world_directory.is_relative())
 		{
 			config.world_directory =
@@ -174,6 +186,13 @@ namespace kcd2mp::server
 			config.starter_profile_path =
 			    std::filesystem::absolute(path).parent_path()
 			    / config.starter_profile_path;
+		}
+		if (!config.property_game_root.empty()
+		    && config.property_game_root.is_relative())
+		{
+			config.property_game_root =
+			    std::filesystem::absolute(path).parent_path()
+			    / config.property_game_root;
 		}
 		config.starter_profile =
 		    load_starter_profile_template(config.starter_profile_path);
@@ -290,10 +309,15 @@ namespace kcd2mp::server
 		    || config.weather_id < minimum_weather_id
 		    || config.weather_id > maximum_weather_id
 		    || config.weather_transition_seconds
-		        > maximum_weather_transition_ms / 1000U)
+		        > maximum_weather_transition_ms / 1000U
+		    || config.sleeping_players_required == 0
+		    || config.sleeping_players_required > config.max_players
+		    || !std::isfinite(config.sleep_wake_hour)
+		    || config.sleep_wake_hour < 0.0
+		    || config.sleep_wake_hour >= hours_per_day)
 		{
 			throw std::runtime_error(
-			    "environment time, scale, weather, or transition is invalid");
+			    "environment time, scale, weather, sleep quorum, or transition is invalid");
 		}
 		if (config.world_directory.empty())
 		{

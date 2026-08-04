@@ -185,8 +185,21 @@ used an unbounded `IsEnd()` loop instead of the engine-observed `Next() == null`
 termination. Isolation now caches the local Entity id, requires the native
 `has-AI` flag plus Human/Animal RTTI, follows the observed `MoveFirst`/`Next`
 iterator protocol, and is strictly bounded by the Entity count captured before
-mutations begin. Isolation itself is visibility-only so Actor activation, AI,
-physics, animation, combat, and interaction systems remain intact.
+mutations begin. The later visibility-only implementation proved unsafe because
+`IEntity::Hide` disabled Entity physics/update state without removing the Actor
+from AI, combat, dialog, and interaction registries. The later `Invisible`
+experiment kept Actors updating but did not resolve the player's orphaned combat
+mode, so isolation returned to bounded native `IEntitySystem::RemoveEntity`
+teardown. A multiplayer-only recovery now detects the local combat flag, drawn
+weapon stance, and still-running combat actions without a remote player inside
+50 meters. It interrupts the actions through the engine's regular `Stop` path,
+clears the opponent through the null-safe `C_CombatActor::SetOpponent(nullptr)`
+path, and requests holstering.
+KCD's AI-backed player and horse scheduler proxies also match the broad
+`C_Human + HasAI + !IsPlayer` shape. They are now resolved through
+`wh_ai_PlayerSchedulerProxy`/`wh_ai_PlayerHorseSchedulerProxy` and excluded;
+mutating either proxy stalls player action transitions and player-relative
+MonsterLOD processing.
 
 ## Fork versus upstream
 

@@ -43,13 +43,24 @@ namespace kcd2mp
 		{
 			return is_valid_display_name(player.display_name())
 			    && player.player_id() != 0
+			    && (player.persistent_id().empty()
+			        || is_uuid(player.persistent_id()))
 			    && protocol::MovementMode_IsValid(
 			        static_cast<int>(player.movement_mode()))
 			    && (!player.transform_valid()
 			        || is_finite_transform(player.transform()))
 			    && (!require_avatar || player.has_avatar())
 			    && (!player.has_avatar()
-			        || is_valid_avatar_descriptor(player.avatar()));
+			        || is_valid_avatar_descriptor(player.avatar()))
+			    && (!player.has_activity()
+			        || (player.activity().active()
+			            && player.activity().kind()
+			                != protocol::PLAYER_ACTIVITY_KIND_NONE
+			            && protocol::PlayerActivityKind_IsValid(
+			                static_cast<int>(player.activity().kind()))
+			            && player.activity().station_guid() != 0
+			            && player.activity().session_id() != 0
+			            && player.activity().revision() != 0));
 		}
 
 		bool valid_identifier(std::string_view value, std::size_t maximum = 128)
@@ -70,6 +81,21 @@ namespace kcd2mp
 			    && std::isfinite(item.condition())
 			    && item.condition() >= 0.0F && item.condition() <= 1.0F
 			    && (allow_equipped_slot || !item.has_equipped_slot());
+		}
+
+		bool valid_home_marker(const protocol::PropertyHomeMarker &marker)
+		{
+			return valid_identifier(marker.property_id())
+			    && valid_identifier(marker.level_id())
+			    && valid_utf8_with_codepoint_count(
+			        marker.display_name(), 1, 128)
+			    && marker.has_position()
+			    && finite(marker.position().x())
+			    && finite(marker.position().y())
+			    && finite(marker.position().z())
+			    && marker.entity_guid() != 0
+			    && (marker.role() == protocol::PROPERTY_ROLE_OWNER
+			        || marker.role() == protocol::PROPERTY_ROLE_RESIDENT);
 		}
 
 		bool valid_envelope(const protocol::Envelope &envelope)
@@ -254,6 +280,72 @@ namespace kcd2mp
 				return message.has_state()
 				    && is_valid_environment_state(message.state());
 			}
+			if (envelope.has_server_sleep_state())
+			{
+				const auto &message = envelope.server_sleep_state();
+				return message.revision() > 0
+				    && message.required_players() > 0
+				    && message.required_players() <= max_players
+				    && message.sleeping_players() <= max_players;
+			}
+			if (envelope.has_server_respawn())
+			{
+				return envelope.server_respawn().has_spawn()
+				    && is_finite_transform(envelope.server_respawn().spawn());
+			}
+			if (envelope.has_client_activity_start())
+			{
+				const auto &message = envelope.client_activity_start();
+				return protocol::PlayerActivityKind_IsValid(
+				           static_cast<int>(message.kind()))
+				    && message.kind() != protocol::PLAYER_ACTIVITY_KIND_NONE
+				    && message.station_guid() != 0;
+			}
+			if (envelope.has_client_activity_end())
+			{
+				const auto &message = envelope.client_activity_end();
+				return message.session_id() != 0
+				    && (!message.has_final_transform()
+				        || is_finite_transform(message.final_transform()));
+			}
+			if (envelope.has_activity_granted())
+			{
+				const auto &message = envelope.activity_granted();
+				return message.has_activity() && message.activity().active()
+				    && message.activity().kind()
+				        != protocol::PLAYER_ACTIVITY_KIND_NONE
+				    && protocol::PlayerActivityKind_IsValid(
+				        static_cast<int>(message.activity().kind()))
+				    && message.activity().station_guid() != 0
+				    && message.activity().session_id() != 0
+				    && message.activity().revision() != 0;
+			}
+			if (envelope.has_activity_denied())
+			{
+				const auto &message = envelope.activity_denied();
+				return message.kind() != protocol::PLAYER_ACTIVITY_KIND_NONE
+				    && protocol::PlayerActivityKind_IsValid(
+				        static_cast<int>(message.kind()))
+				    && message.station_guid() != 0
+				    && valid_utf8_with_codepoint_count(message.reason(), 1, 256);
+			}
+			if (envelope.has_player_activity_updated())
+			{
+				const auto &message = envelope.player_activity_updated();
+				if (message.player_id() == 0 || !message.has_activity()
+				    || message.activity().kind()
+				        == protocol::PLAYER_ACTIVITY_KIND_NONE
+				    || !protocol::PlayerActivityKind_IsValid(
+				        static_cast<int>(message.activity().kind()))
+				    || message.activity().station_guid() == 0
+				    || message.activity().session_id() == 0
+				    || message.activity().revision() == 0)
+				{
+					return false;
+				}
+				return !message.has_final_transform()
+				    || is_finite_transform(message.final_transform());
+			}
 			if (envelope.has_client_avatar_update())
 			{
 				const auto &message = envelope.client_avatar_update();
@@ -286,7 +378,9 @@ namespace kcd2mp
 				    || message.profile_snapshot_interval_seconds() < 5
 				    || message.profile_snapshot_interval_seconds() > 60
 				    || !message.has_avatar_policy()
-				    || !is_valid_avatar_policy(message.avatar_policy()))
+				    || !is_valid_avatar_policy(message.avatar_policy())
+				    || (message.has_home_marker()
+				        && !valid_home_marker(message.home_marker())))
 				{
 					return false;
 				}
@@ -297,6 +391,14 @@ namespace kcd2mp
 						return false;
 					}
 				}
+			}
+			else if (envelope.has_server_home_marker_updated())
+			{
+				const auto &message = envelope.server_home_marker_updated();
+				return message.ledger_revision() != 0
+				    && (!message.active()
+				        || (message.has_marker()
+				            && valid_home_marker(message.marker())));
 			}
 			else if (envelope.has_server_rejected())
 			{
@@ -556,9 +658,22 @@ namespace kcd2mp
 		        static_cast<int>(avatar.stance()))
 		    || !protocol::AvatarWeaponClass_IsValid(
 		        static_cast<int>(avatar.weapon_class()))
+		    || !protocol::AvatarWeaponSet_IsValid(
+		        static_cast<int>(avatar.active_weapon_set()))
 		    || (avatar.weapon_drawn()
 		        && avatar.weapon_class()
-		            == protocol::AVATAR_WEAPON_CLASS_NONE))
+		            == protocol::AVATAR_WEAPON_CLASS_NONE)
+		    || (avatar.weapon_drawn()
+		        && avatar.active_weapon_set()
+		            == protocol::AVATAR_WEAPON_SET_NONE)
+		    || (!avatar.weapon_drawn()
+		        && avatar.active_weapon_set()
+		            != protocol::AVATAR_WEAPON_SET_NONE)
+		    || (avatar.weapon_class()
+		            == protocol::AVATAR_WEAPON_CLASS_UNARMED
+		        && (!avatar.weapon_drawn()
+		            || avatar.active_weapon_set()
+		                != protocol::AVATAR_WEAPON_SET_PRIMARY)))
 		{
 			return false;
 		}
@@ -640,6 +755,8 @@ namespace kcd2mp
 	{
 		if (profile.player_id() == 0 || profile.revision() == 0
 		    || !is_valid_display_name(profile.display_name())
+		    || (!profile.persistent_id().empty()
+		        && !is_uuid(profile.persistent_id()))
 		    || !valid_identifier(profile.level_id())
 		    || profile.money() < 0 || profile.money() > max_profile_money
 		    || profile.money_subunits() >= money_subunits_per_groschen
