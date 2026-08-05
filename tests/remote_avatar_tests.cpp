@@ -122,6 +122,20 @@ int main()
 {
 	using namespace kcd2mp;
 	using namespace std::chrono_literals;
+	assert(is_valid_remote_avatar_transition(
+	    remote_avatar_state::pending,
+	    remote_avatar_state::waiting_for_human));
+	assert(is_valid_remote_avatar_transition(
+	    remote_avatar_state::waiting_for_human,
+	    remote_avatar_state::waiting_for_inventory));
+	assert(!is_valid_remote_avatar_transition(
+	    remote_avatar_state::waiting_for_inventory,
+	    remote_avatar_state::waiting_for_soul));
+	assert(is_pending_remote_avatar_state(
+	    remote_avatar_state::stabilizing_soul));
+	assert(!is_pending_remote_avatar_state(remote_avatar_state::ready));
+	assert(!is_valid_remote_avatar_state(
+	    static_cast<remote_avatar_state>(999)));
 	const auto soul_applied_at = std::chrono::steady_clock::now();
 	assert(!kcse::evaluate_remote_soul_settle(
 	             10,
@@ -202,7 +216,9 @@ int main()
 
 	fake_backend fallback_backend;
 	fallback_backend.desired_spawns_succeed = false;
-	remote_avatar_manager fallback_manager(fallback_backend);
+	remote_avatar_manager fallback_manager(
+	    fallback_backend,
+	    {.allow_fallback = true});
 	auto fallback_players = std::vector{
 	    player(3, 30.0F, protocol::MOVEMENT_MODE_IDLE)};
 	fallback_players[0].avatar.set_archetype_id(
@@ -257,7 +273,9 @@ int main()
 
 	fake_backend backoff_backend;
 	backoff_backend.desired_spawns_succeed = false;
-	remote_avatar_manager backoff_manager(backoff_backend);
+	remote_avatar_manager backoff_manager(
+	    backoff_backend,
+	    {.allow_fallback = true});
 	auto backoff_players = std::vector{
 	    player(4, 40.0F, protocol::MOVEMENT_MODE_IDLE)};
 	backoff_players[0].avatar.set_archetype_id(
@@ -287,7 +305,8 @@ int main()
 	fake_backend default_failure_backend;
 	default_failure_backend.fallback_spawns_succeed = false;
 	remote_avatar_manager default_failure_manager(
-	    default_failure_backend);
+	    default_failure_backend,
+	    {.allow_fallback = true});
 	auto default_failure_players = std::vector{
 	    player(5, 50.0F, protocol::MOVEMENT_MODE_IDLE)};
 	result = default_failure_manager.sync(default_failure_players);
@@ -301,5 +320,51 @@ int main()
 	    remote_avatar_manager::clock::now() + 500ms);
 	assert(result.success);
 	assert(default_failure_backend.spawn_attempts == 1);
+
+	fake_backend strict_backend;
+	strict_backend.desired_spawns_succeed = false;
+	remote_avatar_manager strict_manager(strict_backend);
+	auto strict_players = std::vector{
+	    player(6, 60.0F, protocol::MOVEMENT_MODE_IDLE)};
+	strict_players[0].avatar.set_archetype_id(
+	    "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff");
+	result = strict_manager.sync(strict_players);
+	assert(!result.success);
+	assert(!result.degraded);
+	assert(result.error.contains("could not be spawned"));
+	assert(strict_backend.spawn_attempts == 1);
+	assert(strict_backend.players.empty());
+
+	fake_backend timeout_backend;
+	timeout_backend.spawned_state = remote_avatar_state::waiting_for_soul;
+	remote_avatar_manager timeout_manager(
+	    timeout_backend,
+	    {.materialization_timeout = 2s});
+	auto timeout_players = std::vector{
+	    player(7, 70.0F, protocol::MOVEMENT_MODE_IDLE)};
+	const auto timeout_start = remote_avatar_manager::clock::now();
+	result = timeout_manager.sync(timeout_players, timeout_start);
+	assert(result.success);
+	result = timeout_manager.sync(timeout_players, timeout_start + 2s);
+	assert(!result.success);
+	assert(result.error.contains("timed out"));
+	assert(timeout_backend.players.empty());
+
+	fake_backend regression_backend;
+	regression_backend.spawned_state =
+	    remote_avatar_state::waiting_for_inventory;
+	remote_avatar_manager regression_manager(regression_backend);
+	auto regression_players = std::vector{
+	    player(8, 80.0F, protocol::MOVEMENT_MODE_IDLE)};
+	const auto regression_start = remote_avatar_manager::clock::now();
+	result = regression_manager.sync(regression_players, regression_start);
+	assert(result.success);
+	regression_backend.states.begin()->second =
+	    remote_avatar_state::waiting_for_soul;
+	result = regression_manager.sync(
+	    regression_players,
+	    regression_start + 1ms);
+	assert(!result.success);
+	assert(result.error.contains("regressed"));
 	return 0;
 }

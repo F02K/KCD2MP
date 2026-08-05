@@ -208,8 +208,12 @@ namespace big::native_multiplayer_menu
 				return kcd2mp::kcse::ui_client().can_start_join()
 				    ? ingame_ui::localized("menu.status.ready")
 				    : ingame_ui::localized("menu.status.kcse_preparing");
-			case client_state::preflight:
+			case client_state::runtime_preflight:
 				return ingame_ui::localized("menu.status.preflight");
+			case client_state::connecting:
+				return ingame_ui::localized("menu.status.connecting");
+			case client_state::preflight:
+				return ingame_ui::localized("menu.status.negotiating");
 			case client_state::authenticating:
 				return ingame_ui::localized("menu.status.authenticating");
 			case client_state::waiting_for_bootstrap:
@@ -451,13 +455,15 @@ namespace big::native_multiplayer_menu
 			{
 				std::scoped_lock lock(value.mutex);
 				menu = value.menu;
-				value.page_open = false;
-				value.editing = edit_field::none;
-				value.rebuild_requested = false;
 			}
 			if (!menu)
 				return;
-			ingame_ui::native_menu_api(menu).open_root();
+			if (!ingame_ui::native_menu_api(menu).open_root())
+				return;
+			std::scoped_lock lock(value.mutex);
+			value.page_open = false;
+			value.editing = edit_field::none;
+			value.rebuild_requested = false;
 		}
 
 		void begin_edit(edit_field field)

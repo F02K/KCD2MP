@@ -10,12 +10,12 @@ reference and is never used as a fallback.
 | Local player | `CCryAction::GetClientEntity` and `S_GameContext::GetActorById` | Typed slots and actor lookup |
 | Transform read/write | `IEntity::GetWorldTMPtr` and `IEntity::SetWorldTM` | VTable slot audit plus identical-write/readback active probe |
 | Entity isolation | Exact eight-slot `IEntitySystemSink`, verified Human/Animal AI-Actor classification, full `IEntitySystem::RemoveEntity` teardown, scheduler/player exclusions, and orphaned-combat recovery outside a 50 m PvP radius | Spawn/remove/reuse tests and audited sink/combat targets |
-| Remote avatar | Native `IActorSystem::CreateActor("NPC")`, shared Soul materialization, Actor/Soul/Human/Inventory readiness | Retry, timeout, fallback, stale epoch, external destroy, and cleanup tests |
+| Remote avatar | Native `IActorSystem::CreateActor("NPC")`, shared Soul materialization, monotonic Actor/Human/Soul/stabilization/Inventory readiness, strict desired-Soul policy | Phase-regression, timeout, no-fallback, opt-in fallback diagnostic, stale epoch, external destroy, and cleanup tests |
 | Locomotion | Native Actor MovementController requests for Idle/Walk/Run plus interpolated world transform | Backend tests and runtime error propagation |
 | Inventory/equipment | Native item creation, logical instance GUID, count/quality/condition, slot-ordered equip/unequip/delete, draw/holster | Transaction and rollback tests plus active probe |
 | RPG profile | Absolute money, 10 stats, 35 skills, normalized progress, inventory, equipment, and avatar state | Full capture/apply/reconcile/rollback tests |
 | Sandbox | Native save/load lock, deferred engine `unload`, lifecycle completion gate, and root-main-menu return | Console FIFO dispatch avoids unloading from KCSE `PostUpdate`; main-menu open is VTable-validated and SEH-guarded |
-| UI boundary | Copied, versioned POD snapshots and commands | ABI size/version tests; no engine pointer crosses the boundary |
+| UI boundary | Copied POD snapshots and commands, compatibility-gated by the shared KCD2MP version (`0.0.9`) | ABI size/project-version tests; no engine pointer crosses the boundary |
 
 ## Runtime ownership and capability publication
 

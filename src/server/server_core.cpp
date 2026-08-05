@@ -1164,14 +1164,6 @@ namespace kcd2mp::server
 			    m_config.default_avatar_archetype);
 			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
-		if (!profile_name_matches(profile->profile, pending.display_name))
-		{
-			reject(
-			    connection,
-			    protocol::REJECT_REASON_IDENTITY_REQUIRED,
-			    "display name does not match the persistent profile");
-			return;
-		}
 		const auto id = profile->profile.player_id();
 		if (!m_players.contains(id)
 		    && reserved_slots() >= m_config.max_players)
@@ -1199,12 +1191,56 @@ namespace kcd2mp::server
 			    "player identity is already connected");
 			return;
 		}
+		const bool display_name_changed =
+		    profile->profile.display_name() != pending.display_name;
+		if (display_name_changed)
+		{
+			const auto requested_name = lowercase_ascii(pending.display_name);
+			const bool name_in_use = std::ranges::any_of(
+			    m_store.profiles(),
+			    [&](const persisted_profile &stored)
+			    {
+				    return stored.profile.player_id() != id
+				        && lowercase_ascii(stored.profile.display_name())
+				            == requested_name;
+			    })
+			    || std::ranges::any_of(
+			        m_players,
+			        [&](const auto &entry)
+			        {
+				        return entry.first != id
+				            && lowercase_ascii(entry.second.display_name)
+				                == requested_name;
+			        })
+			    || std::ranges::any_of(
+			        m_pending,
+			        [&](const auto &entry)
+			        {
+				        return entry.first != connection
+				            && entry.second.persisted
+				            && entry.second.persisted->profile.player_id() != id
+				            && lowercase_ascii(entry.second.display_name)
+				                == requested_name;
+			        });
+			if (name_in_use)
+			{
+				reject(
+				    connection,
+				    protocol::REJECT_REASON_IDENTITY_REQUIRED,
+				    "display name is already in use");
+				return;
+			}
+			profile->profile.set_display_name(pending.display_name);
+			profile->profile.set_revision(
+			    profile->profile.revision() + 1);
+		}
 		if (rotate_identity)
 		{
 			pending.issued_identity_token = m_generate_token();
 			profile->identity_hash = hash_token(pending.issued_identity_token);
-			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
+		if (display_name_changed || rotate_identity)
+			m_store.save_profile(profile->identity_hash, profile->profile);
 		pending.persisted = std::move(profile);
 		pending.resume_token = message.resume_token();
 		pending.deadline =

@@ -27,7 +27,7 @@ namespace big::ingame_ui
 		[[nodiscard]] bool append_button(const button &value) const;
 		[[nodiscard]] bool show(const page &value) const;
 		void close() const;
-		void open_root() const;
+		[[nodiscard]] bool open_root() const;
 
 	private:
 		[[nodiscard]] bool call(

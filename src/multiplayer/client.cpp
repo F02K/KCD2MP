@@ -1,5 +1,6 @@
 #include "multiplayer/client.hpp"
 #include "multiplayer/avatar_visual.hpp"
+#include "multiplayer/client_message_gate.hpp"
 #include "multiplayer/world_catalog.hpp"
 #include "kcse/join_trace.hpp"
 
@@ -45,8 +46,12 @@ namespace kcd2mp
 			{
 			case client_state::disconnected:
 				return "disconnected";
+			case client_state::runtime_preflight:
+				return "runtime-preflight";
+			case client_state::connecting:
+				return "connecting";
 			case client_state::preflight:
-				return "preflight";
+				return "protocol-preflight";
 			case client_state::authenticating:
 				return "authenticating";
 			case client_state::waiting_for_bootstrap:
@@ -67,61 +72,76 @@ namespace kcd2mp
 
 		const char *envelope_name(const protocol::Envelope &envelope)
 		{
-			if (envelope.has_server_challenge())
-				return "ServerChallenge";
-			if (envelope.has_server_bootstrap())
-				return "ServerBootstrap";
-			if (envelope.has_server_accepted())
-				return "ServerAccepted";
-			if (envelope.has_server_home_marker_updated())
-				return "ServerHomeMarkerUpdated";
-			if (envelope.has_server_rejected())
-				return "ServerRejected";
-			if (envelope.has_world_snapshot())
-				return "WorldSnapshot";
-			if (envelope.has_player_joined())
-				return "PlayerJoined";
-			if (envelope.has_player_left())
-				return "PlayerLeft";
-			if (envelope.has_profile_accepted())
-				return "ProfileAccepted";
-			if (envelope.has_profile_rejected())
-				return "ProfileRejected";
-			if (envelope.has_avatar_accepted())
-				return "AvatarAccepted";
-			if (envelope.has_avatar_rejected())
-				return "AvatarRejected";
-			if (envelope.has_player_avatar_updated())
-				return "PlayerAvatarUpdated";
-			if (envelope.has_chat_broadcast())
-				return "ChatBroadcast";
-			if (envelope.has_server_entity_control())
+			switch (envelope.payload_case())
+			{
+			case protocol::Envelope::kClientHello: return "ClientHello";
+			case protocol::Envelope::kServerAccepted: return "ServerAccepted";
+			case protocol::Envelope::kServerRejected: return "ServerRejected";
+			case protocol::Envelope::kPlayerJoined: return "PlayerJoined";
+			case protocol::Envelope::kPlayerLeft: return "PlayerLeft";
+			case protocol::Envelope::kClientTransform: return "ClientTransform";
+			case protocol::Envelope::kWorldSnapshot: return "WorldSnapshot";
+			case protocol::Envelope::kStateCorrection: return "StateCorrection";
+			case protocol::Envelope::kChatSend: return "ChatSend";
+			case protocol::Envelope::kChatBroadcast: return "ChatBroadcast";
+			case protocol::Envelope::kPing: return "Ping";
+			case protocol::Envelope::kPong: return "Pong";
+			case protocol::Envelope::kServerShutdown: return "ServerShutdown";
+			case protocol::Envelope::kServerChallenge: return "ServerChallenge";
+			case protocol::Envelope::kClientAuthenticate:
+				return "ClientAuthenticate";
+			case protocol::Envelope::kServerBootstrap: return "ServerBootstrap";
+			case protocol::Envelope::kClientWorldReady: return "ClientWorldReady";
+			case protocol::Envelope::kClientWorldFailed:
+				return "ClientWorldFailed";
+			case protocol::Envelope::kClientProfileUpdate:
+				return "ClientProfileUpdate";
+			case protocol::Envelope::kProfileAccepted: return "ProfileAccepted";
+			case protocol::Envelope::kProfileRejected: return "ProfileRejected";
+			case protocol::Envelope::kServerEntityControl:
 				return "ServerEntityControl";
-			if (envelope.has_world_object_accepted())
+			case protocol::Envelope::kClientAvatarUpdate:
+				return "ClientAvatarUpdate";
+			case protocol::Envelope::kAvatarAccepted: return "AvatarAccepted";
+			case protocol::Envelope::kAvatarRejected: return "AvatarRejected";
+			case protocol::Envelope::kPlayerAvatarUpdated:
+				return "PlayerAvatarUpdated";
+			case protocol::Envelope::kClientWorldObjectUpdate:
+				return "ClientWorldObjectUpdate";
+			case protocol::Envelope::kWorldObjectAccepted:
 				return "WorldObjectAccepted";
-			if (envelope.has_world_object_rejected())
+			case protocol::Envelope::kWorldObjectRejected:
 				return "WorldObjectRejected";
-			if (envelope.has_world_object_updated())
+			case protocol::Envelope::kWorldObjectUpdated:
 				return "WorldObjectUpdated";
-			if (envelope.has_world_item_accepted())
-				return "WorldItemAccepted";
-			if (envelope.has_world_item_rejected())
-				return "WorldItemRejected";
-			if (envelope.has_world_item_updated())
-				return "WorldItemUpdated";
-			if (envelope.has_server_environment_updated())
+			case protocol::Envelope::kServerEnvironmentUpdated:
 				return "ServerEnvironmentUpdated";
-			if (envelope.has_activity_granted())
-				return "ActivityGranted";
-			if (envelope.has_activity_denied())
-				return "ActivityDenied";
-			if (envelope.has_player_activity_updated())
+			case protocol::Envelope::kClientWorldItemUpdate:
+				return "ClientWorldItemUpdate";
+			case protocol::Envelope::kWorldItemAccepted:
+				return "WorldItemAccepted";
+			case protocol::Envelope::kWorldItemRejected:
+				return "WorldItemRejected";
+			case protocol::Envelope::kWorldItemUpdated: return "WorldItemUpdated";
+			case protocol::Envelope::kClientSleepState: return "ClientSleepState";
+			case protocol::Envelope::kServerSleepState: return "ServerSleepState";
+			case protocol::Envelope::kClientDeath: return "ClientDeath";
+			case protocol::Envelope::kClientRespawnRequest:
+				return "ClientRespawnRequest";
+			case protocol::Envelope::kServerRespawn: return "ServerRespawn";
+			case protocol::Envelope::kClientActivityStart:
+				return "ClientActivityStart";
+			case protocol::Envelope::kClientActivityEnd:
+				return "ClientActivityEnd";
+			case protocol::Envelope::kActivityGranted: return "ActivityGranted";
+			case protocol::Envelope::kActivityDenied: return "ActivityDenied";
+			case protocol::Envelope::kPlayerActivityUpdated:
 				return "PlayerActivityUpdated";
-			if (envelope.has_server_shutdown())
-				return "ServerShutdown";
-			if (envelope.has_pong())
-				return "Pong";
-			return "Other";
+			case protocol::Envelope::kServerHomeMarkerUpdated:
+				return "ServerHomeMarkerUpdated";
+			case protocol::Envelope::PAYLOAD_NOT_SET: return "PayloadNotSet";
+			}
+			return "InvalidEnvelopePayload";
 		}
 
 		bool same_persistent_profile(
@@ -229,7 +249,6 @@ namespace kcd2mp
 			std::scoped_lock lock(m_state_mutex);
 			m_status = {};
 			m_update_rates = {};
-			m_status.state = client_state::preflight;
 			m_manual_disconnect_pending = false;
 			m_disconnect_capture_profile = false;
 			m_remote_players.clear();
@@ -264,10 +283,12 @@ namespace kcd2mp
 			m_last_environment_applied = {};
 			m_resume_token.clear();
 			m_pending_connect = std::move(options);
+			if (!transition_state_locked(client_state::runtime_preflight))
+				return false;
 		}
 		KCD2MP_JOIN_TRACE(
 		    "join.state.initialized",
-		    "state=preflight; client caches cleared");
+		    "state=runtime-preflight; client caches cleared");
 		ensure_network_thread();
 		KCD2MP_JOIN_TRACE(
 		    "join.network-thread.ready",
@@ -290,7 +311,8 @@ namespace kcd2mp
 			m_disconnect_capture_profile =
 			    m_status.state == client_state::connected;
 			m_manual_disconnect_pending = true;
-			m_status.state = client_state::closing;
+			if (!transition_state_locked(client_state::closing))
+				return;
 			m_status.error.clear();
 			m_pending_connect.reset();
 			m_remote_players.clear();
@@ -310,8 +332,12 @@ namespace kcd2mp
 			{
 				return;
 			}
-			m_status.state = client_state::closing;
-			m_status.error = std::move(error);
+			if (!transition_state_locked(
+			        client_state::closing,
+			        std::move(error)))
+			{
+				return;
+			}
 		}
 		queue_network(disconnect_command{});
 	}
@@ -502,8 +528,12 @@ namespace kcd2mp
 				m_status.error.clear();
 				return;
 			}
-			m_status.state = client_state::closing;
-			m_status.error = epoch_error;
+			if (!transition_state_locked(
+			        client_state::closing,
+			        std::string(epoch_error)))
+			{
+				return;
+			}
 		}
 		queue_network(disconnect_command{});
 	}
@@ -662,7 +692,7 @@ namespace kcd2mp
 	{
 		{
 			std::scoped_lock lock(m_state_mutex);
-			if (m_status.state != client_state::preflight
+			if (m_status.state != client_state::runtime_preflight
 			    || !m_pending_connect)
 				return;
 		}
@@ -680,18 +710,19 @@ namespace kcd2mp
 			if (gate.pending)
 				return;
 			std::scoped_lock lock(m_state_mutex);
-			if (m_status.state == client_state::preflight
+			if (m_status.state == client_state::runtime_preflight
 			    && m_pending_connect)
 			{
-				m_status.state = client_state::disconnected;
-				m_status.error = gate.diagnostic.empty()
+				const auto error = gate.diagnostic.empty()
 				    ? "Multiplayer runtime initialization failed."
 				    : gate.diagnostic;
-				m_pending_connect.reset();
+				(void)transition_state_locked(
+				    client_state::disconnected,
+				    error);
 				KCD2MP_JOIN_TRACE(
 				    "join.runtime.preflight.failed",
-				    m_status.error);
-				kcse::join_trace::finish_join(m_status.error);
+				    error);
+				kcse::join_trace::finish_join(error);
 			}
 			return;
 		}
@@ -699,11 +730,13 @@ namespace kcd2mp
 		std::optional<client_options> options;
 		{
 			std::scoped_lock lock(m_state_mutex);
-			if (m_status.state != client_state::preflight
+			if (m_status.state != client_state::runtime_preflight
 			    || !m_pending_connect)
 				return;
 			options = std::move(m_pending_connect);
 			m_pending_connect.reset();
+			if (!transition_state_locked(client_state::connecting))
+				return;
 		}
 		KCD2MP_JOIN_TRACE(
 		    "join.runtime.preflight.complete",
@@ -855,7 +888,8 @@ namespace kcd2mp
 					            std::format(
 					                "target=\"{}\"; building ClientHello",
 					                options.address));
-					        set_state(client_state::preflight);
+					        if (!set_state(client_state::preflight))
+						        return;
 					        protocol::Envelope envelope;
 					        auto *hello = envelope.mutable_client_hello();
 					        hello->set_version(kcd2mp_version);
@@ -916,7 +950,17 @@ namespace kcd2mp
 					                reconnect_attempt,
 					                reason));
 					        transport_needs_reset = true;
-					        if (retry
+					        client_state current_state{};
+					        {
+						        std::scoped_lock lock(m_state_mutex);
+						        current_state = m_status.state;
+					        }
+					        if (current_state == client_state::closing
+					            || current_state == client_state::disconnected)
+					        {
+						        set_state(client_state::disconnected);
+					        }
+					        else if (retry
 					            && reconnect_attempt < reconnect_delays.size())
 					        {
 						        reconnect_at = std::chrono::steady_clock::now()
@@ -958,13 +1002,41 @@ namespace kcd2mp
 					                envelope_name(*envelope)));
 					        const auto *message_kind =
 					            envelope_name(*envelope);
+					        client_state receive_state{};
+					        {
+						        std::scoped_lock lock(m_state_mutex);
+						        receive_state = m_status.state;
+					        }
+					        if (!is_server_message_allowed(
+					                receive_state,
+					                envelope->payload_case()))
+					        {
+						        const auto violation = std::format(
+						            "server sent {} while client was {}",
+						            message_kind,
+						            state_name(receive_state));
+						        KCD2MP_JOIN_TRACE(
+						            "join.protocol.phase-violation",
+						            violation);
+						        set_state(client_state::closing, violation);
+						        if (transport)
+						        {
+							        transport->abort_connection(
+							            "server message was invalid for client phase");
+						        }
+						        return;
+					        }
 					        if (envelope->has_server_accepted())
 					        {
 						        const auto &accepted =
 						            envelope->server_accepted();
 						        {
 							        std::scoped_lock lock(m_state_mutex);
-							        m_status.state = client_state::connected;
+							        if (!transition_state_locked(
+							                client_state::connected))
+							        {
+								        return;
+							        }
 							        m_status.local_player_id =
 							            accepted.player_id();
 							        m_status.server_name =
@@ -1020,7 +1092,11 @@ namespace kcd2mp
 							        std::scoped_lock lock(m_state_mutex);
 							        m_server_id = server_id;
 							        m_status.server_id = server_id;
-							        m_status.state = client_state::authenticating;
+							        if (!transition_state_locked(
+							                client_state::authenticating))
+							        {
+								        return;
+							        }
 						        }
 						        protocol::Envelope authentication;
 						        auto *message =
@@ -1096,11 +1172,12 @@ namespace kcd2mp
 							        m_status.server_id = bootstrap.server_id();
 							        m_status.session_id = bootstrap.session_id();
 							        m_status.level_id = bootstrap.level_id();
-							        m_status.state =
-							            bootstrap.mode()
+							        const auto next_state = bootstrap.mode()
 							                == protocol::BOOTSTRAP_MODE_WAIT
 							            ? client_state::waiting_for_bootstrap
 							            : client_state::loading_sandbox;
+							        if (!transition_state_locked(next_state))
+								        return;
 						        }
 					        }
 					        else if (envelope->has_server_rejected())
@@ -1116,6 +1193,20 @@ namespace kcd2mp
 							        transport->abort_connection(
 							            "server rejected connection");
 						        }
+						        }
+					        else if (envelope->has_server_shutdown())
+					        {
+						        const auto reason =
+						            envelope->server_shutdown().reason();
+						        KCD2MP_JOIN_TRACE(
+						            "join.server.shutdown",
+						            reason);
+						        set_state(client_state::disconnected, reason);
+						        if (transport)
+						        {
+							        transport->abort_connection(
+							            "server shutdown");
+						        }
 					        }
 					        else if (envelope->has_world_snapshot()
 					            && !first_world_snapshot_seen)
@@ -1127,6 +1218,12 @@ namespace kcd2mp
 						                "players={} server_time_ms={}",
 						                envelope->world_snapshot().players_size(),
 						                envelope->world_snapshot().server_time_ms()));
+					        }
+
+					        if (!server_message_requires_game_thread(
+					                envelope->payload_case()))
+					        {
+						        return;
 					        }
 
 					        const bool reliable =
@@ -1199,6 +1296,7 @@ namespace kcd2mp
 						    else if constexpr (
 						        std::is_same_v<type, disconnect_command>)
 						    {
+							    reconnect_at = {};
 							    if (transport)
 							    {
 								    transport->disconnect();
@@ -1349,6 +1447,11 @@ namespace kcd2mp
 					        "target=\"{}\" attempt={}",
 					        options.address,
 					        reconnect_attempt));
+					if (!set_state(client_state::connecting))
+					{
+						reconnect_at = {};
+						continue;
+					}
 					create_transport();
 					transport->connect(options.address);
 					KCD2MP_JOIN_TRACE(
@@ -1414,59 +1517,89 @@ namespace kcd2mp
 		}
 	}
 
-	void multiplayer_client::set_state(
+	bool multiplayer_client::set_state(
 	    client_state state,
 	    std::string error)
 	{
-		client_state previous{};
+		bool transitioned{};
 		std::string final_error;
-		std::string transition_error;
 		{
 			std::scoped_lock lock(m_state_mutex);
-			previous = m_status.state;
-			m_status.state = state;
-			// A failure first enters closing and then reaches disconnected via
-			// intentional transport teardown. Preserve the original cause so the
-			// native main menu can still present it after the world is unloaded.
-			if (!(state == client_state::disconnected && error.empty()
-			        && previous == client_state::closing
-			        && !m_status.error.empty()))
-				m_status.error = std::move(error);
-			transition_error = m_status.error;
-			if (state == client_state::disconnected)
+			transitioned = transition_state_locked(state, std::move(error));
+			final_error = m_status.error;
+		}
+		if (transitioned && state == client_state::disconnected)
+			kcse::join_trace::finish_join(
+			    final_error.empty() ? "disconnected" : final_error);
+		return transitioned;
+	}
+
+	bool multiplayer_client::transition_state_locked(
+	    client_state state,
+	    std::string error)
+	{
+		const auto previous = m_status.state;
+		if (!is_valid_client_transition(previous, state))
+		{
+			const auto violation = std::format(
+			    "invalid client state transition from {} to {}",
+			    state_name(previous),
+			    state_name(state));
+			KCD2MP_JOIN_TRACE(
+			    "join.state.transition-invalid",
+			    violation);
+			if (previous != client_state::closing
+			    && previous != client_state::disconnected)
 			{
-				m_manual_disconnect_pending = false;
-				m_disconnect_capture_profile = false;
-				m_pending_bootstrap.reset();
-				m_pending_connect.reset();
-				m_remote_players.clear();
-				m_local_correction.reset();
-				m_pending_profile.reset();
-				m_pending_avatar.reset();
-				m_profile_update_pending = false;
-				m_avatar_update_pending = false;
-				m_status.local_player_id = 0;
-				m_status.ping_ms = -1;
-				m_status.packet_loss_percent = 0.0F;
-				m_world_objects.clear();
-				m_pending_world_objects.clear();
-				m_deferred_world_objects.clear();
-				m_world_items.clear();
-				m_pending_world_items.clear();
-				m_deferred_world_items.clear();
-				m_environment_revision = 0;
-				m_weather_revision = 0;
-				m_sleep_revision = 0;
-				m_status.sleeping = false;
-				m_status.sleeping_players = 0;
-				m_status.sleeping_players_required = 1;
-				m_status.dead = false;
-				m_status.respawn_pending = false;
-				m_local_activity.reset();
-				m_pending_activity_start.reset();
-				m_last_environment_applied = {};
-				final_error = m_status.error;
+				m_status.state = client_state::closing;
+				m_status.error = violation;
 			}
+			return false;
+		}
+
+		m_status.state = state;
+		// A failure first enters closing and then reaches disconnected via
+		// intentional transport teardown. Preserve the original cause so the
+		// native main menu can still present it after the world is unloaded.
+		if (!(state == client_state::disconnected && error.empty()
+		        && (previous == client_state::closing
+		            || previous == client_state::disconnected)
+		        && !m_status.error.empty()))
+		{
+			m_status.error = std::move(error);
+		}
+		if (state == client_state::disconnected)
+		{
+			m_manual_disconnect_pending = false;
+			m_disconnect_capture_profile = false;
+			m_pending_bootstrap.reset();
+			m_pending_connect.reset();
+			m_remote_players.clear();
+			m_local_correction.reset();
+			m_pending_profile.reset();
+			m_pending_avatar.reset();
+			m_profile_update_pending = false;
+			m_avatar_update_pending = false;
+			m_status.local_player_id = 0;
+			m_status.ping_ms = -1;
+			m_status.packet_loss_percent = 0.0F;
+			m_world_objects.clear();
+			m_pending_world_objects.clear();
+			m_deferred_world_objects.clear();
+			m_world_items.clear();
+			m_pending_world_items.clear();
+			m_deferred_world_items.clear();
+			m_environment_revision = 0;
+			m_weather_revision = 0;
+			m_sleep_revision = 0;
+			m_status.sleeping = false;
+			m_status.sleeping_players = 0;
+			m_status.sleeping_players_required = 1;
+			m_status.dead = false;
+			m_status.respawn_pending = false;
+			m_local_activity.reset();
+			m_pending_activity_start.reset();
+			m_last_environment_applied = {};
 		}
 		KCD2MP_JOIN_TRACE(
 		    "join.state.transition",
@@ -1474,10 +1607,8 @@ namespace kcd2mp
 		        "from={} to={} error=\"{}\"",
 		        state_name(previous),
 		        state_name(state),
-		        transition_error));
-		if (state == client_state::disconnected)
-			kcse::join_trace::finish_join(
-			    final_error.empty() ? "disconnected" : final_error);
+		        m_status.error));
+		return true;
 	}
 
 	void multiplayer_client::queue_network(network_command command)
@@ -1610,6 +1741,17 @@ namespace kcd2mp
 		    "join.game-envelope.begin",
 		    std::format("message={}", envelope_name(envelope)));
 		std::unique_lock lock(m_state_mutex);
+		if (m_status.state == client_state::disconnected
+		    || m_status.state == client_state::closing)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.game-envelope.discarded",
+			    std::format(
+			        "message={} state={}",
+			        envelope_name(envelope),
+			        state_name(m_status.state)));
+			return;
+		}
 		if (envelope.has_server_accepted())
 		{
 			m_status.avatar_policy =
@@ -1665,23 +1807,29 @@ namespace kcd2mp
 			            && bootstrap.profile().transform_valid(),
 			        bootstrap.has_profile()
 			            && bootstrap.profile().has_last_transform()));
-			if (m_status.state == client_state::disconnected
-			    || m_status.state == client_state::closing)
+			if (m_status.state != client_state::waiting_for_bootstrap
+			    && m_status.state != client_state::loading_sandbox)
 			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server bootstrap reached the game thread in an invalid phase");
+				queue_network(disconnect_command{});
 				return;
 			}
 			if (bootstrap.mode() == protocol::BOOTSTRAP_MODE_WAIT)
 			{
-				m_status.state = client_state::waiting_for_bootstrap;
 				return;
 			}
-			m_status.state = client_state::loading_sandbox;
 			if (!bootstrap.has_profile())
 			{
-				m_status.error = "server bootstrap did not include a player profile";
+				const std::string error =
+				    "server bootstrap did not include a player profile";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    error);
 				protocol::ClientWorldFailed failed;
 				failed.set_session_id(bootstrap.session_id());
-				failed.set_reason(m_status.error);
+				failed.set_reason(error);
 				queue_network(world_failed_command{std::move(failed)});
 				return;
 			}
@@ -1700,7 +1848,9 @@ namespace kcd2mp
 				failed.set_session_id(bootstrap.session_id());
 				failed.set_reason(result.error);
 				queue_network(world_failed_command{std::move(failed)});
-				m_status.error = result.error;
+				(void)transition_state_locked(
+				    client_state::closing,
+				    result.error);
 				return;
 			}
 			if (m_status.state == client_state::disconnected
@@ -1757,9 +1907,9 @@ namespace kcd2mp
 				lock.lock();
 				if (!applied)
 				{
-					m_status.state = client_state::closing;
-					m_status.error =
-					    "could not apply the server environment timeline";
+					(void)transition_state_locked(
+					    client_state::closing,
+					    "could not apply the server environment timeline");
 					queue_network(disconnect_command{});
 					return;
 				}
@@ -1799,9 +1949,9 @@ namespace kcd2mp
 			lock.lock();
 			if (!applied)
 			{
-				m_status.state = client_state::closing;
-				m_status.error =
-				    "could not apply the updated server environment";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not apply the updated server environment");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -1832,14 +1982,23 @@ namespace kcd2mp
 		}
 		else if (envelope.has_server_respawn())
 		{
+			if (!m_status.dead || !m_status.respawn_pending)
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server sent an unsolicited respawn");
+				queue_network(disconnect_command{});
+				return;
+			}
 			const auto spawn = envelope.server_respawn().spawn();
 			lock.unlock();
 			const bool applied = m_runtime.respawn_local_player(spawn);
 			lock.lock();
 			if (!applied)
 			{
-				m_status.state = client_state::closing;
-				m_status.error = "could not revive the native local player";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not revive the native local player");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -1855,8 +2014,9 @@ namespace kcd2mp
 			    || m_pending_activity_start->station_guid()
 			        != activity.station_guid())
 			{
-				m_status.state = client_state::closing;
-				m_status.error = "server granted an unexpected activity session";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server granted an unexpected activity session");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -1871,6 +2031,10 @@ namespace kcd2mp
 			    || m_pending_activity_start->station_guid()
 			        != denied.station_guid())
 			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server denied an activity that was not pending");
+				queue_network(disconnect_command{});
 				return;
 			}
 			m_pending_activity_start.reset();
@@ -1914,8 +2078,9 @@ namespace kcd2mp
 			    || envelope.profile_accepted().revision()
 			        != m_profile->revision() + 1)
 			{
-				m_status.state = client_state::closing;
-				m_status.error = "server returned an invalid profile revision";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server returned an invalid profile revision");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -1927,6 +2092,14 @@ namespace kcd2mp
 		}
 		else if (envelope.has_profile_rejected())
 		{
+			if (!m_profile || !m_pending_profile || !m_profile_update_pending)
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server rejected a profile update that was not pending");
+				queue_network(disconnect_command{});
+				return;
+			}
 			const auto authoritative =
 			    envelope.profile_rejected().authoritative_profile();
 			lock.unlock();
@@ -1937,10 +2110,10 @@ namespace kcd2mp
 			m_profile_update_pending = false;
 			if (!applied)
 			{
-				m_status.state = client_state::closing;
-				m_status.error =
+				(void)transition_state_locked(
+				    client_state::closing,
 				    "could not apply authoritative profile correction: "
-				    + envelope.profile_rejected().reason();
+				        + envelope.profile_rejected().reason());
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -1952,8 +2125,15 @@ namespace kcd2mp
 			const auto &accepted = envelope.world_object_accepted();
 			const auto pending =
 			    m_pending_world_objects.find(accepted.entity_guid());
-			if (pending == m_pending_world_objects.end())
+			if (pending == m_pending_world_objects.end()
+			    || accepted.revision() != pending->second.revision() + 1)
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server accepted an unknown or invalid world object revision");
+				queue_network(disconnect_command{});
 				return;
+			}
 			auto state = pending->second;
 			state.set_revision(accepted.revision());
 			m_world_objects.insert_or_assign(accepted.entity_guid(), state);
@@ -1980,6 +2160,14 @@ namespace kcd2mp
 		{
 			const auto state =
 			    envelope.world_object_rejected().authoritative_state();
+			if (!m_pending_world_objects.contains(state.entity_guid()))
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server rejected a world object update that was not pending");
+				queue_network(disconnect_command{});
+				return;
+			}
 			m_pending_world_objects.erase(state.entity_guid());
 			m_deferred_world_objects.erase(state.entity_guid());
 			m_world_objects.insert_or_assign(state.entity_guid(), state);
@@ -1987,7 +2175,13 @@ namespace kcd2mp
 			const bool applied = m_runtime.apply_world_object_state(state);
 			lock.lock();
 			if (!applied)
-				m_status.error = "could not apply world object correction";
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not apply world object correction");
+				queue_network(disconnect_command{});
+				return;
+			}
 		}
 		else if (envelope.has_world_object_updated())
 		{
@@ -2005,15 +2199,28 @@ namespace kcd2mp
 			const bool applied = m_runtime.apply_world_object_state(state);
 			lock.lock();
 			if (!applied)
-				m_status.error = "could not apply remote world object update";
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not apply remote world object update");
+				queue_network(disconnect_command{});
+				return;
+			}
 		}
 		else if (envelope.has_world_item_accepted())
 		{
 			const auto &accepted = envelope.world_item_accepted();
 			const auto pending =
 			    m_pending_world_items.find(accepted.instance_id());
-			if (pending == m_pending_world_items.end())
+			if (pending == m_pending_world_items.end()
+			    || accepted.revision() != pending->second.revision() + 1)
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server accepted an unknown or invalid world item revision");
+				queue_network(disconnect_command{});
 				return;
+			}
 			auto state = pending->second;
 			state.set_revision(accepted.revision());
 			m_world_items.insert_or_assign(accepted.instance_id(), state);
@@ -2040,6 +2247,14 @@ namespace kcd2mp
 		{
 			const auto state =
 			    envelope.world_item_rejected().authoritative_state();
+			if (!m_pending_world_items.contains(state.instance_id()))
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server rejected a world item update that was not pending");
+				queue_network(disconnect_command{});
+				return;
+			}
 			m_pending_world_items.erase(state.instance_id());
 			m_deferred_world_items.erase(state.instance_id());
 			m_world_items.insert_or_assign(state.instance_id(), state);
@@ -2047,7 +2262,13 @@ namespace kcd2mp
 			const bool applied = m_runtime.apply_world_item_state(state);
 			lock.lock();
 			if (!applied)
-				m_status.error = "could not apply world item correction";
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not apply world item correction");
+				queue_network(disconnect_command{});
+				return;
+			}
 		}
 		else if (envelope.has_world_item_updated())
 		{
@@ -2065,7 +2286,13 @@ namespace kcd2mp
 			const bool applied = m_runtime.apply_world_item_state(state);
 			lock.lock();
 			if (!applied)
-				m_status.error = "could not apply remote world item update";
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not apply remote world item update");
+				queue_network(disconnect_command{});
+				return;
+			}
 		}
 		else if (envelope.has_avatar_accepted())
 		{
@@ -2074,9 +2301,9 @@ namespace kcd2mp
 			    || envelope.avatar_accepted().revision()
 			        != m_local_avatar->revision() + 1)
 			{
-				m_status.state = client_state::closing;
-				m_status.error =
-				    "server returned an invalid avatar revision";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server returned an invalid avatar revision");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -2095,6 +2322,14 @@ namespace kcd2mp
 		}
 		else if (envelope.has_avatar_rejected())
 		{
+			if (!m_local_avatar || !m_pending_avatar || !m_avatar_update_pending)
+			{
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server rejected an avatar update that was not pending");
+				queue_network(disconnect_command{});
+				return;
+			}
 			m_local_avatar =
 			    envelope.avatar_rejected().authoritative_avatar();
 			m_status.avatar_archetype_id =
@@ -2150,17 +2385,18 @@ namespace kcd2mp
 			lock.lock();
 			if (!applied)
 			{
-				m_status.state = client_state::closing;
-				m_status.error =
-				    "could not apply the server's entity-control state";
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "could not apply the server's entity-control state");
 				queue_network(disconnect_command{});
 			}
 		}
 		else if (envelope.has_server_shutdown())
 		{
-			m_status.state = client_state::disconnected;
-			m_status.error = envelope.server_shutdown().reason();
-			m_remote_players.clear();
+			(void)transition_state_locked(
+			    client_state::disconnected,
+			    envelope.server_shutdown().reason());
+			queue_network(disconnect_command{});
 		}
 	}
 
@@ -2198,8 +2434,9 @@ namespace kcd2mp
 					return;
 				}
 				m_pending_bootstrap.reset();
-				m_status.state = client_state::closing;
-				m_status.error = reason;
+				(void)transition_state_locked(
+				    client_state::closing,
+				    reason);
 			}
 			queue_network(world_failed_command{std::move(failed)});
 			m_runtime.end_sandbox(reason);
@@ -2218,11 +2455,26 @@ namespace kcd2mp
 		}
 		if (!bootstrap->profile().has_avatar())
 		{
+			const std::string reason =
+			    "server profile has no avatar descriptor";
 			protocol::ClientWorldFailed failed;
 			failed.set_session_id(bootstrap->session_id());
-			failed.set_reason(
-			    "server profile has no avatar descriptor");
+			failed.set_reason(reason);
+			{
+				std::scoped_lock lock(m_state_mutex);
+				if (!m_pending_bootstrap
+				    || m_pending_bootstrap->session_id()
+				        != bootstrap->session_id())
+				{
+					return;
+				}
+				m_pending_bootstrap.reset();
+				(void)transition_state_locked(
+				    client_state::closing,
+				    reason);
+			}
 			queue_network(world_failed_command{std::move(failed)});
+			m_runtime.end_sandbox(reason);
 			return;
 		}
 		*ready.mutable_avatar() = bootstrap->profile().avatar();
@@ -2235,7 +2487,8 @@ namespace kcd2mp
 				return;
 			}
 			m_pending_bootstrap.reset();
-			m_status.state = client_state::applying_profile;
+			if (!transition_state_locked(client_state::applying_profile))
+				return;
 			m_profile = bootstrap->profile();
 			m_pending_profile.reset();
 			m_local_avatar = bootstrap->profile().avatar();

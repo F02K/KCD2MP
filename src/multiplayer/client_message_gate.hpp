@@ -1,0 +1,95 @@
+#pragma once
+
+#include "kcd2mp.pb.h"
+#include "multiplayer/client_state.hpp"
+
+namespace kcd2mp
+{
+	[[nodiscard]] constexpr bool is_server_message_allowed(
+	    client_state state,
+	    protocol::Envelope::PayloadCase payload) noexcept
+	{
+		using payload_case = protocol::Envelope::PayloadCase;
+		if (!is_valid_client_state(state))
+			return false;
+
+		if (payload == payload_case::kPong)
+		{
+			return state == client_state::preflight
+			    || state == client_state::authenticating
+			    || state == client_state::waiting_for_bootstrap
+			    || state == client_state::loading_sandbox
+			    || state == client_state::applying_profile
+			    || state == client_state::connected;
+		}
+		if (payload == payload_case::kServerRejected
+		    || payload == payload_case::kServerShutdown)
+		{
+			return state != client_state::disconnected
+			    && state != client_state::runtime_preflight
+			    && state != client_state::connecting
+			    && state != client_state::reconnecting
+			    && state != client_state::closing;
+		}
+
+		switch (state)
+		{
+		case client_state::preflight:
+			return payload == payload_case::kServerChallenge;
+		case client_state::authenticating:
+		case client_state::waiting_for_bootstrap:
+			return payload == payload_case::kServerBootstrap;
+		case client_state::applying_profile:
+			return payload == payload_case::kServerAccepted;
+		case client_state::connected:
+			switch (payload)
+			{
+			case payload_case::kServerHomeMarkerUpdated:
+			case payload_case::kPlayerJoined:
+			case payload_case::kPlayerLeft:
+			case payload_case::kWorldSnapshot:
+			case payload_case::kStateCorrection:
+			case payload_case::kChatBroadcast:
+			case payload_case::kProfileAccepted:
+			case payload_case::kProfileRejected:
+			case payload_case::kServerEntityControl:
+			case payload_case::kAvatarAccepted:
+			case payload_case::kAvatarRejected:
+			case payload_case::kPlayerAvatarUpdated:
+			case payload_case::kWorldObjectAccepted:
+			case payload_case::kWorldObjectRejected:
+			case payload_case::kWorldObjectUpdated:
+			case payload_case::kServerEnvironmentUpdated:
+			case payload_case::kWorldItemAccepted:
+			case payload_case::kWorldItemRejected:
+			case payload_case::kWorldItemUpdated:
+			case payload_case::kServerSleepState:
+			case payload_case::kServerRespawn:
+			case payload_case::kActivityGranted:
+			case payload_case::kActivityDenied:
+			case payload_case::kPlayerActivityUpdated:
+				return true;
+			default:
+				return false;
+			}
+		default:
+			return false;
+		}
+	}
+
+	[[nodiscard]] constexpr bool server_message_requires_game_thread(
+	    protocol::Envelope::PayloadCase payload) noexcept
+	{
+		using payload_case = protocol::Envelope::PayloadCase;
+		switch (payload)
+		{
+		case payload_case::kServerChallenge:
+		case payload_case::kServerRejected:
+		case payload_case::kServerShutdown:
+		case payload_case::kPong:
+			return false;
+		default:
+			return true;
+		}
+	}
+}

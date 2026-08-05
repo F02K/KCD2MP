@@ -1,12 +1,12 @@
 #pragma once
 
+#include "generated/kcd2mp_version.hpp"
+
 #include <cstddef>
 #include <cstdint>
 
 namespace kcd2mp::kcse
 {
-	inline constexpr std::uint32_t client_abi_version = 6;
-	inline constexpr std::uint64_t client_build_id = 0x000600006A350E20ULL;
 	inline constexpr wchar_t client_module_name[] = L"KCD2MPKCSEClient.dll";
 	inline constexpr char client_query_export[] = "KCD2MP_QueryClient";
 
@@ -84,8 +84,9 @@ namespace kcd2mp::kcse
 	struct client_api
 	{
 		std::uint32_t struct_size{};
-		std::uint32_t abi_version{};
-		std::uint64_t build_id{};
+		std::uint32_t version_major{};
+		std::uint32_t version_minor{};
+		std::uint32_t version_patch{};
 		std::uint32_t(__cdecl *get_runtime_status)(
 		    runtime_status *result) noexcept{};
 		std::uint32_t(__cdecl *connect)(
@@ -112,13 +113,16 @@ namespace kcd2mp::kcse
 	};
 
 	using query_client = const client_api *(__cdecl *)(
-	    std::uint32_t requested_abi) noexcept;
+	    std::uint32_t requested_version_major,
+	    std::uint32_t requested_version_minor,
+	    std::uint32_t requested_version_patch) noexcept;
 
 	[[nodiscard]] constexpr bool compatible(const client_api *api) noexcept
 	{
 		return api && api->struct_size == sizeof(client_api)
-		    && api->abi_version == client_abi_version
-		    && api->build_id == client_build_id
+		    && api->version_major == kcd2mp_version_major
+		    && api->version_minor == kcd2mp_version_minor
+		    && api->version_patch == kcd2mp_version_patch
 		    && api->get_runtime_status && api->connect && api->disconnect
 		    && api->send_chat && api->select_avatar && api->get_status
 		    && api->attempt_sleep && api->request_respawn

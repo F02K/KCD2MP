@@ -611,7 +611,7 @@ int main()
 	{
 		server_core restarted(config_for(persistent_world.path));
 		restarted.on_transport_connected(10, start + 1s);
-		restarted.on_message(10, hello(), start + 1s);
+		restarted.on_message(10, hello("Hans"), start + 1s);
 		(void)restarted.take_outbound();
 		restarted.on_message(
 		    10,
@@ -620,9 +620,10 @@ int main()
 		auto outbound = restarted.take_outbound();
 		const auto bootstrap = find_bootstrap(outbound, 10);
 		assert(bootstrap.profile().player_id() == persistent_id);
-		assert(bootstrap.profile().revision() == 2);
+		assert(bootstrap.profile().revision() == 3);
 		assert(bootstrap.profile().money_subunits() == 7);
 		assert(bootstrap.profile().persistent_id() == persistent_uuid);
+		assert(bootstrap.profile().display_name() == "Hans");
 		restarted.on_message(10, ready(bootstrap), start + 1002ms);
 		(void)restarted.take_outbound();
 		restarted.on_message(
@@ -630,6 +631,58 @@ int main()
 		    client_transform(1),
 		    start + 1003ms);
 		assert(restarted.players().front().last_sequence == 1);
+		assert(restarted.players().front().display_name == "Hans");
+	}
+
+	{
+		server_core restarted(config_for(persistent_world.path));
+		restarted.on_transport_connected(11, start + 2s);
+		restarted.on_message(11, hello("Hans"), start + 2s);
+		(void)restarted.take_outbound();
+		restarted.on_message(
+		    11,
+		    authenticate(identity_token),
+		    start + 2001ms);
+		const auto bootstrap = find_bootstrap(restarted.take_outbound(), 11);
+		assert(bootstrap.profile().player_id() == persistent_id);
+		assert(bootstrap.profile().persistent_id() == persistent_uuid);
+		assert(bootstrap.profile().display_name() == "Hans");
+		assert(bootstrap.profile().revision() == 3);
+	}
+
+	temporary_world rename_collision_world;
+	{
+		server_core core(config_for(rename_collision_world.path));
+		const auto alice_token =
+		    connect_new_player(core, 20, start + 3s, 1, nullptr, "Alice");
+		(void)connect_new_player(
+		    core,
+		    21,
+		    start + 3003ms,
+		    2,
+		    nullptr,
+		    "Bob");
+		core.on_transport_disconnected(
+		    20,
+		    false,
+		    "intentional disconnect",
+		    start + 3006ms);
+		(void)core.take_outbound();
+
+		core.on_transport_connected(22, start + 3007ms);
+		core.on_message(22, hello("Bob"), start + 3007ms);
+		(void)core.take_outbound();
+		core.on_message(
+		    22,
+		    authenticate(alice_token),
+		    start + 3008ms);
+		const auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_server_rejected());
+		assert(outbound.front().envelope.server_rejected().reason()
+		    == protocol::REJECT_REASON_IDENTITY_REQUIRED);
+		assert(outbound.front().envelope.server_rejected().message()
+		    == "display name is already in use");
 	}
 
 	temporary_world initializer_world;

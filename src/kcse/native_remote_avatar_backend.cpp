@@ -461,7 +461,7 @@ namespace kcd2mp::kcse
 			return active_probe_result::failed;
 		}
 		const auto lifecycle = status(*m_probe_avatar);
-		if (lifecycle.state == remote_avatar_state::pending)
+		if (is_pending_remote_avatar_state(lifecycle.state))
 			return active_probe_result::pending;
 		if (lifecycle.state == remote_avatar_state::failed)
 		{
@@ -906,7 +906,7 @@ namespace kcd2mp::kcse
 		if (!actor->m_pMovementController || !actor->m_pMannequinStateParams
 		    || !actor->m_pHitDeathReactions || !actor->m_pConditionController)
 			return {
-			    remote_avatar_state::pending,
+			    remote_avatar_state::waiting_for_human,
 			    "waiting for native Human animation/damage controllers"};
 		auto *soul = actor->m_pSoul;
 		KCD2MP_JOIN_TRACE(
@@ -919,7 +919,7 @@ namespace kcd2mp::kcse
 		        static_cast<void *>(soul)));
 		if (!soul)
 			return {
-			    remote_avatar_state::pending,
+			    remote_avatar_state::waiting_for_soul,
 			    "waiting for native Soul"};
 		if (!value->shared_soul_applied)
 		{
@@ -959,7 +959,7 @@ namespace kcd2mp::kcse
 			        value->player,
 			        value->entity_id));
 			return {
-			    remote_avatar_state::pending,
+			    remote_avatar_state::stabilizing_soul,
 			    "waiting for native shared-Soul stabilization"};
 		}
 		const auto settled = evaluate_remote_soul_settle(
@@ -981,7 +981,7 @@ namespace kcd2mp::kcse
 			        remote_soul_settle_frames,
 			        remote_soul_settle_time.count()));
 			return {
-			    remote_avatar_state::pending,
+			    remote_avatar_state::stabilizing_soul,
 			    "waiting for native shared-Soul stabilization"};
 		}
 		auto *inventory = soul->m_inventorySoul.GetInventory();
@@ -998,7 +998,7 @@ namespace kcd2mp::kcse
 		if (!inventory || !equipment)
 		{
 			return {
-			    remote_avatar_state::pending,
+			    remote_avatar_state::waiting_for_inventory,
 			    "waiting for native Human inventory/equipment"};
 		}
 		value->lifecycle_ready = true;

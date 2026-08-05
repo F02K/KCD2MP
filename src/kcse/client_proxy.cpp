@@ -33,7 +33,12 @@ namespace kcd2mp::kcse
 			return nullptr;
 		const auto query = reinterpret_cast<query_client>(
 		    GetProcAddress(module, client_query_export));
-		const auto *candidate = query ? query(client_abi_version) : nullptr;
+		const auto *candidate = query
+		    ? query(
+		          kcd2mp_version_major,
+		          kcd2mp_version_minor,
+		          kcd2mp_version_patch)
+		    : nullptr;
 		if (!compatible(candidate))
 			return nullptr;
 		g_api.store(candidate, std::memory_order_release);
@@ -132,7 +137,13 @@ namespace kcd2mp::kcse
 			return result;
 		}
 		client_status result;
-		result.state = static_cast<client_state>(value.state);
+		const auto state = static_cast<client_state>(value.state);
+		if (!is_valid_client_state(state))
+		{
+			result.error = "KCD2MP KCSE client returned an invalid state value.";
+			return result;
+		}
+		result.state = state;
 		result.local_player_id = value.local_player_id;
 		result.ping_ms = value.ping_ms;
 		result.packet_loss_percent = value.packet_loss_percent;

@@ -13,13 +13,14 @@ KCD2MP has one semantic project version shared by:
 - packaged artifacts; and
 - the multiplayer handshake.
 
-The current version is `0.0.9`. There is no separate public protocol version.
-During the prototype phase, client and server versions must match exactly. A
-mismatch is rejected before authentication or world loading begins.
+The current version is `0.0.9`. There is no separate public protocol or KCSE C
+ABI version. The KCSE query boundary reads the same generated major, minor, and
+patch components as the rest of the project. During the prototype phase, all
+components must match exactly; a mismatch is rejected before authentication or
+world loading begins.
 
-Internal safety counters such as the KCSE C ABI revision, persistence schema,
-and Address Library format remain independently versioned. They are
-implementation compatibility checks, not KCD2MP release versions.
+Internal formats such as the persistence schema and Address Library remain
+independently versioned implementation details.
 
 Wire messages still evolve with the project, but their compatibility boundary
 is the KCD2MP version. This avoids a numeric wire version carrying a different,
@@ -64,7 +65,10 @@ IDs, object identities, item instance UUIDs, and revisions survive restarts.
 Identity tokens contain 256 random bits. The client stores them with Windows
 DPAPI; the server stores only their SHA-256 hashes. Recovery codes are
 single-use, expire after ten minutes, and are printed only when explicitly
-requested by an administrator.
+requested by an administrator. The token or recovery code identifies the
+player; the display name is mutable. Supplying a new available display name
+during authentication updates the same persistent profile and does not create
+a new identity.
 
 ## Player profiles
 
@@ -107,8 +111,10 @@ boundary. The lifecycle is:
 6. transactionally remove all native state on leave or disconnect.
 
 Movement uses audited native transforms and the Actor movement controller.
-Equipment changes are ordered, validated, and recoverable. Failed Soul
-replacements retain the default fallback and retry with bounded backoff.
+Equipment changes are ordered, validated, and recoverable. Avatar
+materialization advances monotonically through Human, Soul, Soul-stabilization,
+and Inventory readiness. A regression, timeout, or failed desired Soul fails
+the client closed; the live runtime does not substitute the default Soul.
 
 ## Doors and loot containers
 
@@ -251,7 +257,8 @@ The test suites cover:
 - handshake/version validation and malformed or oversized messages;
 - authentication, identity recovery, capacity, reconnect, and timeouts;
 - profile revisions, inventory ownership, reconciliation, and rollback;
-- remote-avatar lifecycle, readiness, fallback, and cleanup;
+- remote-avatar lifecycle phases, regression/timeout handling, strict
+  no-fallback behavior, opt-in fallback diagnostics, and cleanup;
 - door/container conflicts, persistence, and late-join replay;
 - dropped-item revisions, ownership transfer, tombstones, and restart replay;
 - environment validation and updates;

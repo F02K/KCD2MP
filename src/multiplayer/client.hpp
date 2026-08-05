@@ -4,6 +4,7 @@
 #include "multiplayer/identity_store.hpp"
 #include "multiplayer/networking.hpp"
 #include "multiplayer/runtime.hpp"
+#include "multiplayer/client_state.hpp"
 
 #include <chrono>
 #include <cstdint>
@@ -19,19 +20,6 @@
 
 namespace kcd2mp
 {
-	enum class client_state
-	{
-		disconnected,
-		preflight,
-		authenticating,
-		waiting_for_bootstrap,
-		loading_sandbox,
-		applying_profile,
-		connected,
-		reconnecting,
-		closing
-	};
-
 	struct client_options
 	{
 		std::string address{"127.0.0.1:27020"};
@@ -226,7 +214,10 @@ namespace kcd2mp
 		void network_loop(std::stop_token stop);
 		void advance_runtime_preflight();
 		void ensure_network_thread();
-		void set_state(client_state state, std::string error = {});
+		bool set_state(client_state state, std::string error = {});
+		[[nodiscard]] bool transition_state_locked(
+		    client_state state,
+		    std::string error = {});
 		void queue_network(network_command command);
 		void queue_profile_snapshot(
 		    protocol::PlayerProfile profile,
@@ -301,30 +292,4 @@ namespace kcd2mp
 		std::chrono::steady_clock::time_point m_last_avatar_sent{};
 		std::chrono::steady_clock::time_point m_last_avatar_sampled{};
 	};
-
-	[[nodiscard]] inline const char *to_string(client_state state)
-	{
-		switch (state)
-		{
-		case client_state::disconnected:
-			return "Disconnected";
-		case client_state::preflight:
-			return "Preflight";
-		case client_state::authenticating:
-			return "Authenticating";
-		case client_state::waiting_for_bootstrap:
-			return "Waiting for bootstrap";
-		case client_state::loading_sandbox:
-			return "Loading sandbox";
-		case client_state::applying_profile:
-			return "Applying profile";
-		case client_state::connected:
-			return "Connected";
-		case client_state::reconnecting:
-			return "Reconnecting";
-		case client_state::closing:
-			return "Closing";
-		}
-		return "Unknown";
-	}
 }

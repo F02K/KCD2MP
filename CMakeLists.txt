@@ -545,6 +545,8 @@ if(KCD2MP_BUILD_KCSE)
         "${SRC_DIR}/kcse/native_runtime.hpp"
         "${SRC_DIR}/multiplayer/client.cpp"
         "${SRC_DIR}/multiplayer/client.hpp"
+        "${SRC_DIR}/multiplayer/client_message_gate.hpp"
+        "${SRC_DIR}/multiplayer/client_state.hpp"
         "${SRC_DIR}/multiplayer/identity_store.cpp"
         "${SRC_DIR}/multiplayer/identity_store.hpp"
     )
@@ -759,6 +761,15 @@ if (BUILD_TESTING)
     set_property(TARGET KCD2MPGameCommandQueueTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPGameCommandQueueTests COMMAND KCD2MPGameCommandQueueTests)
 
+    add_executable(KCD2MPClientStateTests
+        "${PROJECT_SOURCE_DIR}/tests/client_state_tests.cpp"
+    )
+    set_property(TARGET KCD2MPClientStateTests PROPERTY CXX_STANDARD 23)
+    target_link_libraries(KCD2MPClientStateTests PRIVATE KCD2MPProtocol)
+    target_include_directories(KCD2MPClientStateTests PRIVATE "${SRC_DIR}")
+    set_property(TARGET KCD2MPClientStateTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+    add_test(NAME KCD2MPClientStateTests COMMAND KCD2MPClientStateTests)
+
     add_executable(KCD2MPEntityControlTests
         "${PROJECT_SOURCE_DIR}/tests/entity_control_tests.cpp"
     )
@@ -796,7 +807,10 @@ if (BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/tests/client_api_tests.cpp"
     )
     set_property(TARGET KCD2MPKCSEClientApiTests PROPERTY CXX_STANDARD 23)
-    target_include_directories(KCD2MPKCSEClientApiTests PRIVATE "${SRC_DIR}")
+    target_include_directories(KCD2MPKCSEClientApiTests PRIVATE
+        "${SRC_DIR}"
+        "${CMAKE_CURRENT_BINARY_DIR}"
+    )
     set_property(TARGET KCD2MPKCSEClientApiTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPKCSEClientApiTests COMMAND KCD2MPKCSEClientApiTests)
 
@@ -909,6 +923,7 @@ if (BUILD_TESTING)
             KCD2MPServerCoreTests
             KCD2MPPropertyTests
             KCD2MPGameCommandQueueTests
+            KCD2MPClientStateTests
             KCD2MPEntityControlTests
             KCD2MPRuntimeHandleTests
             KCD2MPRemoteAvatarTests

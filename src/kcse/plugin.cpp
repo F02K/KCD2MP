@@ -820,8 +820,9 @@ namespace
 
 	const kcd2mp::kcse::client_api g_api{
 	    sizeof(kcd2mp::kcse::client_api),
-	    kcd2mp::kcse::client_abi_version,
-	    kcd2mp::kcse::client_build_id,
+	    kcd2mp::kcd2mp_version_major,
+	    kcd2mp::kcd2mp_version_minor,
+	    kcd2mp::kcd2mp_version_patch,
 	    abi_get_runtime_status,
 	    abi_connect,
 	    abi_disconnect,
@@ -881,8 +882,13 @@ KCSE_EXPORT bool KCSEPlugin_Load(const KCSE::IKCSEInterface *kcse)
 }
 
 KCSE_EXPORT const kcd2mp::kcse::client_api *__cdecl KCD2MP_QueryClient(
-    std::uint32_t requested_abi) noexcept
+    std::uint32_t requested_version_major,
+    std::uint32_t requested_version_minor,
+    std::uint32_t requested_version_patch) noexcept
 {
-	return requested_abi == kcd2mp::kcse::client_abi_version ? &g_api :
-	                                                           nullptr;
+	return requested_version_major == kcd2mp::kcd2mp_version_major
+	        && requested_version_minor == kcd2mp::kcd2mp_version_minor
+	        && requested_version_patch == kcd2mp::kcd2mp_version_patch
+	    ? &g_api
+	    : nullptr;
 }

@@ -1,6 +1,7 @@
 #include "gui/native_ingame_menu_api.hpp"
 
 #include <Offsets/vtables/IUIElement.h>
+#include <guimodule/C_UIMenu.h>
 #include <guimodule/SUITypes.h>
 
 #include <cstddef>
@@ -122,16 +123,29 @@ namespace big::ingame_ui
 		reinterpret_cast<close_function>(vtable[2])(interface_pointer);
 	}
 
-	void native_menu_api::open_root() const
+	bool native_menu_api::open_root() const
 	{
-		if (!m_menu || mode() == 0)
-			return;
-		auto *interface_pointer =
-		    static_cast<std::byte *>(m_menu) + menu_interface_offset;
-		auto **vtable = *reinterpret_cast<void ***>(interface_pointer);
-		using open_function = void(__fastcall *)(void *, char);
-		reinterpret_cast<open_function>(vtable[1])(
-		    interface_pointer,
-		    static_cast<char>(mode()));
+		if (!m_menu)
+			return false;
+
+		using wh::guimodule::E_ButtonId;
+		E_ButtonId::Type selection{};
+		switch (mode())
+		{
+		case 1:
+		case 4:
+			selection = E_ButtonId::Continue;
+			break;
+		case 2:
+		case 3:
+			selection = E_ButtonId::Resume;
+			break;
+		default:
+			return false;
+		}
+
+		reinterpret_cast<wh::guimodule::C_UIMenu *>(m_menu)
+		    ->RebuildRootPage(selection);
+		return true;
 	}
 }

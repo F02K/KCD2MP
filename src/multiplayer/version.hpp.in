@@ -1,8 +1,15 @@
 #pragma once
 
+#include <cstdint>
 #include <string_view>
 
 namespace kcd2mp
 {
 	inline constexpr std::string_view kcd2mp_version = "@PROJECT_VERSION@";
+	inline constexpr std::uint32_t kcd2mp_version_major =
+	    @PROJECT_VERSION_MAJOR@U;
+	inline constexpr std::uint32_t kcd2mp_version_minor =
+	    @PROJECT_VERSION_MINOR@U;
+	inline constexpr std::uint32_t kcd2mp_version_patch =
+	    @PROJECT_VERSION_PATCH@U;
 }

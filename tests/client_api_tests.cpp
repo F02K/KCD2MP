@@ -75,8 +75,9 @@ int main()
 
 	client_api valid{
 	    sizeof(client_api),
-	    client_abi_version,
-	    client_build_id,
+	    kcd2mp::kcd2mp_version_major,
+	    kcd2mp::kcd2mp_version_minor,
+	    kcd2mp::kcd2mp_version_patch,
 	    runtime,
 	    connect,
 	    disconnect,
@@ -90,14 +91,14 @@ int main()
 	    archetypes,
 	    diagnostic_logging};
 	assert(compatible(&valid));
+	static_assert(kcd2mp::kcd2mp_version == "0.0.9");
+	static_assert(kcd2mp::kcd2mp_version_major == 0);
+	static_assert(kcd2mp::kcd2mp_version_minor == 0);
+	static_assert(kcd2mp::kcd2mp_version_patch == 9);
 
-	auto old_abi = valid;
-	old_abi.abi_version = client_abi_version - 1;
-	assert(!compatible(&old_abi));
-
-	auto wrong_build = valid;
-	++wrong_build.build_id;
-	assert(!compatible(&wrong_build));
+	auto wrong_version = valid;
+	++wrong_version.version_patch;
+	assert(!compatible(&wrong_version));
 
 	auto short_struct = valid;
 	short_struct.struct_size =
