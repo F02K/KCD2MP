@@ -130,6 +130,67 @@ namespace kcd2mp::kcse
 			    : nullptr;
 		}
 
+		enum class locomotion_request_result
+		{
+			applied,
+			rejected,
+			faulted
+		};
+
+		locomotion_request_result guarded_request_locomotion(
+		    wh::entitymodule::C_Actor &actor,
+		    const Vec3 *move_target,
+		    float speed) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return actor.RequestLocomotion(move_target, speed)
+				    ? locomotion_request_result::applied
+				    : locomotion_request_result::rejected;
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER(
+			    "join.remote-animation.locomotion.seh"))
+			{
+				return locomotion_request_result::faulted;
+			}
+#else
+			return actor.RequestLocomotion(move_target, speed)
+			    ? locomotion_request_result::applied
+			    : locomotion_request_result::rejected;
+#endif
+		}
+
+		enum class weapon_action_result
+		{
+			applied,
+			rejected,
+			faulted
+		};
+
+		weapon_action_result guarded_apply_weapon_state(
+		    wh::entitymodule::C_Human &human,
+		    const protocol::AvatarDescriptor &avatar) noexcept
+		{
+#ifdef _WIN32
+			__try
+			{
+				return apply_native_avatar_weapon_state(human, avatar)
+				    ? weapon_action_result::applied
+				    : weapon_action_result::rejected;
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER(
+			    "join.remote-animation.weapon-action.seh"))
+			{
+				return weapon_action_result::faulted;
+			}
+#else
+			return apply_native_avatar_weapon_state(human, avatar)
+			    ? weapon_action_result::applied
+			    : weapon_action_result::rejected;
+#endif
+		}
+
 		bool execute_remote_script(std::string_view script) noexcept
 		{
 			auto *environment = SSystemGlobalEnvironment::GetInstance();
@@ -704,12 +765,12 @@ namespace kcd2mp::kcse
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.EnablePhysics.begin",
 		    std::format(
-		        "entity_id={} entity={} enabled=true "
+		        "entity_id={} entity={} enabled=false "
 		        "api=fork:CEntity::EnablePhysics",
 		        id,
 		        static_cast<void *>(entity)));
 		const auto physics_result =
-		    reinterpret_cast<CEntity *>(entity)->EnablePhysics(true);
+		    reinterpret_cast<CEntity *>(entity)->EnablePhysics(false);
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.EnablePhysics.returned",
 		    std::format(
@@ -718,15 +779,15 @@ namespace kcd2mp::kcse
 		        physics_result));
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.Hide.begin",
-		    std::format("entity_id={} hidden=false", id));
-		entity->Hide(false);
+		    std::format("entity_id={} hidden=true", id));
+		entity->Hide(true);
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.Hide.returned",
 		    std::format("entity_id={}", id));
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.Activate.begin",
-		    std::format("entity_id={} active=true", id));
-		entity->Activate(true);
+		    std::format("entity_id={} active=false", id));
+		entity->Activate(false);
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.Activate.returned",
 		    std::format("entity_id={}", id));
@@ -735,7 +796,8 @@ namespace kcd2mp::kcse
 		    std::format(
 		        "entity_id={} flags=0x{:08X} client_only=true "
 		        "never_network_static=true ai_object_id=0 "
-		        "physics=true proximity=true hidden=false active=true",
+		        "physics=false proximity=true hidden=true active=false "
+		        "presentation=deferred",
 		        id,
 		        flags));
 
@@ -1025,6 +1087,7 @@ namespace kcd2mp::kcse
 			error.clear();
 		}
 		if (lifecycle.state == remote_avatar_state::ready
+		    && value->presented
 		    && !apply_activity(*value, player, error))
 		{
 			value->failed = true;
@@ -1047,8 +1110,12 @@ namespace kcd2mp::kcse
 			        player.transform.position().z()));
 		}
 		const bool activity_locked = value->activity_active;
+		const bool movement_stopped = value->motion_applied
+		    && value->last_movement_mode != protocol::MOVEMENT_MODE_IDLE
+		    && player.movement_mode == protocol::MOVEMENT_MODE_IDLE;
 		const bool transform_changed = !activity_locked
 		    && (!value->transform_applied
+		    || movement_stopped
 		    || position_or_rotation_changed(
 		        value->last_transform,
 		        player.transform));
@@ -1068,7 +1135,7 @@ namespace kcd2mp::kcse
 			    std::chrono::steady_clock::now() - transform_started;
 		}
 		bool motion_succeeded = true;
-		if (transform_succeeded && !activity_locked)
+		if (transform_succeeded && value->presented && !activity_locked)
 		{
 			const auto motion_started = std::chrono::steady_clock::now();
 			motion_succeeded = drive_motion(*value, player, error);
@@ -1123,6 +1190,28 @@ namespace kcd2mp::kcse
 			appearance_time =
 			    std::chrono::steady_clock::now() - appearance_started;
 		}
+		// A freshly created Human is deliberately kept outside rendering,
+		// physics and Actor updates while its shared Soul and inventory are
+		// being replaced. The active ABI probe has always used this safe
+		// lifecycle. Real remote players must not become tickable earlier than
+		// the probe just because ServerAccepted already contains their snapshot.
+		if (lifecycle.state == remote_avatar_state::ready
+		    && value->player != std::numeric_limits<player_id>::max()
+		    && !value->presented
+		    && !present(*value, error))
+		{
+			value->failed = true;
+			value->failure = std::move(error);
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-presentation.failed",
+			    std::format(
+			        "player_id={} handle={} entity_id={} error=\"{}\"",
+			        value->player,
+			        avatar,
+			        value->entity_id,
+			        value->failure));
+			return false;
+		}
 		const auto update_finished = std::chrono::steady_clock::now();
 		if (join_trace::diagnostics_enabled()
 		    && (last_update_diagnostic_at
@@ -1154,6 +1243,43 @@ namespace kcd2mp::kcse
 			        appearance_attempted,
 			        milliseconds(appearance_time)));
 		}
+		return true;
+	}
+
+	bool native_remote_avatar_backend::present(
+	    entry &avatar,
+	    std::string &error)
+	{
+		if (avatar.presented)
+			return true;
+		auto *entity = resolve_entity(avatar.entity_id);
+		if (!entity)
+		{
+			error = "native remote entity disappeared before presentation";
+			return false;
+		}
+
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-presentation.begin",
+		    std::format(
+		        "player_id={} entity_id={} physics=true hidden=false active=true",
+		        avatar.player,
+		        avatar.entity_id));
+		if (!reinterpret_cast<CEntity *>(entity)->EnablePhysics(true))
+		{
+			error = "native remote physics could not be enabled";
+			return false;
+		}
+		entity->Activate(true);
+		entity->Hide(false);
+		avatar.presented = true;
+		avatar.motion_applied = false;
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-presentation.complete",
+		    std::format(
+		        "player_id={} entity_id={}",
+		        avatar.player,
+		        avatar.entity_id));
 		return true;
 	}
 
@@ -1460,7 +1586,8 @@ namespace kcd2mp::kcse
 		}
 
 		const bool should_draw = avatar_weapon_should_draw(appearance);
-		if (!native_avatar_weapon_state_matches(*human, appearance))
+		if (m_native_weapon_actions_enabled
+		    && !native_avatar_weapon_state_matches(*human, appearance))
 		{
 			if (!avatar.first_weapon_action_logged)
 			{
@@ -1484,14 +1611,25 @@ namespace kcd2mp::kcse
 			        avatar.player,
 			        avatar.entity_id,
 			        should_draw));
-			const bool applied =
-			    apply_native_avatar_weapon_state(*human, appearance);
-			if (!applied)
+			const auto result =
+			    guarded_apply_weapon_state(*human, appearance);
+			if (result != weapon_action_result::applied)
 			{
-				error = should_draw
-				    ? "native DrawWeapon failed"
-				    : "native HolsterWeapon failed";
-				return false;
+				// Weapon presentation is optional for a replicated visual. A
+				// rejected or faulting native controller must not destroy the
+				// remote avatar and unload the local multiplayer world.
+				m_native_weapon_actions_enabled = false;
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-animation.weapon-action.disabled",
+				    std::format(
+				        "player_id={} entity_id={} requested_drawn={} reason={}",
+				        avatar.player,
+				        avatar.entity_id,
+				        should_draw,
+				        result == weapon_action_result::faulted
+				            ? "seh"
+				            : "rejected"));
+				return true;
 			}
 			KCD2MP_JOIN_TRACE(
 			    "join.remote-animation.weapon-action.returned",
@@ -1580,20 +1718,31 @@ namespace kcd2mp::kcse
 			    native_position(player.transform.position())
 			    + direction * 2.0F;
 		}
-		if (!actor->RequestLocomotion(
-		        move_target ? &*move_target : nullptr,
-		        speed))
+		if (m_native_locomotion_enabled)
 		{
-			error = "native MovementController rejected locomotion request";
-			KCD2MP_JOIN_TRACE(
-			    "join.remote-animation.locomotion-failed",
-			    std::format(
-			        "player_id={} entity_id={} speed={} error=\"{}\"",
-			        avatar.player,
-			        avatar.entity_id,
-			        speed,
-			        error));
-			return false;
+			const auto result = guarded_request_locomotion(
+			    *actor,
+			    move_target ? &*move_target : nullptr,
+			    speed);
+			if (result != locomotion_request_result::applied)
+			{
+				// RequestMovement is an optional presentation enhancement. Some
+				// native NPC controllers reject player-style requests (and older
+				// layouts may fault). Transform replication remains authoritative,
+				// so disable this ABI path for the process instead of failing the
+				// remote avatar and unloading the multiplayer world.
+				m_native_locomotion_enabled = false;
+				KCD2MP_JOIN_TRACE(
+				    "join.remote-animation.locomotion-disabled",
+				    std::format(
+				        "player_id={} entity_id={} speed={} reason={}",
+				        avatar.player,
+				        avatar.entity_id,
+				        speed,
+				        result == locomotion_request_result::faulted
+				            ? "seh"
+				            : "rejected"));
+			}
 		}
 		avatar.motion_applied = true;
 		avatar.last_movement_mode = player.movement_mode;

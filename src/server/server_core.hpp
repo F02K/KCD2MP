@@ -162,6 +162,10 @@ namespace kcd2mp::server
 			time_point last_persisted_at;
 			bool dead{};
 			protocol::PlayerActivity activity;
+			std::uint64_t dummy_random_state{};
+			time_point dummy_last_update;
+			time_point dummy_action_ends_at;
+			time_point dummy_next_input_at;
 		};
 
 		struct profile_claim
@@ -260,6 +264,10 @@ namespace kcd2mp::server
 		void persist_world_objects();
 		void persist_world_items();
 		void remove_owned_items_from_world();
+		void tick_dummies(time_point now);
+		void begin_dummy_input(player_session &player, time_point now);
+		[[nodiscard]] static std::uint64_t next_dummy_random(
+		    player_session &player);
 		void broadcast(
 		    protocol::Envelope envelope,
 		    reliability delivery,

@@ -14,7 +14,7 @@ reference and is never used as a fallback.
 | Locomotion | Native Actor MovementController requests for Idle/Walk/Run plus interpolated world transform | Backend tests and runtime error propagation |
 | Inventory/equipment | Native item creation, logical instance GUID, count/quality/condition, slot-ordered equip/unequip/delete, draw/holster | Transaction and rollback tests plus active probe |
 | RPG profile | Absolute money, 10 stats, 35 skills, normalized progress, inventory, equipment, and avatar state | Full capture/apply/reconcile/rollback tests |
-| Sandbox | Native save/load lock and `CCryAction::EndGameContext` unload | Audited VTable target and confirmed lifecycle completion gate |
+| Sandbox | Native save/load lock, deferred engine `unload`, lifecycle completion gate, and root-main-menu return | Console FIFO dispatch avoids unloading from KCSE `PostUpdate`; main-menu open is VTable-validated and SEH-guarded |
 | UI boundary | Copied, versioned POD snapshots and commands | ABI size/version tests; no engine pointer crosses the boundary |
 
 ## Runtime ownership and capability publication

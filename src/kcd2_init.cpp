@@ -391,7 +391,7 @@ namespace big
 		const auto status = kcd2mp::kcse::ui_client().status();
 		if (status.state == kcd2mp::client_state::connected)
 		{
-			(void)kcd2mp::kcse::ui_client().attempt_sleep();
+			LOG(INFO) << "Blocked vanilla skip time while multiplayer is connected.";
 			return;
 		}
 		big::g_hooking->get_original<hook_C_SkipTimeCutscene_Play>()(

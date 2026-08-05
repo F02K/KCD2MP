@@ -64,6 +64,7 @@ namespace kcd2mp::kcse
 			std::chrono::steady_clock::time_point
 			    shared_soul_applied_at{};
 			bool lifecycle_ready{};
+			bool presented{};
 			bool display_name_applied{};
 			std::string display_name;
 			bool multiplayer_semantics_applied{};
@@ -113,6 +114,9 @@ namespace kcd2mp::kcse
 		    entry &avatar,
 		    const remote_avatar_snapshot &player,
 		    std::string &error);
+		[[nodiscard]] bool present(
+		    entry &avatar,
+		    std::string &error);
 		[[nodiscard]] multiplayer_semantics_result apply_multiplayer_semantics(
 		    entry &avatar,
 		    std::string &error);
@@ -129,6 +133,8 @@ namespace kcd2mp::kcse
 		std::uint64_t m_frame_sequence{};
 		std::uint64_t m_epoch{1};
 		remote_avatar_handle m_next_handle{1};
+		bool m_native_locomotion_enabled{true};
+		bool m_native_weapon_actions_enabled{true};
 		mutable bool m_catalogs_ready{};
 		mutable std::string m_diagnostic;
 	};

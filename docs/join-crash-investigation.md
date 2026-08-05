@@ -260,6 +260,48 @@ relocation/vtable helper implementations listed above.
 - **Actual cause:** initializer spawn-selection plus incorrect interpretation
   of `rollback_succeeded=false` when `rollback_attempted=false`.
 
+## Failure return behavior
+
+Join/runtime failures no longer call `EndGameContext` directly from KCSE's
+`PostUpdate` callback. The client queues CryEngine's native `unload` command in
+the deferred console FIFO, waits until both the game context and client entity
+are gone, and then opens the native root main menu. Expected unload lifecycle
+events do not invalidate the stored failure cause. The native multiplayer page
+opens automatically and renders a literal English heading and the original
+English error text (also as its tooltip).
+
+## Follow-up: joining an occupied server
+
+`ServerAccepted` contains snapshots for players and server dummies that are
+already present. Materializing one of those snapshots creates a native Human,
+then replaces its Soul and waits several frames for the native inventory and
+equipment managers to stabilize. The remote-avatar ABI probe survived this
+same sequence because it immediately hid and deactivated its temporary Human.
+A real remote Human, however, previously enabled physics, rendering, and Actor
+updates directly in `spawn()`, before the shared-Soul transaction completed.
+This exposed a partially materialized Actor to an engine update between join
+frames and only occurred when the accepted player list was non-empty.
+
+Remote Humans now start with physics disabled, hidden, and inactive. Their
+display name, shared Soul, transform, inventory, and appearance are prepared
+while staged. Only after native readiness and a successful appearance
+transaction are they presented atomically; activity and locomotion begin on the
+following frame. A presentation failure leaves the entity hidden and is routed
+through the normal English connection-error return instead of ticking a partial
+Actor.
+
+## Follow-up: manual disconnect
+
+The native Disconnect button no longer captures the player profile from its UI
+callback. It only changes the client to `Closing` and records a shutdown
+request. On the next KCSE game-thread frame, the client optionally captures and
+queues the final profile update, then queues the reliable transport close.
+Remote-avatar synchronization and server corrections accept only `Connected`,
+so no native multiplayer mutation can race the shutdown. `Closing` immediately
+starts the same deferred `unload` transition used for handled join failures;
+after the game context is gone, KCD2MP opens the native main menu. No quit or
+process-termination command is issued.
+
 ## Trace output and interpretation
 
 `KCD2MP-join.log` is written next to `KCD2MPKCSEClient.dll`. Every line is
@@ -277,17 +319,21 @@ Important last-line mappings:
 |---|---|
 | `join.remote-spawn.engine-call.begin` | `IActorSystem::CreateActor` |
 | `join.remote-spawn.engine-call.returned` | `IActor::GetEntity` |
-| `join.remote-spawn.EnablePhysics.begin` | fork `CEntity::EnablePhysics` |
+| `join.remote-spawn.EnablePhysics.begin` | staging disables native physics |
 | `join.remote-status.ApplySharedSoul.begin` | fork shared-Soul materialization |
 | `join.entity.SetWorldTM.begin` | `IEntity::SetWorldTM` |
 | `join.remote-animation.first-locomotion` | fork movement request |
 | `join.remote-appearance.CreateItem.begin` | fork inventory item creation |
 | `join.remote-animation.weapon-action.begin` | fork Human weapon action |
+| `join.remote-presentation.begin` | fully materialized remote Human is being activated |
+| `join.remote-presentation.complete` | remote Human is active, visible, and physical |
 | `join.sandbox.spawn-selection.ok` | selected source and exact transform |
 | `join.sandbox.target-profile.invalid` | target rejected before native mutation |
 | `join.sandbox.profile-apply.failed` | includes attempted/succeeded rollback and unload decision |
-| `join.sandbox.EndGameContext.begin` | guarded native world-unload call |
-| `join.sandbox.EndGameContext.seh` | `EndGameContext` raised SEH |
+| `join.sandbox.unload.command.queued` | deferred engine map unload is waiting in the console FIFO |
+| `join.sandbox.unload.complete` | game context and client entity are gone |
+| `join.sandbox.main-menu.opened` | native root main menu is visible |
+| `join.sandbox.OpenMainMenu.seh` | guarded native main-menu open raised SEH and will be retried |
 | `join.kcse-post-update.seh` | caught engine-side SEH; includes code/address |
 
 For the verification reproduction, the expected initializer sequence is

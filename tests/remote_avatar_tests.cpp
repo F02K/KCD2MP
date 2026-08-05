@@ -250,9 +250,10 @@ int main()
 			state = remote_avatar_state::failed;
 	}
 	result = fallback_manager.sync(fallback_players, start + 2500ms);
-	assert(!result.success);
-	assert(result.error.contains("fallback Soul"));
-	assert(result.error.contains("player 3"));
+	assert(result.success);
+	assert(result.degraded);
+	assert(result.diagnostic.contains("player 3"));
+	assert(fallback_manager.size() == 1);
 
 	fake_backend backoff_backend;
 	backoff_backend.desired_spawns_succeed = false;
@@ -290,9 +291,15 @@ int main()
 	auto default_failure_players = std::vector{
 	    player(5, 50.0F, protocol::MOVEMENT_MODE_IDLE)};
 	result = default_failure_manager.sync(default_failure_players);
-	assert(!result.success);
-	assert(result.error.contains("default Soul"));
+	assert(result.success);
+	assert(result.degraded);
+	assert(result.diagnostic.contains("default Soul"));
 	assert(default_failure_backend.spawn_attempts == 1);
-	assert(default_failure_manager.size() == 0);
+	assert(default_failure_manager.size() == 1);
+	result = default_failure_manager.sync(
+	    default_failure_players,
+	    remote_avatar_manager::clock::now() + 500ms);
+	assert(result.success);
+	assert(default_failure_backend.spawn_attempts == 1);
 	return 0;
 }

@@ -294,7 +294,7 @@ namespace
 		}
 		const auto update_rates = g_client->update_rates();
 		const auto remote_sync_now = frame_clock::now();
-		if (client_status.state != kcd2mp::client_state::disconnected
+		if (client_status.state == kcd2mp::client_state::connected
 		    && sandbox_active
 		    && remote_sync_due(remote_sync_now, update_rates))
 		{
@@ -334,25 +334,29 @@ namespace
 				    + synchronized.error);
 			}
 		}
-		else if (client_status.state == kcd2mp::client_state::disconnected
+		else if (client_status.state != kcd2mp::client_state::connected
 		    || !sandbox_active)
 		{
 			reset_remote_sync_schedule();
 		}
 
-		if (const auto correction = g_client->take_local_correction())
+		if (client_status.state == kcd2mp::client_state::connected)
 		{
-			if (!g_runtime->apply_local_correction(*correction))
+			if (const auto correction = g_client->take_local_correction())
 			{
-				g_client->fail(
-				    "Server correction requires a runtime-verified native "
-				    "transform mutation wrapper.");
+				if (!g_runtime->apply_local_correction(*correction))
+				{
+					g_client->fail(
+					    "Server correction requires a runtime-verified native "
+					    "transform mutation wrapper.");
+				}
 			}
 		}
-		if (client_status.state == kcd2mp::client_state::disconnected)
+		if (client_status.state == kcd2mp::client_state::closing
+		    || client_status.state == kcd2mp::client_state::disconnected)
 		{
-			if (g_runtime->sandbox_active())
-				g_runtime->end_sandbox();
+			if (g_runtime->sandbox_active() || !client_status.error.empty())
+				g_runtime->end_sandbox(client_status.error);
 			else
 				g_runtime->cancel_multiplayer_preparation();
 		}

@@ -187,6 +187,7 @@ namespace big::native_multiplayer_menu
 			std::string queued_button;
 			std::string local_feedback_key;
 			std::string last_status_text;
+			std::string presented_error;
 			std::chrono::steady_clock::time_point next_status_poll;
 		};
 
@@ -200,8 +201,7 @@ namespace big::native_multiplayer_menu
 		{
 			using kcd2mp::client_state;
 			if (!status.error.empty())
-				return ingame_ui::localized(
-				    "menu.status.error", {{"error", status.error}});
+				return "Connection failed: " + status.error;
 			switch (status.state)
 			{
 			case client_state::disconnected:
@@ -277,12 +277,14 @@ namespace big::native_multiplayer_menu
 			if (!api.available())
 				return;
 
+			const auto status = kcd2mp::kcse::ui_client().status();
 			ingame_ui::page page;
 			page.id = custom_multiplayer_page;
-			page.title = ingame_ui::localized("menu.multiplayer.title");
+			page.title = status.error.empty()
+			    ? ingame_ui::localized("menu.multiplayer.title")
+			    : "Multiplayer connection failed";
 
 			auto &settings = kcd2mp::ui_settings();
-			const auto status = kcd2mp::kcse::ui_client().status();
 			const bool settings_locked = pending_join
 			    || status.state != kcd2mp::client_state::disconnected;
 			const auto edit_prefix =
@@ -346,7 +348,12 @@ namespace big::native_multiplayer_menu
 			    : !local_feedback_key.empty()
 			    ? ingame_ui::localized(local_feedback_key)
 			    : client_state_text(status);
-			page.add_button(std::string(status_button), status_text, true);
+			page.add_button(
+			    std::string(status_button),
+			    status_text,
+			    true,
+			    0,
+			    status_text);
 			page.add_button(
 			    std::string(back_button),
 			    ingame_ui::localized("menu.action.back"),
@@ -678,6 +685,33 @@ namespace big::native_multiplayer_menu
 		try
 		{
 			auto &value = menu_state();
+			const auto current_status = kcd2mp::kcse::ui_client().status();
+			bool present_error{};
+			{
+				std::scoped_lock lock(value.mutex);
+				if (current_status.state == kcd2mp::client_state::disconnected
+				    && !current_status.error.empty()
+				    && current_status.error != value.presented_error
+				    && value.menu)
+				{
+					ingame_ui::native_menu_api api(value.menu);
+					present_error = api.available()
+					    && api.mode() == root_main_page;
+					if (present_error)
+					{
+						value.presented_error = current_status.error;
+						value.pending_join = false;
+						value.local_feedback_key.clear();
+						value.editing = edit_field::none;
+					}
+				}
+				else if (current_status.error.empty())
+				{
+					value.presented_error.clear();
+				}
+			}
+			if (present_error)
+				show_multiplayer_page();
 			std::string button;
 			{
 				std::scoped_lock lock(value.mutex);

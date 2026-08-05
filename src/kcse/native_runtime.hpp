@@ -60,7 +60,7 @@ namespace kcd2mp::kcse
 		    const protocol::ServerBootstrap &bootstrap) override;
 		[[nodiscard]] sandbox_poll_result poll_sandbox() override;
 		[[nodiscard]] bool sandbox_active() const override;
-		void end_sandbox() override;
+		void end_sandbox(std::string_view error = {}) override;
 		[[nodiscard]] std::string current_level_id() const override;
 		[[nodiscard]] std::optional<protocol::PlayerProfile>
 		local_profile() override;
@@ -126,6 +126,7 @@ namespace kcd2mp::kcse
 		void restore_save_load();
 		void begin_native_unload(std::string_view reason);
 		void finish_native_unload_if_complete();
+		void open_main_menu_if_pending();
 		[[nodiscard]] bool native_world_unloaded() const;
 		void poll_local_activity();
 		void refresh_home_marker();
@@ -160,6 +161,7 @@ namespace kcd2mp::kcse
 		sandbox_poll_result m_sandbox_progress;
 		bool m_save_load_locked{};
 		bool m_unload_pending{};
+		bool m_main_menu_pending{};
 		bool m_probe_transform_verified{};
 		bool m_probe_complete{};
 		std::atomic<bool> m_probe_failed{};

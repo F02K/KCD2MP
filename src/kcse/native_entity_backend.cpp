@@ -34,6 +34,7 @@ namespace kcd2mp::kcse
 		constexpr std::size_t game_object_system_remove_sink_slot = 17;
 		constexpr int entity_event_init = 3;
 		constexpr int entity_event_script = 18;
+		constexpr std::size_t max_spawn_entity_name_length = 255;
 
 		// Only the prefix read by OnBeforeSpawn is modeled here. The offsets are
 		// pinned by CEntity's constructor: pClass is copied from +0x18 and the
@@ -52,22 +53,15 @@ namespace kcd2mp::kcse
 		static_assert(offsetof(entity_spawn_params_prefix, entity_class) == 0x18);
 		static_assert(offsetof(entity_spawn_params_prefix, entity_name) == 0x30);
 
-		struct entity_class_view
-		{
-			virtual ~entity_class_view() = default;
-			virtual void Release() = 0;
-			virtual const char *GetName() const = 0;
-		};
-
 		struct spawn_description
 		{
-			std::string class_name;
+			void *entity_class{};
 			std::string entity_name;
 		};
-		struct raw_spawn_description
+		struct guarded_spawn_description
 		{
-			const char *class_name{};
-			const char *entity_name{};
+			void *entity_class{};
+			char entity_name[max_spawn_entity_name_length + 1]{};
 		};
 
 		struct native_entity_event
@@ -86,30 +80,39 @@ namespace kcd2mp::kcse
 			        .count());
 		}
 
-		raw_spawn_description guarded_read_spawn(
-		    void *raw_params) noexcept
+		bool guarded_read_spawn(
+		    void *raw_params,
+		    guarded_spawn_description &result) noexcept
 		{
+			result = {};
 			if (!raw_params)
-				return {};
+				return false;
 #ifdef _WIN32
 			__try
 			{
 #endif
 				const auto *params = static_cast<
 				    const entity_spawn_params_prefix *>(raw_params);
-				auto *entity_class = static_cast<entity_class_view *>(
-				    params->entity_class);
-				if (!entity_class)
-					return {};
-				const auto *class_name = entity_class->GetName();
-				if (!class_name || class_name[0] == '\0')
-					return {};
-				return {class_name, params->entity_name};
+				if (!params->entity_class || !params->entity_name)
+					return false;
+				result.entity_class = params->entity_class;
+				for (std::size_t index{};
+				     index <= max_spawn_entity_name_length;
+				     ++index)
+				{
+					const auto value = params->entity_name[index];
+					result.entity_name[index] = value;
+					if (value == '\0')
+						return index != 0;
+				}
+				result.entity_name[max_spawn_entity_name_length] = '\0';
+				return false;
 #ifdef _WIN32
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER)
 			{
-				return {};
+				result = {};
+				return false;
 			}
 #endif
 		}
@@ -117,14 +120,14 @@ namespace kcd2mp::kcse
 		std::optional<spawn_description> describe_spawn(
 		    void *raw_params) noexcept
 		{
-			const auto raw = guarded_read_spawn(raw_params);
-			if (!raw.class_name)
+			guarded_spawn_description raw;
+			if (!guarded_read_spawn(raw_params, raw))
 				return std::nullopt;
 			try
 			{
 				return spawn_description{
-				    raw.class_name,
-				    raw.entity_name ? raw.entity_name : ""};
+				    raw.entity_class,
+				    raw.entity_name};
 			}
 			catch (...)
 			{
@@ -959,12 +962,7 @@ namespace kcd2mp::kcse
 		{
 			join_trace::write_diagnostic(
 			    "entity-control.spawn.unclassified",
-			    "spawn params or entity class name could not be read; allowing");
-			return true;
-		}
-		if (spawn->class_name != "NPC"
-		    && spawn->class_name != "NPC_Female")
-		{
+			    "spawn params or entity name could not be read; allowing");
 			return true;
 		}
 		if (guarded_is_player_scheduler_proxy_name(
@@ -973,8 +971,8 @@ namespace kcd2mp::kcse
 			join_trace::write_diagnostic(
 			    "entity-control.spawn.protected",
 			    std::format(
-			        "class=\"{}\" name=\"{}\" reason=player-scheduler-proxy",
-			        spawn->class_name,
+			        "class={} name=\"{}\" reason=player-scheduler-proxy",
+			        spawn->entity_class,
 			        spawn->entity_name));
 			return true;
 		}
@@ -987,22 +985,25 @@ namespace kcd2mp::kcse
 			    && it->entity_name == spawn->entity_name)
 			{
 				it->consumed = true;
+				m_human_npc_classes.insert(spawn->entity_class);
 				join_trace::write_diagnostic(
 				    "entity-control.spawn.authorized",
 				    std::format(
-				        "class=\"{}\" name=\"{}\" token={}",
-				        spawn->class_name,
+				        "class={} name=\"{}\" token={}",
+				        spawn->entity_class,
 				        spawn->entity_name,
 				        it->token));
 				return true;
 			}
 		}
+		if (!m_human_npc_classes.contains(spawn->entity_class))
+			return true;
 
 		join_trace::write_diagnostic(
 		    "entity-control.spawn.blocked",
 		    std::format(
-		        "class=\"{}\" name=\"{}\" reason=not-kcd2mp-authorized",
-		        spawn->class_name,
+		        "class={} name=\"{}\" reason=not-kcd2mp-authorized",
+		        spawn->entity_class,
 		        spawn->entity_name));
 		return false;
 	}
@@ -1140,6 +1141,7 @@ namespace kcd2mp::kcse
 		m_isolation_maintenance_frame = 0;
 		m_last_actor_count = -1;
 		m_pending_control.clear();
+		m_human_npc_classes.clear();
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
 		auto *system = environment ? environment->pEntitySystem : nullptr;
 		if (system)
@@ -1379,7 +1381,7 @@ namespace kcd2mp::kcse
 	}
 
 	bool native_entity_backend::should_isolate_npc_actor(
-	    Offsets::IEntity *entity) const
+	    Offsets::IEntity *entity)
 	{
 		if (!entity)
 			return false;
@@ -1435,6 +1437,8 @@ namespace kcd2mp::kcse
 		const auto human = guarded_actor_type_matches(actor, true);
 		if (human == actor_type_match::yes)
 		{
+			if (auto *entity_class = entity->GetClass())
+				m_human_npc_classes.insert(entity_class);
 			// C_Human is also the base of C_Player and potentially other human
 			// gameplay actors. A real NPC must additionally own an AI object;
 			// animation, combat and other system actors do not.

@@ -228,7 +228,9 @@ namespace kcd2mp
 		void ensure_network_thread();
 		void set_state(client_state state, std::string error = {});
 		void queue_network(network_command command);
-		void queue_profile_snapshot(protocol::PlayerProfile profile);
+		void queue_profile_snapshot(
+		    protocol::PlayerProfile profile,
+		    bool allow_closing = false);
 		void queue_world_object_updates(
 		    std::vector<protocol::WorldObjectState> updates);
 		void queue_world_item_updates(
@@ -267,6 +269,8 @@ namespace kcd2mp
 		std::optional<protocol::PlayerActivity> m_local_activity;
 		std::optional<protocol::ClientActivityStart> m_pending_activity_start;
 		std::optional<std::string> m_activity_denial;
+		bool m_manual_disconnect_pending{};
+		bool m_disconnect_capture_profile{};
 		bool m_avatar_update_pending{};
 		std::optional<protocol::ServerBootstrap> m_pending_bootstrap;
 		std::optional<client_options> m_pending_connect;

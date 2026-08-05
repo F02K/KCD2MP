@@ -755,6 +755,52 @@ int main()
 		    outbound.front().delivery));
 		assert(!core.create_profile_claim(*dummy_id, start + 1ms));
 
+		// Dummies wait for their spawn warm-up and then publish ordinary player
+		// locomotion snapshots. Position stays anchored so only the native client
+		// controller can move and animate the visual actor.
+		core.tick(start + 100ms);
+		(void)core.take_outbound();
+		bool saw_dummy_motion = false;
+		for (std::uint32_t step = 2; step <= 30; ++step)
+		{
+			core.tick(start + std::chrono::milliseconds(step * 100));
+			outbound = core.take_outbound();
+			for (const auto &message : outbound)
+			{
+				if (!message.envelope.has_world_snapshot())
+					continue;
+				for (const auto &snapshot :
+				     message.envelope.world_snapshot().players())
+				{
+					if (snapshot.player_id() == *dummy_id
+					    && snapshot.transform().sequence() > 1
+					    && snapshot.movement_mode()
+					        != protocol::MOVEMENT_MODE_IDLE)
+					{
+						assert(snapshot.transform().position().x() == 12.0F);
+						assert(snapshot.transform().position().y() == 20.0F);
+						assert(snapshot.transform().position().z() == 30.0F);
+						const auto &velocity = snapshot.transform().velocity();
+						const auto speed = std::sqrt(
+						    velocity.x() * velocity.x()
+						    + velocity.y() * velocity.y());
+						assert(std::abs(speed - 1.5F) < 0.001F);
+						const auto &rotation = snapshot.transform().rotation();
+						const auto forward_x =
+						    -2.0F * rotation.z() * rotation.w();
+						const auto forward_y =
+						    1.0F - 2.0F * rotation.z() * rotation.z();
+						assert(
+						    velocity.x() / speed * forward_x
+						        + velocity.y() / speed * forward_y
+						    > 0.999F);
+						saw_dummy_motion = true;
+					}
+				}
+			}
+		}
+		assert(saw_dummy_motion);
+
 		assert(!core.spawn_dummy("Training Dummy", &error));
 		assert(error == "display name is already in use");
 		assert(core.take_outbound().empty());
@@ -768,6 +814,31 @@ int main()
 		    == *dummy_id);
 		assert(core.players().size() == 1);
 		assert(!core.remove_dummy(*dummy_id, start + 3ms));
+	}
+
+	temporary_world equipped_dummy_world;
+	{
+		auto config = config_for(equipped_dummy_world.path);
+		config.starter_profile.inventory.push_back({
+		    .definition_id = "b867dd0e-1bfe-40e9-b114-4b126a3ff1b0",
+		    .count = 1,
+		    .quality = 1.0F,
+		    .condition = 1.0F,
+		    .equipped_slot = "PrimaryMainHand"});
+		server_core core(config);
+		(void)connect_new_player(core, 136, start, 1);
+		const auto dummy_id = core.spawn_dummy("Equipped Dummy");
+		assert(dummy_id);
+		const auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		const auto &avatar =
+		    outbound.front().envelope.player_joined().player().avatar();
+		assert(avatar.equipment_size() == 1);
+		assert(
+		    avatar.equipment(0).definition_id()
+		    == "b867dd0e-1bfe-40e9-b114-4b126a3ff1b0");
+		assert(
+		    avatar.equipment(0).equipped_slot() == "PrimaryMainHand");
 	}
 
 	temporary_world avatar_world;

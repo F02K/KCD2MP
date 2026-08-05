@@ -18,6 +18,8 @@ namespace kcd2mp
 		    std::chrono::seconds(4),
 		    std::chrono::seconds(8),
 		    std::chrono::seconds(8)};
+		constexpr auto environment_correction_interval =
+		    std::chrono::seconds{1};
 
 		std::uint64_t milliseconds(std::chrono::steady_clock::time_point value)
 		{
@@ -228,6 +230,8 @@ namespace kcd2mp
 			m_status = {};
 			m_update_rates = {};
 			m_status.state = client_state::preflight;
+			m_manual_disconnect_pending = false;
+			m_disconnect_capture_profile = false;
 			m_remote_players.clear();
 			m_chat.clear();
 			m_local_correction.reset();
@@ -275,21 +279,23 @@ namespace kcd2mp
 	{
 		KCD2MP_JOIN_TRACE(
 		    "join.disconnect.requested",
-		    "client disconnect requested");
-		if (const auto profile = m_runtime.local_profile())
-		{
-			queue_profile_snapshot(*profile);
-		}
+		    "client disconnect requested; deferring native capture to game thread");
 		{
 			std::scoped_lock lock(m_state_mutex);
-			if (m_status.state == client_state::disconnected)
+			if (m_status.state == client_state::disconnected
+			    || m_status.state == client_state::closing)
 			{
 				return;
 			}
+			m_disconnect_capture_profile =
+			    m_status.state == client_state::connected;
+			m_manual_disconnect_pending = true;
 			m_status.state = client_state::closing;
+			m_status.error.clear();
 			m_pending_connect.reset();
+			m_remote_players.clear();
+			m_local_correction.reset();
 		}
-		queue_network(disconnect_command{});
 	}
 
 	void multiplayer_client::fail(std::string error)
@@ -458,8 +464,11 @@ namespace kcd2mp
 			}
 		}
 		m_game_commands.clear();
+		constexpr std::string_view epoch_error =
+		    "KCD2 runtime epoch changed; native handles and queued commands "
+		    "were invalidated.";
 		if (m_runtime.sandbox_active())
-			m_runtime.end_sandbox();
+			m_runtime.end_sandbox(epoch_error);
 		else
 			m_runtime.cancel_multiplayer_preparation();
 		{
@@ -494,9 +503,7 @@ namespace kcd2mp
 				return;
 			}
 			m_status.state = client_state::closing;
-			m_status.error =
-			    "KCD2 runtime epoch changed; native handles and queued "
-			    "commands were invalidated.";
+			m_status.error = epoch_error;
 		}
 		queue_network(disconnect_command{});
 	}
@@ -527,6 +534,34 @@ namespace kcd2mp
 	    std::chrono::steady_clock::time_point now)
 	{
 		advance_runtime_preflight();
+		bool manual_disconnect{};
+		bool capture_disconnect_profile{};
+		{
+			std::scoped_lock lock(m_state_mutex);
+			manual_disconnect = m_manual_disconnect_pending;
+			capture_disconnect_profile =
+			    m_disconnect_capture_profile;
+			m_manual_disconnect_pending = false;
+			m_disconnect_capture_profile = false;
+		}
+		if (manual_disconnect)
+		{
+			KCD2MP_JOIN_TRACE(
+			    "join.disconnect.game-thread.begin",
+			    std::format(
+			        "capture_profile={}",
+			        capture_disconnect_profile));
+			if (capture_disconnect_profile)
+			{
+				if (const auto profile = m_runtime.local_profile())
+					queue_profile_snapshot(*profile, true);
+			}
+			queue_network(disconnect_command{});
+			KCD2MP_JOIN_TRACE(
+			    "join.disconnect.game-thread.complete",
+			    "final profile and transport close were queued in order");
+			return;
+		}
 		for (const auto &envelope : m_game_commands.drain())
 		{
 			handle_game_envelope(envelope, now);
@@ -1390,12 +1425,26 @@ namespace kcd2mp
 			std::scoped_lock lock(m_state_mutex);
 			previous = m_status.state;
 			m_status.state = state;
-			m_status.error = std::move(error);
+			// A failure first enters closing and then reaches disconnected via
+			// intentional transport teardown. Preserve the original cause so the
+			// native main menu can still present it after the world is unloaded.
+			if (!(state == client_state::disconnected && error.empty()
+			        && previous == client_state::closing
+			        && !m_status.error.empty()))
+				m_status.error = std::move(error);
 			transition_error = m_status.error;
 			if (state == client_state::disconnected)
 			{
+				m_manual_disconnect_pending = false;
+				m_disconnect_capture_profile = false;
 				m_pending_bootstrap.reset();
 				m_pending_connect.reset();
+				m_remote_players.clear();
+				m_local_correction.reset();
+				m_pending_profile.reset();
+				m_pending_avatar.reset();
+				m_profile_update_pending = false;
+				m_avatar_update_pending = false;
 				m_status.local_player_id = 0;
 				m_status.ping_ms = -1;
 				m_status.packet_loss_percent = 0.0F;
@@ -1438,12 +1487,17 @@ namespace kcd2mp
 	}
 
 	void multiplayer_client::queue_profile_snapshot(
-	    protocol::PlayerProfile profile)
+	    protocol::PlayerProfile profile,
+	    bool allow_closing)
 	{
 		protocol::ClientProfileUpdate update;
 		{
 			std::scoped_lock lock(m_state_mutex);
-			if (m_status.state != client_state::connected || !m_profile
+			const bool state_allows_update =
+			    m_status.state == client_state::connected
+			    || (allow_closing
+			        && m_status.state == client_state::closing);
+			if (!state_allows_update || !m_profile
 			    || m_profile_update_pending)
 			{
 				return;
@@ -1652,8 +1706,9 @@ namespace kcd2mp
 			if (m_status.state == client_state::disconnected
 			    || m_status.state == client_state::closing)
 			{
+				const auto error = m_status.error;
 				lock.unlock();
-				m_runtime.end_sandbox();
+				m_runtime.end_sandbox(error);
 				return;
 			}
 			m_pending_bootstrap = bootstrap_copy;
@@ -1688,8 +1743,9 @@ namespace kcd2mp
 			    environment.revision() == m_environment_revision;
 			const bool environment_correction_due =
 			    m_last_environment_applied
-			            == std::chrono::steady_clock::time_point{}
-			    || now - m_last_environment_applied >= std::chrono::seconds(10);
+			        == std::chrono::steady_clock::time_point{}
+			    || now - m_last_environment_applied
+			        >= environment_correction_interval;
 			if (environment_changed
 			    || (environment_current && environment_correction_due))
 			{
@@ -2146,7 +2202,7 @@ namespace kcd2mp
 				m_status.error = reason;
 			}
 			queue_network(world_failed_command{std::move(failed)});
-			m_runtime.end_sandbox();
+			m_runtime.end_sandbox(reason);
 			return;
 		}
 

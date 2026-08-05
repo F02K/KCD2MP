@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import stat
 import struct
 import tempfile
@@ -156,6 +157,14 @@ class DeploymentTests(unittest.TestCase):
         pdb = root / "d3d12_.pdb"
         dll.write_bytes(b"dll")
         pdb.write_bytes(b"pdb")
+        language_root = root / "mods" / "KCD2MP" / "Lang"
+        language_root.mkdir(parents=True)
+        (language_root / "en.lang").write_text(
+            "menu.title=Multiplayer\n", encoding="utf-8"
+        )
+        (language_root / "de.lang").write_text(
+            "menu.title=Mehrspieler\n", encoding="utf-8"
+        )
         return BuildResult(BUILD_PROFILES["release"], root, dll, pdb)
 
     def test_deploys_and_renames_artifacts(self) -> None:
@@ -192,6 +201,64 @@ class DeploymentTests(unittest.TestCase):
                 (deployed_languages / "de.lang").read_text(encoding="utf-8"),
                 "menu.title=Mehrspieler\n",
             )
+
+    def test_deploys_languages_bundled_by_the_selected_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            result = self._result(artifacts)
+            bundled = artifacts / "mods" / "KCD2MP" / "Lang"
+            bundled.mkdir(parents=True, exist_ok=True)
+            (bundled / "en.lang").write_text(
+                "menu.title=Bundled build\n", encoding="utf-8"
+            )
+            (bundled / "de.lang").write_text(
+                "menu.title=Gebündelter Build\n", encoding="utf-8"
+            )
+
+            project_root = root / "project"
+            source = project_root / "data" / "lang"
+            source.mkdir(parents=True)
+            (source / "en.lang").write_text(
+                "menu.title=Stale source\n", encoding="utf-8"
+            )
+            game_root = _create_game_root(root / "game")
+
+            deploy_artifacts(
+                result, game_root, lambda: False, project_root
+            )
+
+            deployed = game_root / "mods" / "KCD2MP" / "Lang"
+            self.assertEqual(
+                (deployed / "en.lang").read_text(encoding="utf-8"),
+                "menu.title=Bundled build\n",
+            )
+            self.assertEqual(
+                (deployed / "de.lang").read_text(encoding="utf-8"),
+                "menu.title=Gebündelter Build\n",
+            )
+
+    def test_rejects_build_without_bundled_languages(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            artifacts = root / "artifacts"
+            artifacts.mkdir()
+            result = self._result(artifacts)
+            shutil.rmtree(artifacts / "mods")
+
+            project_root = root / "project"
+            source = project_root / "data" / "lang"
+            source.mkdir(parents=True)
+            (source / "en.lang").write_text(
+                "menu.title=Source fallback\n", encoding="utf-8"
+            )
+            game_root = _create_game_root(root / "game")
+
+            with self.assertRaisesRegex(BuildToolError, "fallback language file"):
+                deploy_artifacts(
+                    result, game_root, lambda: False, project_root
+                )
 
     def test_deploys_kcse_loader_and_client(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -335,6 +402,16 @@ class PackagingTests(unittest.TestCase):
         (project / "data" / "lang" / "de.lang").write_text(
             "menu.title=Mehrspieler\n", encoding="utf-8"
         )
+        bundled_languages = artifacts / "mods" / "KCD2MP" / "Lang"
+        bundled_languages.mkdir(parents=True)
+        shutil.copy2(
+            project / "data" / "lang" / "en.lang",
+            bundled_languages / "en.lang",
+        )
+        shutil.copy2(
+            project / "data" / "lang" / "de.lang",
+            bundled_languages / "de.lang",
+        )
 
         names = {
             "d3d12_.dll": b"frontend",
@@ -441,6 +518,40 @@ class PackagingTests(unittest.TestCase):
 
             self.assertEqual(second.client_zip.read_bytes(), first_zip)
             self.assertFalse((output / "stale.txt").exists())
+
+    def test_client_package_uses_languages_from_selected_build(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project, result = self._project_and_result(root)
+            bundled = result.dll_path.parent / "mods" / "KCD2MP" / "Lang"
+            bundled.mkdir(parents=True, exist_ok=True)
+            (bundled / "en.lang").write_text(
+                "menu.title=Bundled release\n", encoding="utf-8"
+            )
+            (bundled / "de.lang").write_text(
+                "menu.title=Gebündeltes Release\n", encoding="utf-8"
+            )
+
+            package = package_artifacts(result, project, root / "package")
+            language_path = (
+                package.client_root
+                / "KingdomComeDeliverance2"
+                / "mods"
+                / "KCD2MP"
+                / "Lang"
+                / "de.lang"
+            )
+            self.assertEqual(
+                language_path.read_text(encoding="utf-8"),
+                "menu.title=Gebündeltes Release\n",
+            )
+            with zipfile.ZipFile(package.client_zip) as archive:
+                self.assertEqual(
+                    archive.read(
+                        "KingdomComeDeliverance2/mods/KCD2MP/Lang/de.lang"
+                    ).decode("utf-8").replace("\r\n", "\n"),
+                    "menu.title=Gebündeltes Release\n",
+                )
 
 
 class AddressLibraryTests(unittest.TestCase):

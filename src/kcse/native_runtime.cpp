@@ -203,18 +203,46 @@ namespace kcd2mp::kcse
 		}
 
 #ifdef _WIN32
-		bool guarded_end_game_context(CCryAction *framework) noexcept
+		bool open_main_menu() noexcept
+		{
+			auto *menu = find_main_menu();
+			if (!menu)
+				return false;
+			if (menu->m_state == 1)
+				return true;
+
+			auto *interface = static_cast<wh::I_UIMenu *>(menu);
+			auto **vtable = *reinterpret_cast<void ***>(interface);
+			if (!vtable
+			    || reinterpret_cast<std::uintptr_t>(vtable)
+			        != REL::ID(1018).address()
+			    || !in_whgame_text(vtable[1]))
+				return false;
+			interface->Open(1);
+			return true;
+		}
+
+		bool guarded_open_main_menu() noexcept
 		{
 			__try
 			{
-				framework->EndGameContext();
-				return true;
+				return open_main_menu();
 			}
 			__except (KCD2MP_JOIN_SEH_FILTER(
-			    "join.sandbox.EndGameContext.seh"))
+			    "join.sandbox.OpenMainMenu.seh"))
 			{
 				return false;
 			}
+		}
+#else
+		bool open_main_menu() noexcept
+		{
+			auto *menu = find_main_menu();
+			if (!menu)
+				return false;
+			if (menu->m_state != 1)
+				static_cast<wh::I_UIMenu *>(menu)->Open(1);
+			return true;
 		}
 #endif
 
@@ -236,7 +264,9 @@ namespace kcd2mp::kcse
 			return true;
 		}
 
-		bool execute_console_command(const char *command) noexcept
+		bool execute_console_command(
+		    const char *command,
+		    bool deferred = false) noexcept
 		{
 			auto *environment = SSystemGlobalEnvironment::GetInstance();
 			if (!environment || !environment->pConsole)
@@ -244,7 +274,7 @@ namespace kcd2mp::kcse
 #ifdef _WIN32
 			__try
 			{
-				environment->pConsole->ExecuteString(command, true, false);
+				environment->pConsole->ExecuteString(command, true, deferred);
 				return true;
 			}
 			__except(EXCEPTION_EXECUTE_HANDLER)
@@ -252,7 +282,7 @@ namespace kcd2mp::kcse
 				return false;
 			}
 #else
-			environment->pConsole->ExecuteString(command, true, false);
+			environment->pConsole->ExecuteString(command, true, deferred);
 			return true;
 #endif
 		}
@@ -335,7 +365,6 @@ namespace kcd2mp::kcse
 				return nullptr;
 			}
 #endif
-			return nullptr;
 		}
 
 		wh::xgenaimodule::C_LinkableObject *find_linkable_object(
@@ -721,15 +750,24 @@ namespace kcd2mp::kcse
 		    m_epoch_invalidated.exchange(false, std::memory_order_acq_rel);
 		if (changed)
 			invalidate_epoch_on_game_thread();
+		bool unload_transition{};
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			unload_transition = m_unload_pending || m_main_menu_pending;
+		}
 		refresh_cached_state();
 		refresh_home_marker();
 		poll_local_activity();
 		advance_native_world_start();
 		finish_native_unload_if_complete();
+		open_main_menu_if_pending();
 		KCD2MP_JOIN_TRACE(
 		    "join.kcse.frame.complete",
-		    std::format("epoch_changed={}", changed));
-		return changed;
+		    std::format(
+		        "epoch_changed={} unload_transition={}",
+		        changed,
+		        unload_transition));
+		return changed && !unload_transition;
 	}
 
 	void native_runtime::on_blacksmithing_started(
@@ -1263,6 +1301,15 @@ namespace kcd2mp::kcse
 			}
 		}
 		m_sandbox_active = true;
+		const auto map_reveal_dispatched =
+		    execute_console_command("player_revealFow");
+		KCD2MP_JOIN_TRACE(
+		    map_reveal_dispatched
+		        ? "join.sandbox.map-reveal.ok"
+		        : "join.sandbox.map-reveal.failed",
+		    map_reveal_dispatched
+		        ? "The multiplayer map fog was cleared."
+		        : "The multiplayer map fog reveal command could not be dispatched.");
 		(void)execute_script(
 		    "if player and player.EnableFastTravel then "
 		    "player:EnableFastTravel(false) end");
@@ -1487,7 +1534,7 @@ namespace kcd2mp::kcse
 		return m_sandbox_active;
 	}
 
-	void native_runtime::end_sandbox()
+	void native_runtime::end_sandbox(std::string_view error)
 	{
 		remove_home_marker();
 		m_home_marker.reset();
@@ -1495,20 +1542,47 @@ namespace kcd2mp::kcse
 		m_native_activity_kind = protocol::PLAYER_ACTIVITY_KIND_NONE;
 		m_activity_end_pending = false;
 		bool should_unload{};
+		bool open_menu_only{};
+		const auto world_loaded = !native_world_unloaded();
 		{
 			std::scoped_lock lock(m_cache_mutex);
-			if ((!m_sandbox_active && !m_world_start_bootstrap)
-			    || m_unload_pending)
+			if (m_unload_pending)
+			{
+				if (!error.empty())
+					m_sandbox_progress.error = std::string(error);
 				return;
-			should_unload = true;
-			m_sandbox_progress.phase = sandbox_phase::unloading;
-			m_sandbox_progress.error.clear();
+			}
+			if (!m_sandbox_active && !m_world_start_bootstrap)
+			{
+				if (error.empty())
+					return;
+				if (!world_loaded)
+				{
+					m_main_menu_pending = true;
+					open_menu_only = true;
+				}
+			}
+			should_unload = !open_menu_only;
+			if (should_unload)
+			{
+				m_sandbox_progress.phase = sandbox_phase::unloading;
+				m_sandbox_progress.error = std::string(error);
+			}
+			else
+			{
+				m_sandbox_progress = {};
+			}
 			m_world_start_bootstrap.reset();
 			m_world_start_level_id.clear();
 			m_world_start_level_name.clear();
 			m_world_start_requires_lifecycle = false;
 			m_world_start_deadline = {};
 			m_world_start_stage = world_start_stage::idle;
+		}
+		if (open_menu_only)
+		{
+			cancel_multiplayer_preparation();
+			return;
 		}
 		m_expected_epoch_transition.store(false, std::memory_order_release);
 		(void)execute_script(
@@ -1519,7 +1593,10 @@ namespace kcd2mp::kcse
 		m_entities.restore_world();
 		m_profiles.reset();
 		if (should_unload)
-			begin_native_unload("Native sandbox world unload is in progress.");
+			begin_native_unload(
+			    error.empty()
+			        ? "Native sandbox world unload is in progress."
+			        : error);
 	}
 
 	std::string native_runtime::current_level_id() const
@@ -2286,33 +2363,28 @@ namespace kcd2mp::kcse
 		}
 		if (framework && framework->m_pGameContext)
 		{
+			// EndGameContext is unsafe from KCSE's PostUpdate callback. Queue the
+			// engine's map-unload command so CryEngine performs the transition in
+			// its deferred console-command phase on the following frame.
 			KCD2MP_JOIN_TRACE(
-			    "join.sandbox.EndGameContext.begin",
+			    "join.sandbox.unload.command.begin",
 			    std::format(
 			        "framework={} game_context={}",
 			        static_cast<void *>(framework),
 			        static_cast<void *>(framework->m_pGameContext)));
-#ifdef _WIN32
-			if (!guarded_end_game_context(framework))
-			{
-				KCD2MP_JOIN_TRACE(
-				    "join.sandbox.EndGameContext.failed",
-				    "SEH caught; native world remains unload-pending");
-				return;
-			}
-#else
-			framework->EndGameContext();
-#endif
+			const auto queued = execute_console_command("unload", true);
 			KCD2MP_JOIN_TRACE(
-			    "join.sandbox.EndGameContext.returned",
-			    std::format(
-			        "game_context={}",
-			        static_cast<void *>(framework->m_pGameContext)));
+			    queued
+			        ? "join.sandbox.unload.command.queued"
+			        : "join.sandbox.unload.command.failed",
+			    queued
+			        ? "Deferred native map unload was queued."
+			        : "Deferred native map unload could not be queued.");
 		}
 		else
 		{
 			KCD2MP_JOIN_TRACE(
-			    "join.sandbox.EndGameContext.skipped",
+			    "join.sandbox.unload.command.skipped",
 			    "framework or game context is nil");
 		}
 		finish_native_unload_if_complete();
@@ -2336,9 +2408,38 @@ namespace kcd2mp::kcse
 		if (!native_world_unloaded())
 			return;
 		restore_save_load();
-		std::scoped_lock lock(m_cache_mutex);
-		m_unload_pending = false;
-		m_sandbox_active = false;
-		m_sandbox_progress = {};
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_unload_pending = false;
+			m_sandbox_active = false;
+			m_sandbox_progress = {};
+			m_main_menu_pending = true;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.unload.complete",
+		    "Native world is unloaded; returning to the main menu.");
+	}
+
+	void native_runtime::open_main_menu_if_pending()
+	{
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			if (!m_main_menu_pending)
+				return;
+		}
+#ifdef _WIN32
+		const auto opened = guarded_open_main_menu();
+#else
+		const auto opened = open_main_menu();
+#endif
+		if (!opened)
+			return;
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_main_menu_pending = false;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.sandbox.main-menu.opened",
+		    "Native root main menu is open.");
 	}
 }

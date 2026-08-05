@@ -141,6 +141,15 @@ Available server commands include `status`, `players`, `kick`, `say`,
 `profile claim`, `dummy spawn`, `dummy remove`, `entities`, `time`, `timescale`,
 `weather`, `stop`, and `help`.
 
+`dummy spawn [name]` creates a non-persistent simulated player from the current
+starter profile. Equipped starter items use the normal remote-equipment path.
+After a two-second spawn warm-up and short input buffers, the server sends brief
+walk and turn inputs through ordinary transform snapshots. Translation stays at
+the authoritative spawn point: the native client locomotion controller must move
+and animate the actor, and every stop re-anchors it. This safely exercises the
+same animation path as real player input without letting a test dummy wander off
+terrain. Native weapon actions are excluded until their runtime path is verified.
+
 ## Joining from the game
 
 1. Start KCD2 and choose **Multiplayer** in the main menu or pause menu.

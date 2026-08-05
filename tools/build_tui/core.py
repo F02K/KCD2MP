@@ -1035,7 +1035,7 @@ def client_deployment_layout(
         )
         for path in result.address_library_paths
     )
-    language_root = project_root / "data" / "lang"
+    language_root = result.dll_path.parent / "mods" / "KCD2MP" / "Lang"
     language_files = tuple(sorted(language_root.glob("*.lang")))
     fallback_language = language_root / CLIENT_FALLBACK_LANGUAGE_FILE
     if fallback_language not in language_files:

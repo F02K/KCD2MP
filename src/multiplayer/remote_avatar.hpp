@@ -238,28 +238,38 @@ namespace kcd2mp
 			if (player.avatar.archetype_id()
 			    == npc::default_soul_id)
 			{
-				result.success = false;
-				result.error = std::format(
-				    "player {}: default Soul {} lifecycle failed",
-				    player.id,
-				    npc::default_soul_id);
-				if (!diagnostic.empty())
-					result.error += ": " + diagnostic;
-				return false;
+				const auto delay = retry_delay(entry.retry_attempt);
+				schedule_retry(entry, now);
+				append_diagnostic(
+				    result,
+				    std::format(
+				        "player {}: default Soul {} unavailable{}{}; "
+				        "remote visual hidden, next retry in {}s",
+				        player.id,
+				        npc::default_soul_id,
+				        diagnostic.empty() ? "" : ": ",
+				        diagnostic,
+				        delay.count()));
+				return true;
 			}
 			const auto fallback = fallback_snapshot(player);
 			const auto handle = m_backend.spawn(fallback);
 			if (!handle)
 			{
-				result.success = false;
-				result.error = std::format(
-				    "player {}: fallback Soul {} lifecycle failed for desired Soul {}",
-				    player.id,
-				    npc::default_soul_id,
-				    player.avatar.archetype_id());
-				if (!diagnostic.empty())
-					result.error += ": " + diagnostic;
-				return false;
+				const auto delay = retry_delay(entry.retry_attempt);
+				schedule_retry(entry, now);
+				append_diagnostic(
+				    result,
+				    std::format(
+				        "player {}: fallback Soul {} unavailable for desired "
+				        "Soul {}{}{}; remote visual hidden, next retry in {}s",
+				        player.id,
+				        npc::default_soul_id,
+				        player.avatar.archetype_id(),
+				        diagnostic.empty() ? "" : ": ",
+				        diagnostic,
+				        delay.count()));
+				return true;
 			}
 			entry.active = *handle;
 			entry.active_fallback = true;
@@ -326,15 +336,17 @@ namespace kcd2mp
 			}
 			if (entry.active_fallback)
 			{
-				result.success = false;
-				result.error = std::format(
-				    "player {}: fallback Soul {} failed for desired Soul {}",
-				    player.id,
-				    npc::default_soul_id,
-				    player.avatar.archetype_id());
-				if (!diagnostic.empty())
-					result.error += ": " + diagnostic;
-				return false;
+				entry.active_fallback = false;
+				entry.active_archetype.clear();
+				entry.active_revision = 0;
+				return spawn_fallback(
+				    entry,
+				    player,
+				    now,
+				    result,
+				    diagnostic.empty()
+				        ? "fallback remote-player avatar failed"
+				        : std::move(diagnostic));
 			}
 			return spawn_fallback(
 			    entry,
@@ -470,6 +482,16 @@ namespace kcd2mp
 		    clock::time_point now,
 		    remote_avatar_sync_result &result)
 		{
+			if (!entry.active)
+			{
+				if (now < entry.next_retry)
+					return true;
+				return spawn_desired_or_fallback(
+				    entry,
+				    player,
+				    now,
+				    result);
+			}
 			if (entry.active_fallback
 			    && player.avatar.archetype_id()
 			           == npc::default_soul_id)

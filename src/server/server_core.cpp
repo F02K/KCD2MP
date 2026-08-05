@@ -317,6 +317,7 @@ namespace kcd2mp::server
 	{
 		advance_environment_clock(now);
 		++m_server_tick;
+		tick_dummies(now);
 		std::vector<connection_id> expired_pending;
 		for (const auto &[connection, pending] : m_pending)
 		{
@@ -499,12 +500,17 @@ namespace kcd2mp::server
 		dummy.transform = std::move(transform);
 		dummy.last_sequence = 1;
 		dummy.movement_mode = protocol::MOVEMENT_MODE_IDLE;
-		dummy.avatar.set_archetype_id(
-		    m_config.default_avatar_archetype);
-		dummy.avatar.set_revision(1);
-		dummy.avatar.set_stance(protocol::AVATAR_STANCE_RELAXED);
-		dummy.avatar.set_weapon_class(
-		    protocol::AVATAR_WEAPON_CLASS_NONE);
+		dummy.profile = instantiate_starter_profile(
+		    m_config.starter_profile,
+		    dummy.id,
+		    dummy.display_name,
+		    m_store.manifest().level_id);
+		apply_default_avatar(dummy.profile);
+		dummy.profile.set_transform_valid(true);
+		*dummy.profile.mutable_last_transform() = dummy.transform;
+		dummy.avatar = dummy.profile.avatar();
+		dummy.dummy_random_state =
+		    dummy.id ^ 0x9e3779b97f4a7c15ULL;
 
 		const auto id = dummy.id;
 		auto [iterator, inserted] =
@@ -515,6 +521,119 @@ namespace kcd2mp::server
 		    snapshot_of(iterator->second, true);
 		broadcast(std::move(joined), reliability::reliable);
 		return id;
+	}
+
+	void server_core::tick_dummies(time_point now)
+	{
+		using namespace std::chrono_literals;
+		for (auto &[id, player] : m_players)
+		{
+			(void)id;
+			if (!player.dummy)
+				continue;
+			if (player.dummy_last_update == time_point{})
+			{
+				player.dummy_last_update = now;
+				// Give every client time to finish the asynchronous remote Actor,
+				// Soul, inventory, and presentation lifecycle before the first
+				// simulated input arrives. Later inputs keep the small player-like
+				// jitter below.
+				const auto buffer = 2s + 120ms
+				    + std::chrono::milliseconds(
+				        next_dummy_random(player) % 231ULL);
+				player.dummy_next_input_at = now + buffer;
+				continue;
+			}
+
+			player.dummy_last_update = now;
+
+			if (player.dummy_action_ends_at != time_point{}
+			    && now >= player.dummy_action_ends_at)
+			{
+				if (player.movement_mode != protocol::MOVEMENT_MODE_IDLE)
+				{
+					player.movement_mode = protocol::MOVEMENT_MODE_IDLE;
+					player.transform.mutable_velocity()->Clear();
+					player.transform.set_sequence(++player.last_sequence);
+					player.transform.set_client_time_ms(milliseconds(now));
+				}
+				player.dummy_action_ends_at = {};
+				const auto buffer = 120ms
+				    + std::chrono::milliseconds(
+				        next_dummy_random(player) % 231ULL);
+				player.dummy_next_input_at = now + buffer;
+			}
+
+			if (player.dummy_action_ends_at == time_point{}
+			    && now >= player.dummy_next_input_at)
+			{
+				begin_dummy_input(player, now);
+			}
+		}
+	}
+
+	void server_core::begin_dummy_input(
+	    player_session &player,
+	    time_point now)
+	{
+		using namespace std::chrono_literals;
+		const auto random = next_dummy_random(player);
+		const auto action = random % 100ULL;
+		const auto duration = 450ms
+		    + std::chrono::milliseconds(
+		        next_dummy_random(player) % 451ULL);
+
+		if (action < 75ULL)
+		{
+			const auto yaw = static_cast<float>(
+			    next_dummy_random(player) % 6284ULL)
+			    / 1000.0F;
+			// CryEngine's actor-forward basis is +Y. Keep the replicated velocity
+			// and quaternion aligned so the avatar looks where it tries to walk.
+			const auto direction_x = -std::sin(yaw);
+			const auto direction_y = std::cos(yaw);
+			constexpr float speed = 1.5F;
+			player.movement_mode = protocol::MOVEMENT_MODE_WALK;
+			auto *velocity = player.transform.mutable_velocity();
+			velocity->set_x(direction_x * speed);
+			velocity->set_y(direction_y * speed);
+			velocity->set_z(0.0F);
+			auto *rotation = player.transform.mutable_rotation();
+			rotation->set_x(0.0F);
+			rotation->set_y(0.0F);
+			rotation->set_z(std::sin(yaw * 0.5F));
+			rotation->set_w(std::cos(yaw * 0.5F));
+			player.transform.set_sequence(++player.last_sequence);
+			player.transform.set_client_time_ms(milliseconds(now));
+			player.dummy_action_ends_at = now + duration;
+			return;
+		}
+
+		const auto yaw = static_cast<float>(
+		    next_dummy_random(player) % 6284ULL)
+		    / 1000.0F;
+		player.movement_mode = protocol::MOVEMENT_MODE_IDLE;
+		player.transform.mutable_velocity()->Clear();
+		auto *rotation = player.transform.mutable_rotation();
+		rotation->set_x(0.0F);
+		rotation->set_y(0.0F);
+		rotation->set_z(std::sin(yaw * 0.5F));
+		rotation->set_w(std::cos(yaw * 0.5F));
+		player.transform.set_sequence(++player.last_sequence);
+		player.transform.set_client_time_ms(milliseconds(now));
+		player.dummy_action_ends_at = now + 250ms;
+	}
+
+	std::uint64_t server_core::next_dummy_random(player_session &player)
+	{
+		// SplitMix64 gives each dummy an independent deterministic stream. This
+		// keeps server tests reproducible while still making several dummies act
+		// differently from one another.
+		player.dummy_random_state += 0x9e3779b97f4a7c15ULL;
+		auto value = player.dummy_random_state;
+		value = (value ^ (value >> 30U)) * 0xbf58476d1ce4e5b9ULL;
+		value = (value ^ (value >> 27U)) * 0x94d049bb133111ebULL;
+		return value ^ (value >> 31U);
 	}
 
 	bool server_core::remove_dummy(player_id id, time_point now)

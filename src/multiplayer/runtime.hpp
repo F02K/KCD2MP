@@ -125,7 +125,7 @@ namespace kcd2mp
 		    const protocol::ServerBootstrap &bootstrap) = 0;
 		[[nodiscard]] virtual sandbox_poll_result poll_sandbox() = 0;
 		[[nodiscard]] virtual bool sandbox_active() const = 0;
-		virtual void end_sandbox() = 0;
+		virtual void end_sandbox(std::string_view error = {}) = 0;
 		[[nodiscard]] virtual std::string current_level_id() const = 0;
 		[[nodiscard]] virtual std::optional<protocol::PlayerProfile>
 		local_profile() = 0;

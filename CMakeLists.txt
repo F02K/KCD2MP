@@ -625,6 +625,8 @@ if(EXISTS "${KCD2MP_LANGUAGE_ROOT}/README.md")
 endif()
 
 add_custom_target(KCD2MPLanguageFiles
+    COMMAND "${CMAKE_COMMAND}" -E remove_directory
+        "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
         "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
     DEPENDS ${KCD2MP_LANGUAGE_FILES}
@@ -639,6 +641,9 @@ foreach(KCD2MP_LANGUAGE_FILE IN LISTS KCD2MP_LANGUAGE_FILES)
     )
 endforeach()
 add_dependencies(KCD2MP KCD2MPLanguageFiles)
+if(TARGET KCD2MPKCSEClient)
+    add_dependencies(KCD2MPKCSEClient KCD2MPLanguageFiles)
+endif()
 
 if (MSVC)
     if (FINAL)

@@ -174,6 +174,84 @@ class StartupSafetyTests(unittest.TestCase):
         self.assertIn("now + std::chrono::seconds{1}", source)
         self.assertIn("m_next_home_marker_attempt", header)
 
+    def test_multiplayer_sandbox_reveals_the_map_after_activation(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_runtime.cpp"
+        ).read_text(encoding="utf-8")
+        begin = source.index(
+            "sandbox_start_result native_runtime::activate_loaded_sandbox"
+        )
+        end = source.index(
+            "sandbox_start_result native_runtime::begin_native_world_start", begin
+        )
+        sandbox = source[begin:end]
+
+        activated = sandbox.index("m_sandbox_active = true;")
+        reveal = sandbox.index(
+            'execute_console_command("player_revealFow")', activated
+        )
+        ready = sandbox.index("m_sandbox_progress.phase = sandbox_phase::ready", reveal)
+        self.assertLess(activated, reveal)
+        self.assertLess(reveal, ready)
+
+    def test_failed_join_uses_deferred_unload_and_native_english_error(self) -> None:
+        runtime = (
+            PROJECT_ROOT / "src" / "kcse" / "native_runtime.cpp"
+        ).read_text(encoding="utf-8")
+        client = (
+            PROJECT_ROOT / "src" / "multiplayer" / "client.cpp"
+        ).read_text(encoding="utf-8")
+        plugin = (PROJECT_ROOT / "src" / "kcse" / "plugin.cpp").read_text(
+            encoding="utf-8"
+        )
+        menu = (
+            PROJECT_ROOT / "src" / "gui" / "native_multiplayer_menu.cpp"
+        ).read_text(encoding="utf-8")
+
+        begin = runtime.index("void native_runtime::begin_native_unload")
+        unload = runtime[begin:]
+        self.assertIn('execute_console_command("unload", true)', unload)
+        self.assertNotIn("framework->EndGameContext()", unload)
+        self.assertIn("open_main_menu_if_pending();", runtime)
+        self.assertIn("return changed && !unload_transition;", runtime)
+
+        self.assertIn("previous == client_state::closing", client)
+        self.assertIn("!m_status.error.empty()", client)
+        self.assertIn("m_runtime.end_sandbox(reason);", client)
+        self.assertIn(
+            "g_runtime->sandbox_active() || !client_status.error.empty()", plugin
+        )
+
+        self.assertIn('return "Connection failed: " + status.error;', menu)
+        self.assertIn('"Multiplayer connection failed"', menu)
+        self.assertIn("api.mode() == root_main_page", menu)
+        self.assertIn("show_multiplayer_page();", menu)
+
+    def test_multiplayer_time_is_corrected_frequently_without_skip_time(self) -> None:
+        client = (
+            PROJECT_ROOT / "src" / "multiplayer" / "client.cpp"
+        ).read_text(encoding="utf-8")
+        frontend = (PROJECT_ROOT / "src" / "kcd2_init.cpp").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn(
+            "environment_correction_interval =\n"
+            "\t\t    std::chrono::seconds{1}",
+            client,
+        )
+        self.assertIn(
+            ">= environment_correction_interval",
+            client,
+        )
+
+        begin = frontend.index("hook_C_SkipTimeCutscene_Play")
+        end = frontend.index("hook_C_FastTravel_StartTravel", begin)
+        skip_time_hook = frontend[begin:end]
+        self.assertIn("client_state::connected", skip_time_hook)
+        self.assertIn("Blocked vanilla skip time", skip_time_hook)
+        self.assertNotIn("attempt_sleep", skip_time_hook)
+
     def test_npc_isolation_preserves_vanilla_ownership_graph(self) -> None:
         source = (
             PROJECT_ROOT / "src" / "kcse" / "native_entity_backend.cpp"
@@ -200,16 +278,95 @@ class StartupSafetyTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         self.assertIn('(1U << 0) | (1U << 1)', source)
-        self.assertIn('spawn->class_name != "NPC"', source)
-        self.assertIn('spawn->class_name != "NPC_Female"', source)
+        self.assertNotIn("entity_class_view", source)
+        self.assertNotIn("entity_class->GetName()", source)
+        self.assertIn("max_spawn_entity_name_length", source)
         self.assertIn("it->thread == thread", source)
         self.assertIn("it->entity_name == spawn->entity_name", source)
         self.assertIn("it->consumed = true", source)
+        self.assertIn("m_human_npc_classes.insert(spawn->entity_class)", source)
+        self.assertIn("m_human_npc_classes.contains(spawn->entity_class)", source)
         self.assertIn("entity-control.spawn.blocked", source)
+        self.assertIn("m_human_npc_classes", header)
         self.assertIn("human_npc_spawn_scope", header)
         self.assertIn("authorize_human_npc_spawn(name)", remote)
         self.assertNotIn("begin_player_spawn", remote)
         self.assertNotIn("end_player_spawn", remote)
+
+    def test_remote_avatars_are_materialized_before_presentation(self) -> None:
+        source = (
+            PROJECT_ROOT / "src" / "kcse" / "native_remote_avatar_backend.cpp"
+        ).read_text(encoding="utf-8")
+        header = (
+            PROJECT_ROOT / "src" / "kcse" / "native_remote_avatar_backend.hpp"
+        ).read_text(encoding="utf-8")
+
+        spawn_begin = source.index(
+            "native_remote_avatar_backend::spawn("
+        )
+        status_begin = source.index(
+            "native_remote_avatar_backend::status(", spawn_begin
+        )
+        spawn = source[spawn_begin:status_begin]
+        self.assertIn("EnablePhysics(false)", spawn)
+        self.assertIn("entity->Hide(true)", spawn)
+        self.assertIn("entity->Activate(false)", spawn)
+        self.assertIn("presentation=deferred", spawn)
+
+        update_begin = source.index(
+            "native_remote_avatar_backend::update("
+        )
+        display_name_begin = source.index(
+            "native_remote_avatar_backend::apply_display_name(", update_begin
+        )
+        update = source[update_begin:display_name_begin]
+        appearance = update.index("apply_appearance(")
+        presentation = update.index("!present(*value, error)")
+        self.assertLess(appearance, presentation)
+        self.assertIn("value->presented && !activity_locked", update)
+        self.assertIn("join.remote-presentation.failed", update)
+
+        self.assertIn("bool presented{};", header)
+        self.assertIn("join.remote-presentation.complete", source)
+
+    def test_manual_disconnect_is_deferred_to_the_game_thread(self) -> None:
+        client = (
+            PROJECT_ROOT / "src" / "multiplayer" / "client.cpp"
+        ).read_text(encoding="utf-8")
+        plugin = (PROJECT_ROOT / "src" / "kcse" / "plugin.cpp").read_text(
+            encoding="utf-8"
+        )
+        header = (
+            PROJECT_ROOT / "src" / "multiplayer" / "client.hpp"
+        ).read_text(encoding="utf-8")
+
+        disconnect_begin = client.index("void multiplayer_client::disconnect()")
+        fail_begin = client.index("void multiplayer_client::fail", disconnect_begin)
+        disconnect = client[disconnect_begin:fail_begin]
+        self.assertNotIn("m_runtime.local_profile()", disconnect)
+        self.assertNotIn("queue_network(disconnect_command{})", disconnect)
+        self.assertIn("m_manual_disconnect_pending = true", disconnect)
+        self.assertIn("m_status.error.clear()", disconnect)
+
+        tick_begin = client.index("void multiplayer_client::game_tick(")
+        preflight_begin = client.index(
+            "void multiplayer_client::advance_runtime_preflight", tick_begin
+        )
+        tick = client[tick_begin:preflight_begin]
+        capture = tick.index("m_runtime.local_profile()")
+        close = tick.index("queue_network(disconnect_command{})", capture)
+        self.assertLess(capture, close)
+        self.assertIn("queue_profile_snapshot(*profile, true)", tick)
+
+        self.assertIn("bool m_manual_disconnect_pending{};", header)
+        self.assertIn(
+            "client_status.state == kcd2mp::client_state::closing", plugin
+        )
+        self.assertIn(
+            "client_status.state == kcd2mp::client_state::connected\n"
+            "\t\t    && sandbox_active",
+            plugin,
+        )
 
 
 if __name__ == "__main__":

@@ -147,7 +147,7 @@ namespace kcd2mp::kcse
 		void maintain_isolated_entities(Offsets::IEntitySystem &system);
 		[[nodiscard]] bool isolate_npc_entity(Offsets::IEntity *entity);
 		[[nodiscard]] bool should_isolate_npc_actor(
-		    Offsets::IEntity *entity) const;
+		    Offsets::IEntity *entity);
 		void entity_removed(Offsets::IEntity *entity);
 		void entity_event(Offsets::IEntity *entity, void *event);
 		[[nodiscard]] bool allow_human_npc_spawn(void *params);
@@ -163,6 +163,7 @@ namespace kcd2mp::kcse
 		std::unordered_map<std::uint32_t, entity_state> m_isolated;
 		std::unordered_set<std::uint32_t> m_player_entities;
 		std::unordered_map<std::uint32_t, pending_entity> m_pending_control;
+		std::unordered_set<void *> m_human_npc_classes;
 		std::vector<human_npc_spawn_authorization>
 		    m_human_npc_spawn_authorizations;
 		std::uint32_t m_local_player_entity_id{};
