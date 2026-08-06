@@ -346,6 +346,10 @@ target_compile_definitions(KCD2MPProperty PRIVATE
 set_property(TARGET KCD2MPProperty PROPERTY COMPILE_WARNING_AS_ERROR ON)
 
 add_library(KCD2MPServerCore STATIC
+	"${SRC_DIR}/server/item_ledger.cpp"
+	"${SRC_DIR}/server/item_ledger.hpp"
+	"${SRC_DIR}/server/npc_registry.cpp"
+	"${SRC_DIR}/server/npc_registry.hpp"
     "${SRC_DIR}/server/server_config.cpp"
     "${SRC_DIR}/server/server_config.hpp"
     "${SRC_DIR}/server/server_core.cpp"
@@ -362,6 +366,7 @@ target_link_libraries(KCD2MPServerCore PUBLIC
     KCD2MPProperty
     tomlplusplus::tomlplusplus
     bcrypt
+	 nlohmann_json::nlohmann_json
 )
 target_compile_definitions(KCD2MPServerCore PRIVATE
     "_CRT_SECURE_NO_WARNINGS"
@@ -740,6 +745,22 @@ if (BUILD_TESTING)
     set_property(TARGET KCD2MPServerCoreTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
     add_test(NAME KCD2MPServerCoreTests COMMAND KCD2MPServerCoreTests)
 
+	add_executable(KCD2MPItemLedgerTests
+		"${PROJECT_SOURCE_DIR}/tests/item_ledger_tests.cpp"
+	)
+	set_property(TARGET KCD2MPItemLedgerTests PROPERTY CXX_STANDARD 23)
+	target_link_libraries(KCD2MPItemLedgerTests PRIVATE KCD2MPServerCore)
+	set_property(TARGET KCD2MPItemLedgerTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+	add_test(NAME KCD2MPItemLedgerTests COMMAND KCD2MPItemLedgerTests)
+
+	add_executable(KCD2MPNpcRegistryTests
+		"${PROJECT_SOURCE_DIR}/tests/npc_registry_tests.cpp"
+	)
+	set_property(TARGET KCD2MPNpcRegistryTests PROPERTY CXX_STANDARD 23)
+	target_link_libraries(KCD2MPNpcRegistryTests PRIVATE KCD2MPServerCore)
+	set_property(TARGET KCD2MPNpcRegistryTests PROPERTY COMPILE_WARNING_AS_ERROR ON)
+	add_test(NAME KCD2MPNpcRegistryTests COMMAND KCD2MPNpcRegistryTests)
+
     add_executable(KCD2MPPropertyTests
         "${PROJECT_SOURCE_DIR}/tests/property_tests.cpp"
     )
@@ -921,6 +942,8 @@ if (BUILD_TESTING)
             KCD2MPEnginePathTests
             KCD2MPProtocolTests
             KCD2MPServerCoreTests
+			KCD2MPItemLedgerTests
+			KCD2MPNpcRegistryTests
             KCD2MPPropertyTests
             KCD2MPGameCommandQueueTests
             KCD2MPClientStateTests

@@ -120,6 +120,42 @@ int main()
 	protocol::Envelope no_payload;
 	assert(!encode(no_payload, reliability::reliable, &error));
 
+	protocol::Envelope npc_discovery;
+	auto *npc_observation =
+	    npc_discovery.mutable_client_npc_discovery()->add_observations();
+	npc_observation->set_authored_guid(0x1234);
+	npc_observation->set_kind(protocol::NPC_KIND_HUMAN);
+	*npc_observation->mutable_transform() = transform(4.0F, 0.0F, 1);
+	assert(encode(npc_discovery, reliability::reliable, &error));
+	const auto duplicate_npc_observation = *npc_observation;
+	*npc_discovery.mutable_client_npc_discovery()->add_observations() =
+	    duplicate_npc_observation;
+	assert(!encode(npc_discovery, reliability::reliable, &error));
+
+	protocol::Envelope npc_update;
+	auto *npc_update_message = npc_update.mutable_client_npc_update();
+	npc_update_message->set_npc_id(0x1234);
+	npc_update_message->set_generation(1);
+	npc_update_message->set_lease_id(7);
+	*npc_update_message->mutable_transform() = transform(5.0F, 1.0F, 2);
+	assert(encode(npc_update, reliability::unreliable, &error));
+	npc_update_message->set_lease_id(0);
+	assert(!encode(npc_update, reliability::unreliable, &error));
+
+	protocol::Envelope npc_enter;
+	auto *npc_state = npc_enter.mutable_server_npc_enter()->mutable_state();
+	npc_state->set_npc_id(0x1234);
+	npc_state->set_generation(1);
+	npc_state->set_authored_guid(0x1234);
+	npc_state->set_kind(protocol::NPC_KIND_HUMAN);
+	*npc_state->mutable_transform() = transform(5.0F, 0.0F, 1);
+	npc_state->set_revision(1);
+	npc_state->set_authority_player_id(3);
+	npc_state->set_lease_id(7);
+	assert(encode(npc_enter, reliability::reliable, &error));
+	npc_state->set_kind(protocol::NPC_KIND_UNSPECIFIED);
+	assert(!encode(npc_enter, reliability::reliable, &error));
+
 	protocol::Envelope activity_start;
 	auto *start_activity = activity_start.mutable_client_activity_start();
 	start_activity->set_kind(
@@ -430,6 +466,14 @@ int main()
 	*dropped->mutable_item() = *container_item;
 	*dropped->mutable_transform() = transform(4.0F, 0.0F, 0);
 	assert(is_valid_world_item_state(*dropped, false));
+	assert(encode(dropped_item_envelope, reliability::reliable, &error));
+	dropped_update->set_source_instance_id("not-a-uuid");
+	assert(!encode(dropped_item_envelope, reliability::reliable, &error));
+	dropped_update->set_source_instance_id(
+	    "ffffffff-ffff-4fff-8fff-ffffffffffff");
+	dropped_update->set_transfer_count(max_profile_item_count + 1);
+	assert(!encode(dropped_item_envelope, reliability::reliable, &error));
+	dropped_update->set_transfer_count(dropped->item().count());
 	assert(encode(dropped_item_envelope, reliability::reliable, &error));
 	auto bad_drop = *dropped;
 	bad_drop.mutable_item()->set_instance_id(

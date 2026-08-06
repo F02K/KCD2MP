@@ -23,6 +23,8 @@ GAME_EXECUTABLE = "KingdomCome.exe"
 PROJECT_TARGET = "KCD2MPRuntime"
 SERVER_TARGET = "KCD2MPServer"
 AUDIT_TARGET = "KCD2MPSignatureAudit"
+PROPERTY_CATALOG_TARGET = "KCD2MPPropertyCatalog"
+SERVER_GAME_DATA_DIRECTORY = "server_game_data"
 TEST_TARGETS = ("KCD2MPTests",)
 VCPKG_BASELINE = "908da3a305a0a8028d9602ab241b433652b3df69"
 VCPKG_REPOSITORY = "https://github.com/microsoft/vcpkg.git"
@@ -89,6 +91,7 @@ class BuildResult:
     kcse_client_path: Optional[Path] = None
     kcse_client_pdb_path: Optional[Path] = None
     address_library_paths: Tuple[Path, ...] = ()
+    server_game_data_dir: Optional[Path] = None
     package: Optional[PackageResult] = None
 
 
@@ -529,7 +532,12 @@ class BuildService:
         self.project_root = project_root.resolve()
         self._environment_detector = environment_detector
 
-    def build(self, profile: BuildProfile, log: LogCallback = print) -> BuildResult:
+    def build(
+        self,
+        profile: BuildProfile,
+        log: LogCallback = print,
+        game_root: Optional[Path] = None,
+    ) -> BuildResult:
         self._ensure_address_library_submodule(log)
         environment = self._environment_detector()
         build_dir = self.project_root / "out" / "build" / profile.key
@@ -546,8 +554,10 @@ class BuildService:
             PROJECT_TARGET,
             SERVER_TARGET,
             AUDIT_TARGET,
-            "--parallel",
         ]
+        if game_root is not None:
+            build_command.append(PROPERTY_CATALOG_TARGET)
+        build_command.append("--parallel")
         self._run(build_command, log)
         self._run(
             [
@@ -613,6 +623,44 @@ class BuildService:
                     "\n".join(missing)
                 )
             )
+        if game_root is not None:
+            normalized_game_root = normalize_game_root(game_root)
+            whgame = self.audit(
+                profile, normalized_game_root, log, build_result=result
+            )
+            log("=== Generating dedicated-server game metadata ===")
+            game_data_dir = artifact_dir / SERVER_GAME_DATA_DIRECTORY
+            property_catalog_tool = (
+                artifact_dir / "{}.exe".format(PROPERTY_CATALOG_TARGET)
+            )
+            if not property_catalog_tool.is_file():
+                raise BuildToolError(
+                    "Property catalog executable is missing: {}".format(
+                        property_catalog_tool
+                    )
+                )
+            self._run(
+                [
+                    sys.executable,
+                    str(self.project_root / "tools" / "generate_server_game_data.py"),
+                    "--game-root",
+                    str(normalized_game_root),
+                    "--output",
+                    str(game_data_dir),
+                    "--property-catalog-tool",
+                    str(property_catalog_tool),
+                ],
+                log,
+            )
+            generated_whgame = game_data_dir / "WHGame.dll"
+            if (
+                not generated_whgame.is_file()
+                or generated_whgame.stat().st_size != whgame.stat().st_size
+            ):
+                raise BuildToolError(
+                    "Dedicated-server game data did not contain the audited WHGame.dll."
+                )
+            result = replace(result, server_game_data_dir=game_data_dir)
         package = package_artifacts(result, self.project_root)
         log("Packaged client, server, and tests under {}.".format(package.root))
         log("Install-ready client ZIP: {}".format(package.client_zip))
@@ -1153,12 +1201,27 @@ def package_artifacts(
         _copy_layout(client_layout, game_root)
         server_root.mkdir(parents=True, exist_ok=True)
 
+        game_data_dir = result.server_game_data_dir
+        if game_data_dir is None:
+            candidate = artifact_dir / SERVER_GAME_DATA_DIRECTORY
+            if candidate.is_dir():
+                game_data_dir = candidate
+        generated_archetypes = (
+            game_data_dir / "npc_archetypes.json"
+            if game_data_dir is not None
+            else None
+        )
+        archetype_source = (
+            generated_archetypes
+            if generated_archetypes is not None and generated_archetypes.is_file()
+            else project_root / "data" / "npc_archetypes.json"
+        )
         server_sources = (
             result.server_path,
             result.server_path.with_suffix(".pdb"),
             project_root / "server.toml.example",
             project_root / "starter_profile.toml",
-            project_root / "data" / "npc_archetypes.json",
+            archetype_source,
         )
         missing_server = [str(path) for path in server_sources if not path.is_file()]
         if missing_server:
@@ -1169,6 +1232,29 @@ def package_artifacts(
             )
         for source in server_sources:
             shutil.copy2(source, server_root / source.name)
+
+        if game_data_dir is not None:
+            required_game_data = (
+                "WHGame.dll",
+                "content_manifest.json",
+                "npc_archetypes.json",
+                "npc_world_catalog.json",
+                "property_catalog_2.pb",
+                "property_catalog_3.pb",
+                "property_catalog_4.pb",
+            )
+            missing_game_data = [
+                str(game_data_dir / name)
+                for name in required_game_data
+                if not (game_data_dir / name).is_file()
+            ]
+            if missing_game_data:
+                raise BuildToolError(
+                    "Cannot package incomplete dedicated-server game data:\n{}".format(
+                        "\n".join(missing_game_data)
+                    )
+                )
+            shutil.copytree(game_data_dir, server_root / "game_data")
 
         if result.audit_path is not None:
             audit_sources = (result.audit_path, result.audit_path.with_suffix(".pdb"))

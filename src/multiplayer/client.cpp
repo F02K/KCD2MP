@@ -139,6 +139,15 @@ namespace kcd2mp
 				return "PlayerActivityUpdated";
 			case protocol::Envelope::kServerHomeMarkerUpdated:
 				return "ServerHomeMarkerUpdated";
+			case protocol::Envelope::kClientNpcDiscovery:
+				return "ClientNpcDiscovery";
+			case protocol::Envelope::kClientNpcUpdate: return "ClientNpcUpdate";
+			case protocol::Envelope::kServerNpcEnter: return "ServerNpcEnter";
+			case protocol::Envelope::kServerNpcLeave: return "ServerNpcLeave";
+			case protocol::Envelope::kServerNpcAuthority:
+				return "ServerNpcAuthority";
+			case protocol::Envelope::kServerNpcSnapshot:
+				return "ServerNpcSnapshot";
 			case protocol::Envelope::PAYLOAD_NOT_SET: return "PayloadNotSet";
 			}
 			return "InvalidEnvelopePayload";
@@ -161,6 +170,17 @@ namespace kcd2mp
 			normalize(left);
 			normalize(right);
 			return left.SerializeAsString() == right.SerializeAsString();
+		}
+
+		bool same_item_stack(
+		    const protocol::InventoryItem &left,
+		    const protocol::InventoryItem &right,
+		    bool compare_count = true)
+		{
+			return left.definition_id() == right.definition_id()
+			    && (!compare_count || left.count() == right.count())
+			    && left.quality() == right.quality()
+			    && left.condition() == right.condition();
 		}
 	}
 
@@ -262,6 +282,12 @@ namespace kcd2mp
 			m_world_items.clear();
 			m_pending_world_items.clear();
 			m_deferred_world_items.clear();
+			m_npcs.clear();
+			m_npc_by_guid.clear();
+			m_human_npcs_disabled = false;
+			m_animal_npcs_disabled = false;
+			m_last_npc_sampled = {};
+			m_last_npc_discovery_sent = {};
 			m_local_avatar.reset();
 			m_pending_avatar.reset();
 			m_desired_avatar.reset();
@@ -508,6 +534,8 @@ namespace kcd2mp
 			m_world_items.clear();
 			m_pending_world_items.clear();
 			m_deferred_world_items.clear();
+			m_npcs.clear();
+			m_npc_by_guid.clear();
 			m_environment_revision = 0;
 			m_weather_revision = 0;
 			m_sleep_revision = 0;
@@ -666,7 +694,23 @@ namespace kcd2mp
 			queue_network(transform_command{std::move(*local_transform)});
 			m_last_transform_sent = now;
 		}
-		if (profile_due)
+		std::vector<protocol::WorldObjectState> world_objects;
+		std::vector<protocol::WorldItemState> world_items;
+		std::vector<protocol::NpcObservation> npc_observations;
+		if (connected)
+		{
+			world_objects = m_runtime.poll_world_object_updates();
+			world_items = m_runtime.poll_world_item_updates();
+			if (m_last_npc_sampled == std::chrono::steady_clock::time_point{}
+			    || now - m_last_npc_sampled >= std::chrono::milliseconds(200))
+			{
+				npc_observations = m_runtime.poll_npc_observations();
+				m_last_npc_sampled = now;
+			}
+		}
+		const bool item_transaction_pending =
+		    !world_objects.empty() || !world_items.empty();
+		if (profile_due && !item_transaction_pending)
 		{
 			if (const auto profile = m_runtime.local_profile())
 			{
@@ -675,15 +719,11 @@ namespace kcd2mp
 		}
 		if (connected)
 		{
-			queue_world_object_updates(m_runtime.poll_world_object_updates());
-			auto world_items = m_runtime.poll_world_item_updates();
-			if (!world_items.empty())
-			{
-				if (const auto profile = m_runtime.local_profile())
-					queue_profile_snapshot(*profile);
-				m_last_profile_sent = {};
-				queue_world_item_updates(std::move(world_items));
-			}
+			queue_world_object_updates(std::move(world_objects));
+			queue_world_item_updates(std::move(world_items));
+			queue_npc_observations(std::move(npc_observations), now);
+			if (item_transaction_pending)
+				m_last_profile_sent = now;
 		}
 		update_interpolation(now);
 	}
@@ -1227,7 +1267,8 @@ namespace kcd2mp
 					        }
 
 					        const bool reliable =
-					            !envelope->has_world_snapshot();
+					            !envelope->has_world_snapshot()
+					            && !envelope->has_server_npc_snapshot();
 					        if (!m_game_commands.push(
 					                std::move(*envelope),
 					                reliable)
@@ -1384,6 +1425,26 @@ namespace kcd2mp
 							    (void)send_envelope(
 							        envelope,
 							        reliability::reliable);
+						    }
+						    else if constexpr (
+						        std::is_same_v<type, npc_discovery_command>)
+						    {
+							    protocol::Envelope envelope;
+							    *envelope.mutable_client_npc_discovery() =
+							        std::move(typed.message);
+							    (void)send_envelope(
+							        envelope,
+							        reliability::reliable);
+						    }
+						    else if constexpr (
+						        std::is_same_v<type, npc_update_command>)
+						    {
+							    protocol::Envelope envelope;
+							    *envelope.mutable_client_npc_update() =
+							        std::move(typed.message);
+							    (void)send_envelope(
+							        envelope,
+							        reliability::unreliable);
 						    }
 						    else if constexpr (
 						        std::is_same_v<type, sleep_command>)
@@ -1589,6 +1650,10 @@ namespace kcd2mp
 			m_world_items.clear();
 			m_pending_world_items.clear();
 			m_deferred_world_items.clear();
+			m_npcs.clear();
+			m_npc_by_guid.clear();
+			m_last_npc_sampled = {};
+			m_last_npc_discovery_sent = {};
 			m_environment_revision = 0;
 			m_weather_revision = 0;
 			m_sleep_revision = 0;
@@ -1727,10 +1792,104 @@ namespace kcd2mp
 				}
 				update.set_base_revision(revision);
 				*update.mutable_state() = observed;
+				if (observed.present() && current == m_world_items.end()
+				    && m_profile)
+				{
+					const protocol::InventoryItem *source = nullptr;
+					for (const auto &candidate : m_profile->inventory())
+					{
+						if (candidate.instance_id() == observed.instance_id()
+						    || candidate.count() <= observed.item().count()
+						    || !same_item_stack(
+						        candidate, observed.item(), false))
+						{
+							continue;
+						}
+						if (source)
+						{
+							source = nullptr;
+							break;
+						}
+						source = &candidate;
+					}
+					if (source)
+					{
+						update.set_source_instance_id(source->instance_id());
+						update.set_transfer_count(observed.item().count());
+					}
+				}
 				m_pending_world_items.insert_or_assign(key, observed);
 			}
 			queue_network(world_item_command{std::move(update)});
 		}
+	}
+
+	void multiplayer_client::queue_npc_observations(
+	    std::vector<protocol::NpcObservation> observations,
+	    std::chrono::steady_clock::time_point now)
+	{
+		protocol::ClientNpcDiscovery discovery;
+		std::vector<protocol::ClientNpcUpdate> updates;
+		bool discovery_due{};
+		{
+			std::scoped_lock lock(m_state_mutex);
+			if (m_status.state != client_state::connected)
+				return;
+			discovery_due =
+			    m_last_npc_discovery_sent
+			            == std::chrono::steady_clock::time_point{}
+			    || now - m_last_npc_discovery_sent >= std::chrono::seconds(1);
+			for (auto &observation : observations)
+			{
+				if (!is_valid_npc_observation(observation)
+				    || (observation.kind() == protocol::NPC_KIND_HUMAN
+				        && m_human_npcs_disabled)
+				    || (observation.kind() == protocol::NPC_KIND_ANIMAL
+				        && m_animal_npcs_disabled))
+					continue;
+
+				const auto mapped = m_npc_by_guid.find(
+				    observation.authored_guid());
+				const auto known_id = observation.known_npc_id() != 0
+				    ? observation.known_npc_id()
+				    : mapped == m_npc_by_guid.end() ? 0 : mapped->second;
+				if (known_id == 0)
+				{
+					if (discovery_due)
+						*discovery.add_observations() = std::move(observation);
+					continue;
+				}
+				const auto state = m_npcs.find(known_id);
+				if (state == m_npcs.end()
+				    || state->second.authority_player_id()
+				        != m_status.local_player_id
+				    || state->second.lease_id() == 0)
+					continue;
+				protocol::ClientNpcUpdate update;
+				update.set_npc_id(state->second.npc_id());
+				update.set_generation(state->second.generation());
+				update.set_lease_id(state->second.lease_id());
+				*update.mutable_transform() = observation.transform();
+				*update.mutable_gameplay() = observation.gameplay();
+				updates.push_back(std::move(update));
+			}
+			if (discovery.observations_size() != 0)
+				m_last_npc_discovery_sent = now;
+		}
+
+		for (int offset = 0; offset < discovery.observations_size();
+		     offset += static_cast<int>(max_npcs_per_message))
+		{
+			protocol::ClientNpcDiscovery chunk;
+			const auto count = std::min(
+			    static_cast<int>(max_npcs_per_message),
+			    discovery.observations_size() - offset);
+			for (int index{}; index < count; ++index)
+				*chunk.add_observations() = discovery.observations(offset + index);
+			queue_network(npc_discovery_command{std::move(chunk)});
+		}
+		for (auto &update : updates)
+			queue_network(npc_update_command{std::move(update)});
 	}
 
 	void multiplayer_client::handle_game_envelope(
@@ -1871,6 +2030,8 @@ namespace kcd2mp
 			m_world_items.clear();
 			m_pending_world_items.clear();
 			m_deferred_world_items.clear();
+			m_npcs.clear();
+			m_npc_by_guid.clear();
 			for (const auto &object : bootstrap.world_objects())
 				m_world_objects.emplace(object.entity_guid(), object);
 			for (const auto &item : bootstrap.world_items())
@@ -2125,8 +2286,19 @@ namespace kcd2mp
 			const auto &accepted = envelope.world_object_accepted();
 			const auto pending =
 			    m_pending_world_objects.find(accepted.entity_guid());
-			if (pending == m_pending_world_objects.end()
-			    || accepted.revision() != pending->second.revision() + 1)
+			if (pending == m_pending_world_objects.end())
+			{
+				const auto current = m_world_objects.find(accepted.entity_guid());
+				if (current != m_world_objects.end()
+				    && current->second.revision() >= accepted.revision())
+					return;
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server accepted an unknown world object revision");
+				queue_network(disconnect_command{});
+				return;
+			}
+			if (accepted.revision() != pending->second.revision() + 1)
 			{
 				(void)transition_state_locked(
 				    client_state::closing,
@@ -2155,6 +2327,24 @@ namespace kcd2mp
 					queue_network(world_object_command{std::move(update)});
 				}
 			}
+			if (accepted.has_authoritative_profile())
+			{
+				const auto authoritative = accepted.authoritative_profile();
+				lock.unlock();
+				const bool applied =
+				    m_runtime.apply_authoritative_profile(authoritative);
+				lock.lock();
+				if (!applied)
+				{
+					(void)transition_state_locked(
+					    client_state::closing,
+					    "could not apply atomic container transfer");
+					queue_network(disconnect_command{});
+					return;
+				}
+				m_profile = authoritative;
+				m_local_avatar = authoritative.avatar();
+			}
 		}
 		else if (envelope.has_world_object_rejected())
 		{
@@ -2162,6 +2352,10 @@ namespace kcd2mp
 			    envelope.world_object_rejected().authoritative_state();
 			if (!m_pending_world_objects.contains(state.entity_guid()))
 			{
+				const auto current = m_world_objects.find(state.entity_guid());
+				if (current != m_world_objects.end()
+				    && current->second.revision() >= state.revision())
+					return;
 				(void)transition_state_locked(
 				    client_state::closing,
 				    "server rejected a world object update that was not pending");
@@ -2212,8 +2406,19 @@ namespace kcd2mp
 			const auto &accepted = envelope.world_item_accepted();
 			const auto pending =
 			    m_pending_world_items.find(accepted.instance_id());
-			if (pending == m_pending_world_items.end()
-			    || accepted.revision() != pending->second.revision() + 1)
+			if (pending == m_pending_world_items.end())
+			{
+				const auto current = m_world_items.find(accepted.instance_id());
+				if (current != m_world_items.end()
+				    && current->second.revision() >= accepted.revision())
+					return;
+				(void)transition_state_locked(
+				    client_state::closing,
+				    "server accepted an unknown world item revision");
+				queue_network(disconnect_command{});
+				return;
+			}
+			if (accepted.revision() != pending->second.revision() + 1)
 			{
 				(void)transition_state_locked(
 				    client_state::closing,
@@ -2242,6 +2447,24 @@ namespace kcd2mp
 					queue_network(world_item_command{std::move(update)});
 				}
 			}
+			if (accepted.has_authoritative_profile())
+			{
+				const auto authoritative = accepted.authoritative_profile();
+				lock.unlock();
+				const bool applied =
+				    m_runtime.apply_authoritative_profile(authoritative);
+				lock.lock();
+				if (!applied)
+				{
+					(void)transition_state_locked(
+					    client_state::closing,
+					    "could not apply atomic world item transfer");
+					queue_network(disconnect_command{});
+					return;
+				}
+				m_profile = authoritative;
+				m_local_avatar = authoritative.avatar();
+			}
 		}
 		else if (envelope.has_world_item_rejected())
 		{
@@ -2249,6 +2472,10 @@ namespace kcd2mp
 			    envelope.world_item_rejected().authoritative_state();
 			if (!m_pending_world_items.contains(state.instance_id()))
 			{
+				const auto current = m_world_items.find(state.instance_id());
+				if (current != m_world_items.end()
+				    && current->second.revision() >= state.revision())
+					return;
 				(void)transition_state_locked(
 				    client_state::closing,
 				    "server rejected a world item update that was not pending");
@@ -2367,6 +2594,74 @@ namespace kcd2mp
 				m_chat.pop_front();
 			}
 		}
+		else if (envelope.has_server_npc_enter())
+		{
+			const auto state = envelope.server_npc_enter().state();
+			const auto current = m_npcs.find(state.npc_id());
+			if (current != m_npcs.end()
+			    && current->second.generation() > state.generation())
+				return;
+			m_npcs.insert_or_assign(state.npc_id(), state);
+			m_npc_by_guid.insert_or_assign(state.authored_guid(), state.npc_id());
+			const bool authority =
+			    state.authority_player_id() == m_status.local_player_id;
+			lock.unlock();
+			const bool applied = m_runtime.apply_npc_state(state, authority);
+			lock.lock();
+			if (!applied)
+				m_status.error = "native NPC enter is waiting for level streaming";
+		}
+		else if (envelope.has_server_npc_leave())
+		{
+			const auto &message = envelope.server_npc_leave();
+			const auto current = m_npcs.find(message.npc_id());
+			if (current == m_npcs.end()
+			    || current->second.generation() != message.generation())
+				return;
+			m_npc_by_guid.erase(current->second.authored_guid());
+			m_npcs.erase(current);
+			lock.unlock();
+			m_runtime.remove_npc_state(
+			    message.npc_id(), message.generation());
+			lock.lock();
+		}
+		else if (envelope.has_server_npc_authority())
+		{
+			const auto &message = envelope.server_npc_authority();
+			const auto current = m_npcs.find(message.npc_id());
+			if (current == m_npcs.end()
+			    || current->second.generation() != message.generation())
+				return;
+			current->second.set_authority_player_id(
+			    message.authority_player_id());
+			current->second.set_lease_id(message.lease_id());
+			const auto state = current->second;
+			const bool authority =
+			    state.authority_player_id() == m_status.local_player_id;
+			lock.unlock();
+			(void)m_runtime.apply_npc_state(state, authority);
+			lock.lock();
+		}
+		else if (envelope.has_server_npc_snapshot())
+		{
+			for (const auto &state : envelope.server_npc_snapshot().npcs())
+			{
+				const auto current = m_npcs.find(state.npc_id());
+				if (current == m_npcs.end()
+				    || current->second.generation() != state.generation()
+				    || (state.revision() <= current->second.revision()
+				        && state.lease_id() == current->second.lease_id()))
+					continue;
+				m_npcs.insert_or_assign(state.npc_id(), state);
+				m_npc_by_guid.insert_or_assign(
+				    state.authored_guid(), state.npc_id());
+				const bool authority =
+				    state.authority_player_id() == m_status.local_player_id;
+				lock.unlock();
+				(void)m_runtime.apply_npc_state(state, authority);
+				lock.lock();
+			}
+		}
 		else if (envelope.has_server_entity_control())
 		{
 			const auto &control = envelope.server_entity_control();
@@ -2378,10 +2673,48 @@ namespace kcd2mp
 			const bool animals_disabled = control.has_animal_npcs_disabled()
 			    ? control.animal_npcs_disabled()
 			    : legacy_disabled;
+			m_human_npcs_disabled = humans_disabled;
+			m_animal_npcs_disabled = animals_disabled;
+			std::vector<std::pair<std::uint64_t, std::uint32_t>> removed;
+			for (auto iterator = m_npcs.begin(); iterator != m_npcs.end();)
+			{
+				const bool disabled =
+				    (iterator->second.kind() == protocol::NPC_KIND_HUMAN
+				        && humans_disabled)
+				    || (iterator->second.kind() == protocol::NPC_KIND_ANIMAL
+				        && animals_disabled);
+				if (!disabled)
+				{
+					++iterator;
+					continue;
+				}
+				removed.emplace_back(
+				    iterator->second.npc_id(), iterator->second.generation());
+				m_npc_by_guid.erase(iterator->second.authored_guid());
+				iterator = m_npcs.erase(iterator);
+			}
+			std::vector<protocol::NpcState> remaining;
+			remaining.reserve(m_npcs.size());
+			for (const auto &[npc_id, state] : m_npcs)
+			{
+				(void)npc_id;
+				remaining.push_back(state);
+			}
+			const auto local_player_id = m_status.local_player_id;
 			lock.unlock();
+			for (const auto &[npc_id, generation] : removed)
+				m_runtime.remove_npc_state(npc_id, generation);
 			const bool applied = m_runtime.set_npc_entities_disabled(
 			    humans_disabled,
 			    animals_disabled);
+			if (applied)
+			{
+				for (const auto &state : remaining)
+					(void)m_runtime.apply_npc_state(
+					    state,
+					    state.authority_player_id()
+					        == local_player_id);
+			}
 			lock.lock();
 			if (!applied)
 			{

@@ -2,6 +2,8 @@
 
 #include "multiplayer/protocol.hpp"
 #include "property/service.hpp"
+#include "server/item_ledger.hpp"
+#include "server/npc_registry.hpp"
 #include "server/server_config.hpp"
 #include "server/world_store.hpp"
 
@@ -200,6 +202,14 @@ namespace kcd2mp::server
 		void handle_world_item_update(
 		    player_session &player,
 		    const protocol::ClientWorldItemUpdate &message);
+		void handle_npc_discovery(
+		    player_session &player,
+		    const protocol::ClientNpcDiscovery &message,
+		    time_point now);
+		void handle_npc_update(
+		    player_session &player,
+		    const protocol::ClientNpcUpdate &message,
+		    time_point now);
 		void handle_transform(
 		    player_session &player,
 		    const protocol::ClientTransform &message,
@@ -264,6 +274,7 @@ namespace kcd2mp::server
 		void persist_world_objects();
 		void persist_world_items();
 		void remove_owned_items_from_world();
+		void rebuild_avatar_equipment(player_session &player);
 		void tick_dummies(time_point now);
 		void begin_dummy_input(player_session &player, time_point now);
 		[[nodiscard]] static std::uint64_t next_dummy_random(
@@ -278,6 +289,10 @@ namespace kcd2mp::server
 		    reliability delivery,
 		    close_kind close = close_kind::none);
 		void queue_snapshot(time_point now);
+		[[nodiscard]] std::vector<npc_registry::player_position>
+		player_positions() const;
+		void queue_npc_events(std::vector<npc_registry::event> events);
+		void queue_npc_snapshots();
 		[[nodiscard]] player_session *find_by_connection(connection_id connection);
 		[[nodiscard]] player_session *find_by_resume_token(std::string_view token);
 		[[nodiscard]] static std::string lower_ascii(std::string_view value);
@@ -289,6 +304,7 @@ namespace kcd2mp::server
 		server_config m_config;
 		token_generator m_generate_token;
 		world_store m_store;
+		npc_registry m_npcs;
 		property::service m_properties;
 		std::uint64_t m_server_tick{};
 		time_point m_last_snapshot{};
@@ -298,7 +314,7 @@ namespace kcd2mp::server
 		std::unordered_map<std::uint64_t, protocol::WorldObjectState>
 		    m_world_objects;
 		std::unordered_map<std::string, protocol::WorldItemState> m_world_items;
-		std::unordered_map<std::string, player_id> m_item_owners;
+		item_ledger m_items;
 		std::optional<connection_id> m_initializer;
 		std::uint64_t m_next_dummy_index{1};
 		bool m_human_npcs_disabled{};

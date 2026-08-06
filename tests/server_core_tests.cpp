@@ -901,6 +901,12 @@ int main()
 		auto config = config_for(avatar_world.path);
 		config.known_avatar_archetypes.insert(std::string(knight_soul));
 		config.allowed_avatar_archetypes.push_back(std::string(knight_soul));
+		config.starter_profile.inventory.push_back({
+		    .definition_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		    .count = 1,
+		    .quality = 1.0F,
+		    .condition = 1.0F,
+		    .equipped_slot = "PrimaryMainHand"});
 		server_core core(config);
 		protocol::PlayerProfile enrolled_profile;
 		(void)connect_new_player(
@@ -909,26 +915,6 @@ int main()
 		    start,
 		    1,
 		    &enrolled_profile);
-
-		protocol::Envelope inventory_update;
-		auto *inventory_message =
-		    inventory_update.mutable_client_profile_update();
-		inventory_message->set_base_revision(enrolled_profile.revision());
-		*inventory_message->mutable_profile() = enrolled_profile;
-		auto *inventory_item =
-		    inventory_message->mutable_profile()->add_inventory();
-		inventory_item->set_instance_id(
-		    "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb");
-		inventory_item->set_definition_id(
-		    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
-		inventory_item->set_count(1);
-		inventory_item->set_quality(1.0F);
-		inventory_item->set_condition(1.0F);
-		inventory_item->set_equipped_slot("PrimaryMainHand");
-		core.on_message(37, inventory_update, start + 3ms);
-		auto outbound = core.take_outbound();
-		assert(outbound.size() == 1);
-		assert(outbound.front().envelope.has_profile_accepted());
 
 		protocol::Envelope update;
 		auto *message = update.mutable_client_avatar_update();
@@ -947,7 +933,7 @@ int main()
 		    "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
 		item->set_equipped_slot("PrimaryMainHand");
 		core.on_message(37, update, start + 4ms);
-		outbound = core.take_outbound();
+		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
 		assert(outbound.front().envelope.has_avatar_accepted());
 		assert(outbound.front().envelope.avatar_accepted().revision() == 2);
@@ -1050,6 +1036,27 @@ int main()
 		    &second_profile,
 		    "Hans");
 
+		protocol::Envelope fabricated_item;
+		auto *fabricated_update =
+		    fabricated_item.mutable_client_profile_update();
+		fabricated_update->set_base_revision(first_profile.revision());
+		*fabricated_update->mutable_profile() = first_profile;
+		auto *fabricated = fabricated_update->mutable_profile()->add_inventory();
+		fabricated->set_instance_id(
+		    "aaaaaaaa-0000-4000-8000-000000000001");
+		fabricated->set_definition_id(
+		    "aaaaaaaa-0000-4000-8000-000000000002");
+		fabricated->set_count(1);
+		fabricated->set_quality(100.0F);
+		fabricated->set_condition(1.0F);
+		core.on_message(50, fabricated_item, start + 7ms);
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_rejected());
+		assert(
+		    outbound.front().envelope.profile_rejected().reason()
+		    == "item has no server-authoritative world or container source");
+
 		protocol::Envelope observed_container;
 		auto *container_update =
 		    observed_container.mutable_client_world_object_update();
@@ -1069,7 +1076,7 @@ int main()
 		loot->set_quality(100.0F);
 		loot->set_condition(1.0F);
 		core.on_message(50, observed_container, start + 8ms);
-		auto outbound = core.take_outbound();
+		outbound = core.take_outbound();
 		assert(std::ranges::any_of(
 		    outbound,
 		    [](const outbound_message &message)
@@ -1190,16 +1197,47 @@ int main()
 		drop_transform->mutable_position()->set_z(3.0F);
 		drop_transform->mutable_rotation()->set_w(1.0F);
 		drop_transform->mutable_velocity();
+
+		auto mutated_drop = dropped_item;
+		mutated_drop.mutable_client_world_item_update()
+		    ->mutable_state()
+		    ->mutable_item()
+		    ->set_definition_id(
+		        "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee");
+		core.on_message(50, mutated_drop, start + 13ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_world_item_rejected());
+		assert(!outbound.front()
+		            .envelope.world_item_rejected()
+		            .authoritative_state()
+		            .present());
+
 		core.on_message(50, dropped_item, start + 13ms);
 		outbound = core.take_outbound();
 		assert(std::ranges::any_of(
 		    outbound,
 		    [](const outbound_message &message)
-		    {
-			    return message.connection == 50
-			        && message.envelope.has_world_item_accepted()
-			        && message.envelope.world_item_accepted().revision() == 1;
-		    }));
+			{
+				return message.connection == 50
+				    && message.envelope.has_world_item_accepted()
+				    && message.envelope.world_item_accepted().revision() == 1
+				    && message.envelope.world_item_accepted()
+				           .has_authoritative_profile()
+				    && message.envelope.world_item_accepted()
+				           .authoritative_profile()
+				           .revision()
+				        == 3
+				    && std::ranges::none_of(
+				        message.envelope.world_item_accepted()
+				            .authoritative_profile()
+				            .inventory(),
+				        [](const protocol::InventoryItem &item)
+				        {
+					        return item.instance_id()
+					            == "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+				        });
+			}));
 		assert(std::ranges::any_of(
 		    outbound,
 		    [](const outbound_message &message)
@@ -1272,6 +1310,166 @@ int main()
 			        && !message.envelope.world_item_updated().state().present()
 			        && message.envelope.world_item_updated().state().revision() == 2;
 		    }));
+	}
+
+	temporary_world split_transfer_world;
+	{
+		auto config = config_for(split_transfer_world.path);
+		config.starter_profile.inventory.push_back({
+		    .definition_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+		    .count = 10,
+		    .quality = 1.0F,
+		    .condition = 0.8F});
+		server_core core(config);
+		protocol::PlayerProfile first_profile;
+		protocol::PlayerProfile second_profile;
+		(void)connect_new_player(core, 53, start, 1, &first_profile);
+		(void)connect_new_player(
+		    core, 54, start + 1ms, 2, &second_profile, "Hans");
+		const auto source_item = std::ranges::find_if(
+		    first_profile.inventory(),
+		    [](const protocol::InventoryItem &item)
+		    {
+			    return item.definition_id()
+			        == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+		    });
+		assert(source_item != first_profile.inventory().end());
+		const auto source_instance = source_item->instance_id();
+
+		protocol::Envelope local_split;
+		auto *local_split_update =
+		    local_split.mutable_client_profile_update();
+		local_split_update->set_base_revision(first_profile.revision());
+		*local_split_update->mutable_profile() = first_profile;
+		for (auto &item :
+		     *local_split_update->mutable_profile()->mutable_inventory())
+		{
+			if (item.instance_id() == source_instance)
+				item.set_count(7);
+		}
+		auto *local_split_item =
+		    local_split_update->mutable_profile()->add_inventory();
+		*local_split_item = *source_item;
+		local_split_item->set_instance_id(
+		    "66666666-6666-4666-8666-666666666666");
+		local_split_item->set_count(3);
+		local_split_item->clear_equipped_slot();
+		core.on_message(53, local_split, start + 2ms);
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_accepted());
+		assert(outbound.front().envelope.profile_accepted().revision() == 2);
+
+		auto merged_profile = local_split_update->profile();
+		merged_profile.set_revision(2);
+		for (auto &item : *merged_profile.mutable_inventory())
+		{
+			if (item.instance_id() == source_instance)
+				item.set_count(10);
+		}
+		for (auto index = merged_profile.inventory_size(); index-- > 0;)
+		{
+			if (merged_profile.inventory(index).instance_id()
+			    == "66666666-6666-4666-8666-666666666666")
+			{
+				merged_profile.mutable_inventory()->DeleteSubrange(index, 1);
+			}
+		}
+		protocol::Envelope local_merge;
+		auto *local_merge_update =
+		    local_merge.mutable_client_profile_update();
+		local_merge_update->set_base_revision(2);
+		*local_merge_update->mutable_profile() = merged_profile;
+		core.on_message(53, local_merge, start + 3ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_accepted());
+		assert(outbound.front().envelope.profile_accepted().revision() == 3);
+		first_profile = std::move(merged_profile);
+		const auto merged_source = std::ranges::find_if(
+		    first_profile.inventory(),
+		    [&](const protocol::InventoryItem &item)
+		    { return item.instance_id() == source_instance; });
+		assert(merged_source != first_profile.inventory().end());
+
+		protocol::Envelope split_drop;
+		auto *split_update = split_drop.mutable_client_world_item_update();
+		split_update->set_base_revision(0);
+		split_update->set_source_instance_id(
+		    merged_source->instance_id());
+		split_update->set_transfer_count(3);
+		auto *world_item = split_update->mutable_state();
+		world_item->set_instance_id(
+		    "55555555-5555-4555-8555-555555555555");
+		world_item->set_revision(0);
+		world_item->set_present(true);
+		*world_item->mutable_item() = *merged_source;
+		world_item->mutable_item()->set_instance_id(world_item->instance_id());
+		world_item->mutable_item()->set_count(3);
+		world_item->mutable_item()->clear_equipped_slot();
+		world_item->mutable_transform()->mutable_position();
+		world_item->mutable_transform()->mutable_rotation()->set_w(1.0F);
+		world_item->mutable_transform()->mutable_velocity();
+		core.on_message(53, split_drop, start + 4ms);
+		outbound = core.take_outbound();
+		const auto accepted = std::ranges::find_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 53
+			        && message.envelope.has_world_item_accepted();
+		    });
+		assert(accepted != outbound.end());
+		assert(accepted->envelope.world_item_accepted().revision() == 1);
+		assert(std::ranges::any_of(
+		    accepted->envelope.world_item_accepted()
+		        .authoritative_profile()
+		        .inventory(),
+		    [](const protocol::InventoryItem &item)
+		    {
+			    return item.definition_id()
+			            == "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+			        && item.count() == 7;
+		    }));
+		const auto first_after_split =
+		    accepted->envelope.world_item_accepted().authoritative_profile();
+
+		protocol::Envelope pickup;
+		auto *pickup_update = pickup.mutable_client_world_item_update();
+		pickup_update->set_base_revision(1);
+		*pickup_update->mutable_state() = *world_item;
+		pickup_update->mutable_state()->set_revision(1);
+		pickup_update->mutable_state()->set_present(false);
+		core.on_message(54, pickup, start + 5ms);
+		outbound = core.take_outbound();
+		const auto pickup_accepted = std::ranges::find_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 54
+			        && message.envelope.has_world_item_accepted();
+		    });
+		assert(pickup_accepted != outbound.end());
+		assert(pickup_accepted->envelope.world_item_accepted().revision() == 2);
+		assert(std::ranges::any_of(
+		    pickup_accepted->envelope.world_item_accepted()
+		        .authoritative_profile()
+		        .inventory(),
+		    [&](const protocol::InventoryItem &item)
+		    { return item.instance_id() == world_item->instance_id(); }));
+
+		protocol::Envelope duplicate_claim;
+		auto *claim_update = duplicate_claim.mutable_client_profile_update();
+		claim_update->set_base_revision(first_after_split.revision());
+		*claim_update->mutable_profile() = first_after_split;
+		*claim_update->mutable_profile()->add_inventory() = world_item->item();
+		core.on_message(53, duplicate_claim, start + 6ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_rejected());
+		assert(
+		    outbound.front().envelope.profile_rejected().reason()
+		    == "item is already owned by another player");
 	}
 
 	temporary_world lease_world;

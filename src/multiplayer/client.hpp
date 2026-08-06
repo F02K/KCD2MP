@@ -159,6 +159,14 @@ namespace kcd2mp
 		{
 			protocol::ClientWorldItemUpdate message;
 		};
+		struct npc_discovery_command
+		{
+			protocol::ClientNpcDiscovery message;
+		};
+		struct npc_update_command
+		{
+			protocol::ClientNpcUpdate message;
+		};
 		struct sleep_command
 		{
 			bool sleeping{};
@@ -188,6 +196,8 @@ namespace kcd2mp
 		    avatar_command,
 		    world_object_command,
 		    world_item_command,
+		    npc_discovery_command,
+		    npc_update_command,
 		    sleep_command,
 		    death_command,
 		    respawn_command,
@@ -226,6 +236,9 @@ namespace kcd2mp
 		    std::vector<protocol::WorldObjectState> updates);
 		void queue_world_item_updates(
 		    std::vector<protocol::WorldItemState> updates);
+		void queue_npc_observations(
+		    std::vector<protocol::NpcObservation> observations,
+		    std::chrono::steady_clock::time_point now);
 		void handle_game_envelope(
 		    const protocol::Envelope &envelope,
 		    std::chrono::steady_clock::time_point now);
@@ -277,6 +290,10 @@ namespace kcd2mp
 		    m_pending_world_items;
 		std::unordered_map<std::string, protocol::WorldItemState>
 		    m_deferred_world_items;
+		std::unordered_map<std::uint64_t, protocol::NpcState> m_npcs;
+		std::unordered_map<std::uint64_t, std::uint64_t> m_npc_by_guid;
+		bool m_human_npcs_disabled{};
+		bool m_animal_npcs_disabled{};
 		std::uint32_t m_profile_snapshot_interval_seconds{15};
 		std::uint64_t m_environment_revision{};
 		std::uint64_t m_weather_revision{};
@@ -291,5 +308,7 @@ namespace kcd2mp
 		std::chrono::steady_clock::time_point m_last_profile_sent{};
 		std::chrono::steady_clock::time_point m_last_avatar_sent{};
 		std::chrono::steady_clock::time_point m_last_avatar_sampled{};
+		std::chrono::steady_clock::time_point m_last_npc_sampled{};
+		std::chrono::steady_clock::time_point m_last_npc_discovery_sent{};
 	};
 }

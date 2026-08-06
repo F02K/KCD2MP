@@ -261,13 +261,11 @@ class BuildApp(App[None]):
     def _start_build(self, deploy: bool) -> None:
         if self._busy:
             return
-        game_root: Optional[Path] = None
-        if deploy:
-            try:
-                game_root = self._input_game_root()
-            except BuildToolError as exc:
-                self._report_error(str(exc))
-                return
+        try:
+            game_root = self._input_game_root()
+        except BuildToolError as exc:
+            self._report_error(str(exc))
+            return
 
         profile = self._selected_profile()
         log = self.query_one("#log", RichLog)
@@ -369,11 +367,11 @@ class BuildApp(App[None]):
             self.call_from_thread(self._write_log, message)
 
         try:
-            result = self.service.build(profile, write_log)
+            result = self.service.build(
+                profile, write_log, game_root=game_root
+            )
             if deploy:
                 assert game_root is not None
-                write_log("=== Auditing installed WHGame.dll before deployment ===")
-                self.service.audit(profile, game_root, write_log, result)
                 destination = deploy_artifacts(result, game_root)
                 write_log(
                     "Deployed d3d12, dinput8/KCSE, and the KCD2MP KCSE bridge to "

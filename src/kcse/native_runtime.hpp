@@ -75,6 +75,14 @@ namespace kcd2mp::kcse
 		poll_world_item_updates() override;
 		[[nodiscard]] bool apply_world_item_state(
 		    const protocol::WorldItemState &state) override;
+		[[nodiscard]] std::vector<protocol::NpcObservation>
+		poll_npc_observations() override;
+		[[nodiscard]] bool apply_npc_state(
+		    const protocol::NpcState &state,
+		    bool local_authority) override;
+		void remove_npc_state(
+		    std::uint64_t npc_id,
+		    std::uint32_t generation) override;
 		[[nodiscard]] bool apply_environment_state(
 		    const protocol::EnvironmentState &state,
 		    bool apply_weather) override;

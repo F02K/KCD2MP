@@ -299,6 +299,8 @@ message ClientWorldObjectUpdate {
 message WorldObjectAccepted {
   uint64 entity_guid = 1;
   uint64 revision = 2;
+  // Present when the atomic container transaction also changed the player.
+  PlayerProfile authoritative_profile = 3;
 }
 
 message WorldObjectRejected {
@@ -321,11 +323,18 @@ message WorldItemState {
 message ClientWorldItemUpdate {
   uint64 base_revision = 1;
   WorldItemState state = 2;
+  // Set when a newly created world instance was split from another stack.
+  string source_instance_id = 3;
+  // Zero means the complete source instance. Partial transfers must match the
+  // world item's count and keep a non-empty source stack.
+  uint32 transfer_count = 4;
 }
 
 message WorldItemAccepted {
   string instance_id = 1;
   uint64 revision = 2;
+  // Present when the atomic drop/pickup also changed the player.
+  PlayerProfile authoritative_profile = 3;
 }
 
 message WorldItemRejected {
@@ -558,6 +567,131 @@ message ServerEntityControl {
   optional bool animal_npcs_disabled = 3;
 }
 
+enum NpcKind {
+  NPC_KIND_UNSPECIFIED = 0;
+  NPC_KIND_HUMAN = 1;
+  NPC_KIND_ANIMAL = 2;
+}
+
+enum NpcBehaviorIntent {
+  NPC_BEHAVIOR_UNSPECIFIED = 0;
+  NPC_BEHAVIOR_IDLE = 1;
+  NPC_BEHAVIOR_TRAVEL = 2;
+  NPC_BEHAVIOR_INVESTIGATE = 3;
+  NPC_BEHAVIOR_COMBAT = 4;
+  NPC_BEHAVIOR_FLEE = 5;
+  NPC_BEHAVIOR_DIALOGUE = 6;
+  NPC_BEHAVIOR_DEAD = 7;
+}
+
+message NpcAggroEntry {
+  uint64 player_id = 1;
+  float value = 2;
+}
+
+message NpcCombatResult {
+  uint64 event_id = 1;
+  uint64 attacker_player_id = 2;
+  float health_damage = 3;
+  float stamina_damage = 4;
+  bool fatal = 5;
+}
+
+message NpcInventoryState {
+  uint64 revision = 1;
+  repeated InventoryItem items = 2;
+}
+
+// Dialogue replication deliberately carries stable session/phase state instead
+// of engine pointers. Peers can display and gate the same conversation without
+// serialising process-local dialogue objects.
+message NpcDialogState {
+  uint64 revision = 1;
+  uint64 session_id = 2;
+  int32 phase = 3;
+  bool active = 4;
+  uint64 speaking_player_id = 5;
+}
+
+message NpcGameplayState {
+  uint64 revision = 1;
+  float health = 2;
+  float max_health = 3;
+  bool dead = 4;
+  NpcBehaviorIntent behavior = 5;
+  uint64 combat_target_player_id = 6;
+  repeated NpcAggroEntry aggro = 7;
+  NpcInventoryState inventory = 8;
+  NpcDialogState dialog = 9;
+  NpcCombatResult last_combat_result = 10;
+  Vec3 behavior_target = 11;
+  float desired_speed = 12;
+}
+
+// A game-thread observation of an authored NPC already loaded by KCD2. The
+// authored GUID is the stable identity shared by the level catalog and every
+// client; runtime entity ids are deliberately never sent over the network.
+message NpcObservation {
+  uint64 authored_guid = 1;
+  NpcKind kind = 2;
+  TransformState transform = 3;
+  NpcGameplayState gameplay = 4;
+  // Runtime-spawned actors do not have a cross-machine authored GUID. The
+  // creator's GUID is only a discovery token; the server assigns npc_id.
+  bool dynamic = 5;
+  string entity_class = 6;
+  string entity_name = 7;
+  uint64 known_npc_id = 8;
+}
+
+message ClientNpcDiscovery {
+  repeated NpcObservation observations = 1;
+}
+
+message NpcState {
+  uint64 npc_id = 1;
+  uint32 generation = 2;
+  uint64 authored_guid = 3;
+  NpcKind kind = 4;
+  TransformState transform = 5;
+  uint64 revision = 6;
+  uint64 authority_player_id = 7;
+  uint64 lease_id = 8;
+  NpcGameplayState gameplay = 9;
+  bool dynamic = 10;
+  string entity_class = 11;
+  string entity_name = 12;
+}
+
+message ClientNpcUpdate {
+  uint64 npc_id = 1;
+  uint32 generation = 2;
+  uint64 lease_id = 3;
+  TransformState transform = 4;
+  NpcGameplayState gameplay = 5;
+}
+
+message ServerNpcEnter {
+  NpcState state = 1;
+}
+
+message ServerNpcLeave {
+  uint64 npc_id = 1;
+  uint32 generation = 2;
+}
+
+message ServerNpcAuthority {
+  uint64 npc_id = 1;
+  uint32 generation = 2;
+  uint64 authority_player_id = 3;
+  uint64 lease_id = 4;
+}
+
+message ServerNpcSnapshot {
+  uint64 server_tick = 1;
+  repeated NpcState npcs = 2;
+}
+
 message ClientAvatarUpdate {
   uint64 base_revision = 1;
   AvatarDescriptor avatar = 2;
@@ -625,5 +759,11 @@ message Envelope {
     ActivityDenied activity_denied = 44;
     PlayerActivityUpdated player_activity_updated = 45;
     ServerHomeMarkerUpdated server_home_marker_updated = 46;
+    ClientNpcDiscovery client_npc_discovery = 47;
+    ClientNpcUpdate client_npc_update = 48;
+    ServerNpcEnter server_npc_enter = 49;
+    ServerNpcLeave server_npc_leave = 50;
+    ServerNpcAuthority server_npc_authority = 51;
+    ServerNpcSnapshot server_npc_snapshot = 52;
   }
 }

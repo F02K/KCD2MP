@@ -1,0 +1,397 @@
+#!/usr/bin/env python3
+"""Generate deterministic dedicated-server metadata from a KCD2 installation."""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import os
+import pathlib
+import shutil
+import struct
+import subprocess
+import tempfile
+import xml.etree.ElementTree as ET
+import zipfile
+from dataclasses import dataclass
+from typing import Iterable, Optional, Sequence
+
+try:
+    from .generate_npc_catalog import DEFAULT_SOUL_ID, fingerprint, generate
+except ImportError:
+    from generate_npc_catalog import DEFAULT_SOUL_ID, fingerprint, generate
+
+
+GAME_BIN_RELATIVE = pathlib.Path("Bin") / "Win64MasterMasterSteamPGO"
+PRODUCTION_LEVELS = (
+    ("2", "trosecko"),
+    ("3", "kutnohorsko"),
+    ("4", "klaster"),
+)
+HUMAN_ENTITY_CLASSES = frozenset(("npc", "npc_female"))
+ANIMAL_ENTITY_CLASSES = frozenset(
+    (
+        "cattlecow",
+        "chickens",
+        "chickensbrownlight",
+        "chickenswhite",
+        "dog",
+        "hare",
+        "horse",
+        "pig",
+        "reddeerdoe",
+        "reddeerstag",
+        "roedeerbuck",
+        "roedeerhind",
+        "sheepewe",
+        "sheepram",
+        "wilddog",
+        "wolf",
+    )
+)
+
+
+class GameDataError(RuntimeError):
+    """An actionable server-game-data generation failure."""
+
+
+@dataclass(frozen=True)
+class PeIdentity:
+    timestamp: int
+    image_size: int
+
+
+def _sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _pe_identity(path: pathlib.Path) -> PeIdentity:
+    try:
+        with path.open("rb") as stream:
+            if stream.read(2) != b"MZ":
+                raise GameDataError(f"{path} is not a PE image")
+            stream.seek(0x3C)
+            pe_offset_raw = stream.read(4)
+            if len(pe_offset_raw) != 4:
+                raise GameDataError(f"{path} has a truncated DOS header")
+            pe_offset = struct.unpack("<I", pe_offset_raw)[0]
+            stream.seek(pe_offset)
+            if stream.read(4) != b"PE\0\0":
+                raise GameDataError(f"{path} has no PE signature")
+            file_header = stream.read(20)
+            if len(file_header) != 20:
+                raise GameDataError(f"{path} has a truncated PE file header")
+            timestamp = struct.unpack_from("<I", file_header, 4)[0]
+            optional_size = struct.unpack_from("<H", file_header, 16)[0]
+            optional_header = stream.read(optional_size)
+            if len(optional_header) != optional_size or optional_size < 60:
+                raise GameDataError(f"{path} has a truncated PE optional header")
+            magic = struct.unpack_from("<H", optional_header)[0]
+            if magic not in (0x10B, 0x20B):
+                raise GameDataError(f"{path} has an unsupported PE optional header")
+            image_size = struct.unpack_from("<I", optional_header, 56)[0]
+            if timestamp == 0 or image_size == 0:
+                raise GameDataError(f"{path} has an empty build identity")
+            return PeIdentity(timestamp, image_size)
+    except OSError as exc:
+        raise GameDataError(f"could not read {path}: {exc}") from exc
+
+
+def _numbers(value: str, expected: int) -> Optional[list[float]]:
+    try:
+        result = [float(component) for component in value.split(",")]
+    except ValueError:
+        return None
+    if len(result) != expected or not all(math.isfinite(component) for component in result):
+        return None
+    return result
+
+
+def _valid_entity_guid(value: str) -> bool:
+    parts = value.split("-")
+    if tuple(map(len, parts)) != (8, 4, 4):
+        return False
+    try:
+        return int("".join(parts), 16) != 0
+    except ValueError:
+        return False
+
+
+def _level_xml_entries(archive: zipfile.ZipFile) -> Iterable[zipfile.ZipInfo]:
+    for info in sorted(archive.infolist(), key=lambda entry: entry.filename.lower()):
+        lowered = info.filename.lower()
+        if lowered == "objects_mission0.xml" or (
+            lowered.startswith("layers/") and lowered.endswith(".xml")
+        ):
+            yield info
+
+
+def _read_level_entry(archive: zipfile.ZipFile, info: zipfile.ZipInfo) -> bytes:
+    try:
+        return archive.read(info)
+    except zipfile.BadZipFile as first_error:
+        # Shipping level.pak files use backslashes in some local headers while
+        # their central directory exposes normalized forward slashes. Python's
+        # zipfile rejects that harmless mismatch unless we compare against the
+        # spelling actually stored in the local header.
+        original = info.orig_filename
+        info.orig_filename = original.replace("/", "\\")
+        try:
+            return archive.read(info)
+        except zipfile.BadZipFile:
+            raise first_error
+        finally:
+            info.orig_filename = original
+
+
+def _catalog_level(level_id: str, level_name: str, pak: pathlib.Path) -> dict:
+    by_guid: dict[str, dict] = {}
+    spawners: dict[str, dict] = {}
+    relevant_xml = hashlib.sha256()
+    try:
+        with zipfile.ZipFile(pak) as archive:
+            for info in _level_xml_entries(archive):
+                name = info.filename
+                try:
+                    payload = _read_level_entry(archive, info)
+                    root = ET.fromstring(payload)
+                except (KeyError, ET.ParseError) as exc:
+                    raise GameDataError(f"could not parse {name} in {pak}: {exc}") from exc
+                relevant_xml.update(name.lower().encode("utf-8"))
+                relevant_xml.update(b"\0")
+                relevant_xml.update(payload)
+                for node in root.findall(".//Entity"):
+                    entity_class = node.attrib.get("EntityClass", "")
+                    lowered_class = entity_class.lower()
+                    if lowered_class in HUMAN_ENTITY_CLASSES:
+                        kind = "human"
+                    elif lowered_class in ANIMAL_ENTITY_CLASSES:
+                        kind = "animal"
+                    elif lowered_class == "animalspawner":
+                        kind = "animal_spawner"
+                    else:
+                        continue
+                    guid = node.attrib.get("EntityGuid", "").lower()
+                    if not _valid_entity_guid(guid):
+                        continue
+                    entry = {
+                        "canonical_id": f"{level_id}:{guid}",
+                        "entity_guid": guid,
+                        "entity_class": entity_class,
+                        "name": node.attrib.get("Name", ""),
+                        "editor_layer": node.attrib.get("EditorLayer", ""),
+                    }
+                    position = _numbers(node.attrib.get("Pos", ""), 3)
+                    rotation = _numbers(node.attrib.get("Rotate", ""), 4)
+                    if position is not None:
+                        entry["position"] = position
+                    if rotation is not None:
+                        entry["rotation"] = rotation
+                    if kind == "animal_spawner":
+                        properties = node.find("Properties")
+                        if properties is not None and properties.attrib:
+                            entry["properties"] = dict(sorted(properties.attrib.items()))
+                        spawners.setdefault(guid, entry)
+                    else:
+                        entry["kind"] = kind
+                        previous = by_guid.get(guid)
+                        if previous is not None and (
+                            previous["kind"] != kind
+                            or previous["entity_class"].lower() != lowered_class
+                        ):
+                            raise GameDataError(
+                                f"level {level_name} reuses NPC GUID {guid} with incompatible classes"
+                            )
+                        by_guid.setdefault(guid, entry)
+    except (OSError, zipfile.BadZipFile) as exc:
+        raise GameDataError(f"could not scan level archive {pak}: {exc}") from exc
+
+    npcs = sorted(by_guid.values(), key=lambda item: item["canonical_id"])
+    authored_spawners = sorted(
+        spawners.values(), key=lambda item: item["canonical_id"]
+    )
+    return {
+        "level_id": level_id,
+        "level_name": level_name,
+        "source": f"Data/Levels/{level_name}/level.pak",
+        "relevant_xml_sha256": relevant_xml.hexdigest(),
+        "human_count": sum(item["kind"] == "human" for item in npcs),
+        "animal_count": sum(item["kind"] == "animal" for item in npcs),
+        "animal_spawner_count": len(authored_spawners),
+        "npcs": npcs,
+        "animal_spawners": authored_spawners,
+    }
+
+
+def _mod_paks(game_root: pathlib.Path) -> tuple[pathlib.Path, ...]:
+    mods = next(
+        (candidate for candidate in (game_root / "mods", game_root / "Mods") if candidate.is_dir()),
+        None,
+    )
+    if mods is None:
+        return ()
+    return tuple(
+        sorted(
+            (
+                path
+                for path in mods.rglob("*")
+                if path.is_file() and path.suffix.lower() == ".pak"
+            ),
+            key=lambda path: path.as_posix().lower(),
+        )
+    )
+
+
+def _source_record(game_root: pathlib.Path, path: pathlib.Path) -> dict:
+    try:
+        relative = path.relative_to(game_root).as_posix()
+        size = path.stat().st_size
+    except (OSError, ValueError) as exc:
+        raise GameDataError(f"could not inspect source file {path}: {exc}") from exc
+    return {"path": relative, "size": size, "sha256": _sha256(path)}
+
+
+def _write_json(path: pathlib.Path, value: object) -> None:
+    path.write_text(
+        json.dumps(value, indent=2, ensure_ascii=False, sort_keys=False) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _replace_directory(staging: pathlib.Path, output: pathlib.Path) -> None:
+    previous = output.with_name(output.name + ".previous")
+    if previous.exists():
+        shutil.rmtree(previous)
+    if output.exists():
+        os.replace(output, previous)
+    try:
+        os.replace(staging, output)
+    except Exception:
+        if previous.exists() and not output.exists():
+            os.replace(previous, output)
+        raise
+    if previous.exists():
+        shutil.rmtree(previous)
+
+
+def generate_server_game_data(
+    game_root: pathlib.Path,
+    output: pathlib.Path,
+    property_catalog_tool: Optional[pathlib.Path] = None,
+) -> pathlib.Path:
+    game_root = game_root.resolve()
+    output = output.resolve()
+    whgame = game_root / GAME_BIN_RELATIVE / "WHGame.dll"
+    tables = game_root / "Data" / "Tables.pak"
+    level_paks = tuple(
+        (level_id, level_name, game_root / "Data" / "Levels" / level_name / "level.pak")
+        for level_id, level_name in PRODUCTION_LEVELS
+    )
+    required = (whgame, tables, *(pak for _, _, pak in level_paks))
+    missing = [str(path) for path in required if not path.is_file()]
+    if missing:
+        raise GameDataError("game installation is missing required files:\n" + "\n".join(missing))
+
+    identity = _pe_identity(whgame)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    staging = pathlib.Path(
+        tempfile.mkdtemp(prefix=output.name + ".", dir=str(output.parent))
+    )
+    try:
+        shutil.copy2(whgame, staging / "WHGame.dll")
+
+        archetypes = generate(tables)
+        _write_json(
+            staging / "npc_archetypes.json",
+            {
+                "schema_version": 1,
+                "retail_build": "1308617_856",
+                "catalog_fingerprint": fingerprint(archetypes),
+                "default_soul_id": DEFAULT_SOUL_ID,
+                "archetypes": archetypes,
+            },
+        )
+
+        levels = [
+            _catalog_level(level_id, level_name, pak)
+            for level_id, level_name, pak in level_paks
+        ]
+        _write_json(
+            staging / "npc_world_catalog.json",
+            {
+                "schema_version": 1,
+                "identity": "level_id:authored_entity_guid",
+                "levels": levels,
+            },
+        )
+
+        if property_catalog_tool is not None:
+            property_catalog_tool = property_catalog_tool.resolve()
+            if not property_catalog_tool.is_file():
+                raise GameDataError(
+                    f"property catalog tool is missing: {property_catalog_tool}"
+                )
+            try:
+                subprocess.run(
+                    [str(property_catalog_tool), str(game_root), "--all", str(staging)],
+                    check=True,
+                )
+            except (OSError, subprocess.CalledProcessError) as exc:
+                raise GameDataError(f"property catalog generation failed: {exc}") from exc
+
+        source_paths = [whgame, tables, *(pak for _, _, pak in level_paks), *_mod_paks(game_root)]
+        sources = [_source_record(game_root, path) for path in source_paths]
+        fingerprint_input = json.dumps(
+            sources, separators=(",", ":"), sort_keys=True
+        ).encode("utf-8")
+        generated = []
+        for path in sorted(staging.iterdir(), key=lambda candidate: candidate.name.lower()):
+            if path.is_file() and path.name != "content_manifest.json":
+                generated.append(
+                    {"path": path.name, "size": path.stat().st_size, "sha256": _sha256(path)}
+                )
+        _write_json(
+            staging / "content_manifest.json",
+            {
+                "schema_version": 1,
+                "content_fingerprint": hashlib.sha256(fingerprint_input).hexdigest(),
+                "whgame": {
+                    "timestamp": identity.timestamp,
+                    "image_size": identity.image_size,
+                    "sha256": _sha256(whgame),
+                },
+                "sources": sources,
+                "generated_files": generated,
+            },
+        )
+        _replace_directory(staging, output)
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return output
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--game-root", type=pathlib.Path, required=True)
+    parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--property-catalog-tool", type=pathlib.Path)
+    options = parser.parse_args(argv)
+    try:
+        output = generate_server_game_data(
+            options.game_root, options.output, options.property_catalog_tool
+        )
+    except GameDataError as exc:
+        parser.error(str(exc))
+    print(output)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1677,6 +1677,34 @@ namespace kcd2mp::kcse
 		return result;
 	}
 
+	std::vector<protocol::NpcObservation>
+	native_runtime::poll_npc_observations()
+	{
+		return m_entities.poll_npc_observations();
+	}
+
+	bool native_runtime::apply_npc_state(
+	    const protocol::NpcState &state,
+	    bool local_authority)
+	{
+		std::string error;
+		const bool result = m_entities.apply_npc_state(
+		    state, local_authority, error);
+		if (!result)
+		{
+			std::scoped_lock lock(m_cache_mutex);
+			m_diagnostic = std::move(error);
+		}
+		return result;
+	}
+
+	void native_runtime::remove_npc_state(
+	    std::uint64_t npc_id,
+	    std::uint32_t generation)
+	{
+		m_entities.remove_npc_state(npc_id, generation);
+	}
+
 	bool native_runtime::apply_environment_state(
 	    const protocol::EnvironmentState &state,
 	    bool apply_weather)
@@ -2238,7 +2266,8 @@ namespace kcd2mp::kcse
 			    | runtime_capability_profile_capture
 			    | runtime_capability_profile_apply
 			    | runtime_capability_profile_qam
-			    | runtime_capability_remote_avatar;
+			    | runtime_capability_remote_avatar
+			    | runtime_capability_npc_sync;
 		}
 		if (player_module)
 			capabilities |= runtime_capability_transition_gate;

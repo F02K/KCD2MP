@@ -34,13 +34,20 @@ See [CHANGELOG.md](CHANGELOG.md) for version history.
 - Supported containers: regular chests, cart chests, stash corpses, bird nests,
   and destructible stashes
 - Server-authoritative dropped items, pickup ownership, and restart persistence
+- Central item ledger with atomic player/container/world moves and validated
+  stack split/merge accounting
 - Shared time-of-day, time scale, and weather
 - Independent human- and animal-NPC isolation controls
+- Human/animal NPC transform and gameplay sync with spatial interest, a single
+  renewable simulation lease, health/combat/Aggro, inventory, behavior intent,
+  dialogue phase state, and canonical runtime-spawn identities
 - Signature and Address Library validation before native hooks are enabled
 
-NPC world synchronization, quests, dialogue state, combat AI, and complete
-cooperative world progression are **not implemented yet**. Native NPCs can be
-isolated, but they are not currently replicated as shared server entities.
+Shared quests, exact dialogue-branch playback, schedules, crime/reputation,
+and complete cooperative world progression are **not implemented yet**. NPC
+dialogue synchronization currently covers active session/phase state; behavior
+sync uses high-level intent and optional locomotion targets rather than copying
+engine-private behavior-tree pointers.
 
 The detailed implementation status and current limits are documented in
 [docs/multiplayer.md](docs/multiplayer.md).
@@ -104,6 +111,12 @@ server/   dedicated server, configuration, data, symbols, and audit tool
 tests/    test executables and their symbols only
 SHA256SUMS.txt
 ```
+
+When a local KCD2 installation is selected, the server package additionally
+contains `game_data/WHGame.dll`, a hashed content manifest, generated human
+Soul and authored human/animal NPC catalogs, and property catalogs for all
+production levels. The DLL is audited before it is copied and is not included
+in the client ZIP.
 
 The client ZIP starts with `KingdomComeDeliverance2/` and mirrors the same
 relative paths used by `Build & Deploy`. It can therefore be extracted directly

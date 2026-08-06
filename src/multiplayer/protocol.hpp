@@ -36,6 +36,7 @@ namespace kcd2mp
 	constexpr std::size_t max_world_objects = 4096;
 	constexpr std::size_t max_world_object_inventory_items = 512;
 	constexpr std::size_t max_world_items = 4096;
+	constexpr std::size_t max_npcs_per_message = 256;
 	constexpr std::size_t max_profile_quick_access_slots = 36;
 	constexpr std::int64_t max_profile_money = 2'000'000'000;
 	constexpr std::uint32_t money_subunits_per_groschen = 10;
@@ -130,6 +131,11 @@ namespace kcd2mp
 	[[nodiscard]] bool is_valid_world_item_state(
 	    const protocol::WorldItemState &state,
 	    bool require_revision = true);
+	[[nodiscard]] bool is_valid_npc_kind(protocol::NpcKind kind);
+	[[nodiscard]] bool is_valid_npc_observation(
+	    const protocol::NpcObservation &observation);
+	[[nodiscard]] bool is_valid_npc_state(
+	    const protocol::NpcState &state);
 	[[nodiscard]] bool is_valid_avatar_descriptor(
 	    const protocol::AvatarDescriptor &avatar);
 	[[nodiscard]] bool is_valid_avatar_policy(

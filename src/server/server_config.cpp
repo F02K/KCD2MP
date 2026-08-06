@@ -170,6 +170,9 @@ namespace kcd2mp::server
 		config.starter_profile_path =
 		    (*server)["starter_profile"].value_or(
 		        config.starter_profile_path.string());
+		config.npc_world_catalog_path =
+		    std::filesystem::absolute(path).parent_path()
+		    / "game_data" / "npc_world_catalog.json";
 		if (const auto *property = document["property"].as_table())
 		{
 			config.property_game_root =

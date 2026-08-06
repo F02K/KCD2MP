@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Sequence
 
 from build_tui.core import (
     BUILD_PROFILES,
+    SERVER_GAME_DATA_DIRECTORY,
     BuildResult,
     BuildToolError,
     discover_address_libraries,
@@ -60,13 +62,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     profile = BUILD_PROFILES[
         "debug" if options.config.lower() == "debug" else "release"
     ]
+    server_path = _artifact(build_dir, options.config, "KCD2MPServer.exe")
+    server_game_data_dir = server_path.parent / SERVER_GAME_DATA_DIRECTORY
     result = BuildResult(
         profile=profile,
         build_dir=build_dir,
         dll_path=_artifact(build_dir, options.config, "d3d12_.dll"),
         pdb_path=_artifact(build_dir, options.config, "d3d12_.pdb"),
         audit_path=_artifact(build_dir, options.config, "KCD2MPSignatureAudit.exe"),
-        server_path=_artifact(build_dir, options.config, "KCD2MPServer.exe"),
+        server_path=server_path,
         kcse_loader_path=_artifact(build_dir, options.config, "dinput8.dll"),
         kcse_loader_pdb_path=_artifact(build_dir, options.config, "dinput8.pdb"),
         kcse_client_path=_artifact(
@@ -76,7 +80,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             build_dir, options.config, "KCD2MPKCSEClient.pdb"
         ),
         address_library_paths=_address_libraries(build_dir, options.config),
+        server_game_data_dir=server_game_data_dir,
     )
+    if not server_game_data_dir.is_dir():
+        result = replace(result, server_game_data_dir=None)
     package = package_artifacts(
         result,
         project_root,

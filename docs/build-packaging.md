@@ -43,6 +43,14 @@ out/package/release/
 |   |-- server.toml.example
 |   |-- starter_profile.toml
 |   |-- npc_archetypes.json
+|   |-- game_data/
+|   |   |-- WHGame.dll
+|   |   |-- content_manifest.json
+|   |   |-- npc_archetypes.json
+|   |   |-- npc_world_catalog.json
+|   |   |-- property_catalog_2.pb
+|   |   |-- property_catalog_3.pb
+|   |   `-- property_catalog_4.pb
 |   `-- tools/
 |       |-- KCD2MPSignatureAudit.exe
 |       `-- KCD2MPSignatureAudit.pdb
@@ -51,6 +59,18 @@ out/package/release/
 |   `-- KCD2MP*Tests.pdb
 `-- SHA256SUMS.txt
 ```
+
+When the build tool has a selected KCD2 installation, it audits that exact
+`WHGame.dll` before creating `server/game_data`. The generated content manifest
+hashes the DLL, `Tables.pak`, every production `level.pak`, and installed mod
+PAKs. The NPC world catalog gives authored humans and animals a stable
+`level_id:entity_guid` identity and records animal-spawner metadata. Property
+catalogs are generated for all three production levels.
+
+The DLL copy is deliberately server-only and is never added to the client ZIP.
+It comes from the builder's local installation, so locally produced packages
+containing it must not be redistributed unless the game publisher's terms
+permit that. CI builds without a game installation omit `game_data`.
 
 The loose client tree and ZIP are built from the same deployment mapping used
 by the build tool. Changing a deploy destination therefore changes package

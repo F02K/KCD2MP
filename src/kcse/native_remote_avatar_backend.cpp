@@ -734,7 +734,7 @@ namespace kcd2mp::kcse
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.register-player-entity.begin",
 		    std::format("entity_id={}", id));
-		m_entities.register_player_entity(id);
+		m_entities.register_player_entity(id, player.id);
 		KCD2MP_JOIN_TRACE(
 		    "join.remote-spawn.register-player-entity.returned",
 		    std::format("entity_id={}", id));

@@ -83,6 +83,64 @@ namespace kcd2mp
 			    && (allow_equipped_slot || !item.has_equipped_slot());
 		}
 
+		bool valid_npc_gameplay(const protocol::NpcGameplayState &state)
+		{
+			if (state.revision() == 0 || !std::isfinite(state.health())
+			    || !std::isfinite(state.max_health()) || state.health() < 0.0F
+			    || state.max_health() <= 0.0F
+			    || state.health() > state.max_health() + 0.01F
+			    || state.max_health() > 1'000'000.0F
+			    || !std::isfinite(state.desired_speed())
+			    || state.desired_speed() < 0.0F
+			    || state.desired_speed() > 40.0F
+			    || (state.has_behavior_target()
+			        && (!finite(state.behavior_target().x())
+			            || !finite(state.behavior_target().y())
+			            || !finite(state.behavior_target().z())))
+			    || state.behavior() == protocol::NPC_BEHAVIOR_UNSPECIFIED
+			    || state.behavior() > protocol::NPC_BEHAVIOR_DEAD
+			    || state.aggro_size() > static_cast<int>(max_players))
+				return false;
+			std::unordered_set<std::uint64_t> aggro_players;
+			for (const auto &entry : state.aggro())
+				if (entry.player_id() == 0 || !std::isfinite(entry.value())
+				    || entry.value() < 0.0F || entry.value() > 1'000'000.0F
+				    || !aggro_players.insert(entry.player_id()).second)
+					return false;
+			if (state.has_inventory())
+			{
+				if (state.inventory().revision() == 0
+				    || state.inventory().items_size()
+				        > static_cast<int>(max_profile_inventory_items))
+					return false;
+				std::unordered_set<std::string> instances;
+				for (const auto &item : state.inventory().items())
+					if (!valid_inventory_item(item, false)
+					    || !instances.insert(item.instance_id()).second)
+						return false;
+			}
+			if (state.has_dialog())
+			{
+				const auto &dialog = state.dialog();
+				if (dialog.revision() == 0
+				    || (dialog.active() && dialog.session_id() == 0))
+					return false;
+			}
+			if (state.has_last_combat_result())
+			{
+				const auto &result = state.last_combat_result();
+				if (result.event_id() == 0
+				    || !std::isfinite(result.health_damage())
+				    || !std::isfinite(result.stamina_damage())
+				    || result.health_damage() < 0.0F
+				    || result.stamina_damage() < 0.0F
+				    || result.health_damage() > 100'000.0F
+				    || result.stamina_damage() > 100'000.0F)
+					return false;
+			}
+			return true;
+		}
+
 		bool valid_home_marker(const protocol::PropertyHomeMarker &marker)
 		{
 			return valid_identifier(marker.property_id())
@@ -100,6 +158,63 @@ namespace kcd2mp
 
 		bool valid_envelope(const protocol::Envelope &envelope)
 		{
+			if (envelope.has_client_npc_discovery())
+			{
+				const auto &message = envelope.client_npc_discovery();
+				if (message.observations_size() == 0
+				    || message.observations_size()
+				        > static_cast<int>(max_npcs_per_message))
+					return false;
+				std::unordered_set<std::uint64_t> guids;
+				for (const auto &observation : message.observations())
+				{
+					if (!is_valid_npc_observation(observation)
+					    || !guids.insert(observation.authored_guid()).second)
+						return false;
+				}
+				return true;
+			}
+			if (envelope.has_client_npc_update())
+			{
+				const auto &message = envelope.client_npc_update();
+				return message.npc_id() != 0 && message.generation() != 0
+				    && message.lease_id() != 0 && message.has_transform()
+				    && is_finite_transform(message.transform())
+				    && (!message.has_gameplay()
+				        || valid_npc_gameplay(message.gameplay()));
+			}
+			if (envelope.has_server_npc_enter())
+				return envelope.server_npc_enter().has_state()
+				    && is_valid_npc_state(envelope.server_npc_enter().state());
+			if (envelope.has_server_npc_leave())
+			{
+				const auto &message = envelope.server_npc_leave();
+				return message.npc_id() != 0 && message.generation() != 0;
+			}
+			if (envelope.has_server_npc_authority())
+			{
+				const auto &message = envelope.server_npc_authority();
+				return message.npc_id() != 0 && message.generation() != 0
+				    && ((message.authority_player_id() == 0
+				            && message.lease_id() == 0)
+				        || (message.authority_player_id() != 0
+				            && message.lease_id() != 0));
+			}
+			if (envelope.has_server_npc_snapshot())
+			{
+				const auto &message = envelope.server_npc_snapshot();
+				if (message.server_tick() == 0
+				    || message.npcs_size() > static_cast<int>(max_npcs_per_message))
+					return false;
+				std::unordered_set<std::uint64_t> ids;
+				for (const auto &state : message.npcs())
+				{
+					if (!is_valid_npc_state(state)
+					    || !ids.insert(state.npc_id()).second)
+						return false;
+				}
+				return true;
+			}
 			if (envelope.has_client_hello())
 			{
 				const auto &message = envelope.client_hello();
@@ -229,8 +344,10 @@ namespace kcd2mp
 			}
 			if (envelope.has_world_object_accepted())
 			{
-				return envelope.world_object_accepted().entity_guid() != 0
-				    && envelope.world_object_accepted().revision() > 0;
+				const auto &message = envelope.world_object_accepted();
+				return message.entity_guid() != 0 && message.revision() > 0
+				    && (!message.has_authoritative_profile()
+				        || is_valid_profile(message.authoritative_profile()));
 			}
 			if (envelope.has_world_object_rejected())
 			{
@@ -252,12 +369,17 @@ namespace kcd2mp
 				const auto &message = envelope.client_world_item_update();
 				return message.has_state()
 				    && is_valid_world_item_state(message.state(), false)
-				    && message.state().revision() == message.base_revision();
+				    && message.state().revision() == message.base_revision()
+				    && (message.source_instance_id().empty()
+				        || is_uuid(message.source_instance_id()))
+				    && message.transfer_count() <= max_profile_item_count;
 			}
 			if (envelope.has_world_item_accepted())
 			{
-				return is_uuid(envelope.world_item_accepted().instance_id())
-				    && envelope.world_item_accepted().revision() > 0;
+				const auto &message = envelope.world_item_accepted();
+				return is_uuid(message.instance_id()) && message.revision() > 0
+				    && (!message.has_authoritative_profile()
+				        || is_valid_profile(message.authoritative_profile()));
 			}
 			if (envelope.has_world_item_rejected())
 			{
@@ -488,6 +610,42 @@ namespace kcd2mp
 			return std::nullopt;
 		}
 		return result;
+	}
+
+	bool is_valid_npc_kind(protocol::NpcKind kind)
+	{
+		return kind == protocol::NPC_KIND_HUMAN
+		    || kind == protocol::NPC_KIND_ANIMAL;
+	}
+
+	bool is_valid_npc_observation(
+	    const protocol::NpcObservation &observation)
+	{
+		return observation.authored_guid() != 0
+		    && is_valid_npc_kind(observation.kind())
+		    && observation.has_transform()
+		    && is_finite_transform(observation.transform())
+		    && (!observation.has_gameplay()
+		        || valid_npc_gameplay(observation.gameplay()))
+		    && (!observation.dynamic()
+		        || (valid_utf8_with_codepoint_count(
+		                observation.entity_class(), 1, 64)
+		            && valid_utf8_with_codepoint_count(
+		                observation.entity_name(), 1, 128)));
+	}
+
+	bool is_valid_npc_state(const protocol::NpcState &state)
+	{
+		return state.npc_id() != 0 && state.generation() != 0
+		    && state.authored_guid() != 0 && is_valid_npc_kind(state.kind())
+		    && state.has_transform() && is_finite_transform(state.transform())
+		    && state.revision() != 0
+		    && (!state.has_gameplay() || valid_npc_gameplay(state.gameplay()))
+		    && (!state.dynamic()
+		        || (valid_utf8_with_codepoint_count(state.entity_class(), 1, 64)
+		            && valid_utf8_with_codepoint_count(state.entity_name(), 1, 128)))
+		    && ((state.authority_player_id() == 0 && state.lease_id() == 0)
+		        || (state.authority_player_id() != 0 && state.lease_id() != 0));
 	}
 
 	std::optional<protocol::Envelope> decode(

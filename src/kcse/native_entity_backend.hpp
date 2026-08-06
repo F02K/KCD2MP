@@ -70,7 +70,9 @@ namespace kcd2mp::kcse
 		    bool humans_disabled,
 		    bool animals_disabled,
 		    std::string &error);
-		void register_player_entity(std::uint32_t entity_id);
+		void register_player_entity(
+		    std::uint32_t entity_id,
+		    std::uint64_t player_id = 0);
 		void unregister_player_entity(std::uint32_t entity_id);
 		[[nodiscard]] human_npc_spawn_scope authorize_human_npc_spawn(
 		    std::string entity_name);
@@ -87,6 +89,13 @@ namespace kcd2mp::kcse
 		[[nodiscard]] bool apply_world_item_state(
 		    const protocol::WorldItemState &state,
 		    std::string &error);
+		[[nodiscard]] std::vector<protocol::NpcObservation>
+		poll_npc_observations();
+		[[nodiscard]] bool apply_npc_state(
+		    const protocol::NpcState &state,
+		    bool local_authority,
+		    std::string &error);
+		void remove_npc_state(std::uint64_t npc_id, std::uint32_t generation);
 		void reset_world_sync();
 
 	private:
@@ -127,6 +136,19 @@ namespace kcd2mp::kcse
 		struct entity_state
 		{
 			bool hidden{};
+			bool active{};
+		};
+		struct managed_npc
+		{
+			std::uint64_t authored_guid{};
+			std::uint32_t entity_id{};
+			std::uint32_t generation{};
+			std::uint64_t gameplay_revision{};
+			std::uint64_t inventory_revision{};
+			std::uint64_t dialog_revision{};
+			entity_state original;
+			bool in_interest{};
+			bool local_authority{};
 		};
 		struct human_npc_spawn_authorization
 		{
@@ -145,8 +167,11 @@ namespace kcd2mp::kcse
 		void refresh_local_player_exclusion(Offsets::IEntitySystem &system);
 		void refresh_actor_roster(Offsets::IEntitySystem &system);
 		void maintain_isolated_entities(Offsets::IEntitySystem &system);
+		void maintain_managed_npcs(Offsets::IEntitySystem &system);
 		[[nodiscard]] bool isolate_npc_entity(Offsets::IEntity *entity);
 		[[nodiscard]] bool should_isolate_npc_actor(
+		    Offsets::IEntity *entity);
+		[[nodiscard]] std::optional<protocol::NpcKind> classify_npc_actor(
 		    Offsets::IEntity *entity);
 		void entity_removed(Offsets::IEntity *entity);
 		void entity_event(Offsets::IEntity *entity, void *event);
@@ -161,7 +186,9 @@ namespace kcd2mp::kcse
 		Offsets::IEntitySystem *m_sink_system{};
 		void *m_game_object_system{};
 		std::unordered_map<std::uint32_t, entity_state> m_isolated;
+		std::unordered_map<std::uint64_t, managed_npc> m_managed_npcs;
 		std::unordered_set<std::uint32_t> m_player_entities;
+		std::unordered_map<std::uint64_t, std::uint32_t> m_player_entity_ids;
 		std::unordered_map<std::uint32_t, pending_entity> m_pending_control;
 		std::unordered_set<void *> m_human_npc_classes;
 		std::vector<human_npc_spawn_authorization>

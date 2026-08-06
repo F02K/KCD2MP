@@ -66,6 +66,7 @@ namespace kcd2mp::server
 	    m_generate_token(generate_token ? std::move(generate_token) : []
 	        { return random_hex(32); }),
 	    m_store(m_config),
+	    m_npcs(m_store.manifest().level_id, m_config.npc_world_catalog_path),
 	    m_human_npcs_disabled(m_config.disable_human_npcs),
 	    m_animal_npcs_disabled(m_config.disable_animal_npcs),
 	    m_environment_anchor_hours(m_config.initial_time_of_day_hours),
@@ -103,12 +104,45 @@ namespace kcd2mp::server
 			m_world_objects.emplace(object.entity_guid(), object);
 		for (const auto &item : m_store.world_items())
 			m_world_items.emplace(item.instance_id(), item);
+		std::string item_error;
 		for (const auto &stored : m_store.profiles())
 		{
 			for (const auto &item : stored.profile.inventory())
-				m_item_owners.emplace(item.instance_id(), stored.profile.player_id());
+			{
+				if (!m_items.register_item(
+				        item,
+				        item_location::player(stored.profile.player_id()),
+				        item_error))
+				{
+					throw std::runtime_error(
+					    "invalid persisted item ownership: " + item_error);
+				}
+			}
 		}
 		remove_owned_items_from_world();
+		for (const auto &[guid, object] : m_world_objects)
+		{
+			for (const auto &item : object.inventory())
+			{
+				if (!m_items.register_item(
+				        item, item_location::container(guid), item_error))
+				{
+					throw std::runtime_error(
+					    "invalid persisted container item: " + item_error);
+				}
+			}
+		}
+		for (const auto &[instance, item] : m_world_items)
+		{
+			(void)instance;
+			if (item.present()
+			    && !m_items.register_item(
+			        item.item(), item_location::world(), item_error))
+			{
+				throw std::runtime_error(
+				    "invalid persisted world item: " + item_error);
+			}
+		}
 	}
 
 	void server_core::on_transport_connected(
@@ -154,6 +188,8 @@ namespace kcd2mp::server
 		{
 			remove_sleep_vote(player->id);
 			player->connection.reset();
+			const auto positions = player_positions();
+			queue_npc_events(m_npcs.remove_player(player->id, positions, now));
 			player->reconnect_deadline =
 			    now + std::chrono::seconds(m_config.reconnect_grace_seconds);
 			return;
@@ -199,6 +235,15 @@ namespace kcd2mp::server
 				handle_world_item_update(
 				    *player,
 				    envelope.client_world_item_update());
+				break;
+			case protocol::Envelope::kClientNpcDiscovery:
+				handle_npc_discovery(
+				    *player,
+				    envelope.client_npc_discovery(),
+				    now);
+				break;
+			case protocol::Envelope::kClientNpcUpdate:
+				handle_npc_update(*player, envelope.client_npc_update(), now);
 				break;
 			case protocol::Envelope::kPing:
 				handle_ping(*player, envelope.ping(), now);
@@ -370,6 +415,9 @@ namespace kcd2mp::server
 			    : std::next(iterator);
 		}
 
+		const auto npc_positions = player_positions();
+		queue_npc_events(m_npcs.reconcile(npc_positions, now));
+
 		const auto snapshot_interval =
 		    std::chrono::duration<double>(1.0 / m_config.snapshot_rate);
 		if (m_last_snapshot == time_point{}
@@ -513,9 +561,22 @@ namespace kcd2mp::server
 		    dummy.id ^ 0x9e3779b97f4a7c15ULL;
 
 		const auto id = dummy.id;
+		auto staged_items = m_items;
+		std::string item_error;
+		for (const auto &item : dummy.profile.inventory())
+		{
+			if (!staged_items.register_item(
+			        item, item_location::player(id), item_error))
+			{
+				set_error("could not register dummy inventory: " + item_error);
+				return std::nullopt;
+			}
+		}
+
 		auto [iterator, inserted] =
 		    m_players.emplace(id, std::move(dummy));
 		(void)inserted;
+		m_items = std::move(staged_items);
 		protocol::Envelope joined;
 		*joined.mutable_player_joined()->mutable_player() =
 		    snapshot_of(iterator->second, true);
@@ -673,6 +734,10 @@ namespace kcd2mp::server
 		}
 		m_human_npcs_disabled = humans_disabled;
 		m_animal_npcs_disabled = animals_disabled;
+		if (humans_disabled)
+			queue_npc_events(m_npcs.disable_kind(protocol::NPC_KIND_HUMAN));
+		if (animals_disabled)
+			queue_npc_events(m_npcs.disable_kind(protocol::NPC_KIND_ANIMAL));
 		protocol::Envelope envelope;
 		auto *control = envelope.mutable_server_entity_control();
 		control->set_non_player_entities_disabled(
@@ -1164,6 +1229,22 @@ namespace kcd2mp::server
 			    m_config.default_avatar_archetype);
 			m_store.save_profile(profile->identity_hash, profile->profile);
 		}
+		{
+			auto staged_items = m_items;
+			const auto location =
+			    item_location::player(profile->profile.player_id());
+			staged_items.erase_location(location);
+			std::string item_error;
+			for (const auto &item : profile->profile.inventory())
+			{
+				if (!staged_items.register_item(item, location, item_error))
+				{
+					throw std::runtime_error(
+					    "profile item ownership conflict: " + item_error);
+				}
+			}
+			m_items = std::move(staged_items);
+		}
 		const auto id = profile->profile.player_id();
 		if (!m_players.contains(id)
 		    && reserved_slots() >= m_config.max_players)
@@ -1385,42 +1466,205 @@ namespace kcd2mp::server
 	    const protocol::ClientProfileUpdate &message,
 	    time_point now)
 	{
+		const auto reject_profile = [&](std::string_view reason)
+		{
+			protocol::Envelope rejected;
+			auto *response = rejected.mutable_profile_rejected();
+			response->set_authoritative_revision(player.profile.revision());
+			response->set_reason(reason);
+			*response->mutable_authoritative_profile() = player.profile;
+			queue(
+			    *player.connection,
+			    std::move(rejected),
+			    reliability::reliable);
+		};
 		if (!message.has_profile() || !is_valid_profile(message.profile())
 		    || message.base_revision() != player.profile.revision()
 		    || message.profile().player_id() != player.id
 		    || message.profile().persistent_id()
 		        != player.profile.persistent_id())
 		{
-			protocol::Envelope rejected;
-			auto *response = rejected.mutable_profile_rejected();
-			response->set_authoritative_revision(player.profile.revision());
-			response->set_reason("profile revision or schema conflict");
-			*response->mutable_authoritative_profile() = player.profile;
-			queue(
-			    *player.connection,
-			    std::move(rejected),
-			    reliability::reliable);
+			reject_profile("profile revision or schema conflict");
 			return;
 		}
+
 		auto accepted = message.profile();
+		auto staged_items = m_items;
+		const auto player_location = item_location::player(player.id);
+		std::unordered_map<std::string, const protocol::InventoryItem *>
+		    current_items;
+		for (const auto &item : player.profile.inventory())
+			current_items.emplace(item.instance_id(), &item);
+		std::unordered_map<std::string, const protocol::InventoryItem *>
+		    requested_items;
 		for (const auto &item : accepted.inventory())
+			requested_items.emplace(item.instance_id(), &item);
+
+		std::string item_error;
+		std::unordered_set<std::string> merged_away;
+		std::unordered_set<std::string> split_created;
+		for (const auto &target : accepted.inventory())
 		{
-			const auto owner = m_item_owners.find(item.instance_id());
-			if (owner != m_item_owners.end() && owner->second != player.id)
+			const auto current_target = current_items.find(target.instance_id());
+			if (current_target == current_items.end()
+			    || target.count() <= current_target->second->count())
 			{
-				protocol::Envelope rejected;
-				auto *response = rejected.mutable_profile_rejected();
-				response->set_authoritative_revision(player.profile.revision());
-				response->set_reason(
-				    "loot item is already owned by another player");
-				*response->mutable_authoritative_profile() = player.profile;
-				queue(
-				    *player.connection,
-				    std::move(rejected),
-				    reliability::reliable);
+				continue;
+			}
+			auto remaining = target.count() - current_target->second->count();
+			for (const auto &source : player.profile.inventory())
+			{
+				if (remaining == 0 || source.instance_id() == target.instance_id()
+				    || !item_ledger::same_stack(source, target, false))
+				{
+					continue;
+				}
+				const auto requested_source =
+				    requested_items.find(source.instance_id());
+				const auto requested_count = requested_source == requested_items.end()
+				    ? 0U
+				    : requested_source->second->count();
+				if (requested_count > source.count())
+					continue;
+				const auto available = source.count() - requested_count;
+				const auto moved = std::min(remaining, available);
+				if (moved == 0)
+					continue;
+				if (!staged_items.merge(
+				        source.instance_id(),
+				        player_location,
+				        target.instance_id(),
+				        player_location,
+				        moved,
+				        item_error))
+				{
+					reject_profile(item_error);
+					return;
+				}
+				remaining -= moved;
+				if (moved == source.count())
+					merged_away.insert(source.instance_id());
+			}
+			if (remaining != 0)
+			{
+				reject_profile(
+				    "item stack growth has no matching merge source");
 				return;
 			}
 		}
+
+		for (const auto &created : accepted.inventory())
+		{
+			if (current_items.contains(created.instance_id())
+			    || staged_items.find(created.instance_id()))
+			{
+				continue;
+			}
+			const protocol::InventoryItem *split_source = nullptr;
+			for (const auto &source : player.profile.inventory())
+			{
+				const auto requested_source =
+				    requested_items.find(source.instance_id());
+				if (requested_source == requested_items.end()
+				    || requested_source->second->count() >= source.count()
+				    || source.count() - requested_source->second->count()
+				        != created.count()
+				    || !item_ledger::same_stack(source, created, false))
+				{
+					continue;
+				}
+				if (split_source)
+				{
+					split_source = nullptr;
+					break;
+				}
+				split_source = &source;
+			}
+			if (!split_source)
+				continue;
+			if (!staged_items.split(
+			        split_source->instance_id(),
+			        player_location,
+			        created.instance_id(),
+			        created.count(),
+			        player_location,
+			        item_error))
+			{
+				reject_profile(item_error);
+				return;
+			}
+			split_created.insert(created.instance_id());
+		}
+
+		for (const auto &item : accepted.inventory())
+		{
+			const auto current = current_items.find(item.instance_id());
+			if (current != current_items.end())
+			{
+				const auto *staged = staged_items.find(item.instance_id());
+				if (item.count() > current->second->count()
+				    && (!staged || staged->item.count() != item.count()))
+				{
+					reject_profile(
+					    "item stack growth requires an authoritative transfer");
+					return;
+				}
+				if (!staged_items.replace_item(
+				        item, player_location, item_error))
+				{
+					reject_profile(item_error);
+					return;
+				}
+				continue;
+			}
+
+			const auto *source = staged_items.find(item.instance_id());
+			if (!source)
+			{
+				reject_profile(
+				    "item has no server-authoritative world or container source");
+				return;
+			}
+			if (source->location.kind == item_location_kind::player
+			    && !split_created.contains(item.instance_id()))
+			{
+				reject_profile("item is already owned by another player");
+				return;
+			}
+			if (!item_ledger::same_stack(source->item, item))
+			{
+				reject_profile(
+				    "item definition or stack values differ from its source");
+				return;
+			}
+			if ((source->location != player_location
+			        && !staged_items.move(
+			            item.instance_id(),
+			            source->location,
+			            player_location,
+			            item_error))
+			    || !staged_items.replace_item(item, player_location, item_error))
+			{
+				reject_profile(item_error);
+				return;
+			}
+		}
+		for (const auto &item : player.profile.inventory())
+		{
+			const auto still_present = std::ranges::find_if(
+			    accepted.inventory(),
+			    [&](const protocol::InventoryItem &candidate)
+			    { return candidate.instance_id() == item.instance_id(); });
+			if (still_present == accepted.inventory().end()
+			    && !merged_away.contains(item.instance_id())
+			    && !staged_items.erase(
+			        item.instance_id(), player_location, item_error))
+			{
+				reject_profile(item_error);
+				return;
+			}
+		}
+
 		accepted.set_player_id(player.id);
 		accepted.set_persistent_id(player.profile.persistent_id());
 		accepted.set_display_name(player.display_name);
@@ -1437,15 +1681,8 @@ namespace kcd2mp::server
 		{
 			*accepted.mutable_last_transform() = player.transform;
 		}
-		for (const auto &item : player.profile.inventory())
-		{
-			const auto owner = m_item_owners.find(item.instance_id());
-			if (owner != m_item_owners.end() && owner->second == player.id)
-				m_item_owners.erase(owner);
-		}
 		player.profile = std::move(accepted);
-		for (const auto &item : player.profile.inventory())
-			m_item_owners.insert_or_assign(item.instance_id(), player.id);
+		m_items = std::move(staged_items);
 		persist_player(player, now);
 		remove_owned_items_from_world();
 		protocol::Envelope response;
@@ -1526,41 +1763,220 @@ namespace kcd2mp::server
 		}
 
 		auto accepted = message.state();
-		bool contained_owned_item = false;
-		auto *inventory = accepted.mutable_inventory();
-		for (auto index = inventory->size(); index-- > 0;)
+		auto staged_items = m_items;
+		auto updated_profile = player.profile;
+		const auto container_location = item_location::container(guid);
+		const auto player_location = item_location::player(player.id);
+		bool profile_changed = false;
+		std::string item_error;
+
+		std::unordered_map<std::string, const protocol::InventoryItem *>
+		    previous_items;
+		if (found != m_world_objects.end())
 		{
-			const auto &instance = inventory->Get(index).instance_id();
-			const auto world_item = m_world_items.find(instance);
-			if (m_item_owners.contains(instance)
-			    || (world_item != m_world_items.end()
-			        && world_item->second.present()))
-			{
-				inventory->DeleteSubrange(index, 1);
-				contained_owned_item = true;
-			}
+			for (const auto &item : found->second.inventory())
+				previous_items.emplace(item.instance_id(), &item);
 		}
-		if (contained_owned_item)
+
+		const auto remove_from_profile = [&](std::string_view instance)
 		{
-			if (found != m_world_objects.end())
+			auto *inventory = updated_profile.mutable_inventory();
+			for (auto index = inventory->size(); index-- > 0;)
 			{
-				reject_state(found->second);
+				if (inventory->Get(index).instance_id() == instance)
+					inventory->DeleteSubrange(index, 1);
+			}
+			auto *quick = updated_profile.mutable_quick_access_slots();
+			for (auto index = quick->size(); index-- > 0;)
+			{
+				if (quick->Get(index).instance_id() == instance)
+					quick->DeleteSubrange(index, 1);
+			}
+		};
+		const auto unique_profile_stack = [&] (
+		    const protocol::InventoryItem &stack,
+		    std::string_view excluded,
+		    std::uint32_t minimum_count)
+		    -> protocol::InventoryItem *
+		{
+			protocol::InventoryItem *match = nullptr;
+			for (auto &candidate : *updated_profile.mutable_inventory())
+			{
+				if (candidate.instance_id() == excluded
+				    || candidate.count() < minimum_count
+				    || !item_ledger::same_stack(candidate, stack, false))
+				{
+					continue;
+				}
+				if (match)
+					return nullptr;
+				match = &candidate;
+			}
+			return match;
+		};
+
+		for (const auto &item : accepted.inventory())
+		{
+			if (const auto previous = previous_items.find(item.instance_id());
+			    previous != previous_items.end())
+			{
+				if (!item_ledger::same_stack(*previous->second, item, false)
+				    || item.count() < previous->second->count())
+				{
+					reject_state(
+					    found->second,
+					    "container item values cannot change without a transfer");
+					return;
+				}
+				if (item.count() > previous->second->count())
+				{
+					const auto added = item.count() - previous->second->count();
+					auto *source = unique_profile_stack(
+					    item, item.instance_id(), added);
+					if (!source
+					    || !staged_items.merge(
+					        source->instance_id(),
+					        player_location,
+					        item.instance_id(),
+					        container_location,
+					        added,
+					        item_error))
+					{
+						reject_state(
+						    found->second,
+						    item_error.empty()
+						        ? "container stack growth has no unique player source"
+						        : item_error);
+						return;
+					}
+					const auto source_id = source->instance_id();
+					if (source->count() == added)
+						remove_from_profile(source_id);
+					else
+						source->set_count(source->count() - added);
+					profile_changed = true;
+				}
+				continue;
+			}
+
+			const auto *source = staged_items.find(item.instance_id());
+			if (!source)
+			{
+				if (found != m_world_objects.end())
+				{
+					auto *split_source = unique_profile_stack(
+					    item, item.instance_id(), item.count() + 1);
+					if (!split_source
+					    || !staged_items.split(
+					        split_source->instance_id(),
+					        player_location,
+					        item.instance_id(),
+					        item.count(),
+					        container_location,
+					        item_error))
+					{
+						reject_state(
+						    found->second,
+						    item_error.empty()
+						        ? "new container stack has no unique split source"
+						        : item_error);
+						return;
+					}
+					split_source->set_count(
+					    split_source->count() - item.count());
+					profile_changed = true;
+					continue;
+				}
+				if (!staged_items.register_item(
+				        item, container_location, item_error))
+				{
+					reject_state(
+					    accepted, item_error);
+					return;
+				}
+				continue;
+			}
+			if (source->location != player_location
+			    || !item_ledger::same_stack(source->item, item))
+			{
+				reject_state(
+				    found == m_world_objects.end() ? accepted : found->second,
+				    "container deposit does not match a player-owned item");
 				return;
 			}
-			accepted.set_revision(1);
-			m_world_objects.insert_or_assign(guid, accepted);
-			persist_world_objects();
-			reject_state(accepted);
-			protocol::Envelope corrected;
-			*corrected.mutable_world_object_updated()->mutable_state() = accepted;
-			broadcast(
-			    std::move(corrected),
-			    reliability::reliable,
-			    player.connection);
-			return;
+			if (!staged_items.move(
+			        item.instance_id(),
+			        player_location,
+			        container_location,
+			        item_error)
+			    || !staged_items.replace_item(
+			        item, container_location, item_error))
+			{
+				reject_state(
+				    found == m_world_objects.end() ? accepted : found->second,
+				    item_error);
+				return;
+			}
+			remove_from_profile(item.instance_id());
+			profile_changed = true;
 		}
+
+		if (found != m_world_objects.end())
+		{
+			for (const auto &item : found->second.inventory())
+			{
+				const auto remains = std::ranges::find_if(
+				    accepted.inventory(),
+				    [&](const protocol::InventoryItem &candidate)
+				    { return candidate.instance_id() == item.instance_id(); });
+				if (remains != accepted.inventory().end())
+					continue;
+				const auto *container_entry =
+				    staged_items.find(item.instance_id());
+				const auto count = item.count();
+				auto *merge_target = unique_profile_stack(
+				    item, item.instance_id(), 1);
+				if (merge_target)
+				{
+					if (!staged_items.merge(
+					        item.instance_id(),
+					        container_location,
+					        merge_target->instance_id(),
+					        player_location,
+					        count,
+					        item_error))
+					{
+						reject_state(found->second, item_error);
+						return;
+					}
+					merge_target->set_count(merge_target->count() + count);
+				}
+				else if (!container_entry
+				    || !staged_items.move(
+				        item.instance_id(),
+				        container_location,
+				        player_location,
+				        item_error))
+				{
+					reject_state(found->second, item_error);
+					return;
+				}
+				else
+					*updated_profile.add_inventory() = item;
+				profile_changed = true;
+			}
+		}
+
 		accepted.set_revision(
 		    found == m_world_objects.end() ? 1 : found->second.revision() + 1);
+		if (profile_changed)
+		{
+			updated_profile.set_revision(player.profile.revision() + 1);
+			player.profile = std::move(updated_profile);
+			rebuild_avatar_equipment(player);
+			persist_player(player, m_current_time);
+		}
+		m_items = std::move(staged_items);
 		m_world_objects.insert_or_assign(guid, accepted);
 		persist_world_objects();
 
@@ -1568,6 +1984,8 @@ namespace kcd2mp::server
 		auto *ack = response.mutable_world_object_accepted();
 		ack->set_entity_guid(guid);
 		ack->set_revision(accepted.revision());
+		if (profile_changed)
+			*ack->mutable_authoritative_profile() = player.profile;
 		queue(*player.connection, std::move(response), reliability::reliable);
 
 		protocol::Envelope updated;
@@ -1582,12 +2000,14 @@ namespace kcd2mp::server
 	    player_session &player,
 	    const protocol::ClientWorldItemUpdate &message)
 	{
-		const auto reject_state = [&](const protocol::WorldItemState &state)
+		const auto reject_state = [&] (
+		    const protocol::WorldItemState &state,
+		    std::string_view reason = "world item revision conflict")
 		{
 			protocol::Envelope rejected;
 			auto *response = rejected.mutable_world_item_rejected();
 			*response->mutable_authoritative_state() = state;
-			response->set_reason("world item revision conflict");
+			response->set_reason(reason);
 			queue(
 			    *player.connection,
 			    std::move(rejected),
@@ -1631,73 +2051,160 @@ namespace kcd2mp::server
 
 		auto accepted = message.state();
 		(void)normalize_rotation(accepted.mutable_transform()->mutable_rotation());
+		auto staged_items = m_items;
+		auto updated_profile = player.profile;
+		const auto player_location = item_location::player(player.id);
+		const auto world_location = item_location::world();
+		bool profile_changed = false;
+		std::string item_error;
+
+		const auto reject_requested = [&](std::string_view reason)
+		{
+			if (found != m_world_items.end())
+				reject_state(found->second, reason);
+			else
+			{
+				auto absent = accepted;
+				absent.set_revision(1);
+				absent.set_present(false);
+				reject_state(absent, reason);
+			}
+		};
+		const auto remove_from_profile = [&](std::string_view item_instance)
+		{
+			auto *inventory = updated_profile.mutable_inventory();
+			for (auto index = inventory->size(); index-- > 0;)
+			{
+				if (inventory->Get(index).instance_id() == item_instance)
+					inventory->DeleteSubrange(index, 1);
+			}
+			auto *quick = updated_profile.mutable_quick_access_slots();
+			for (auto index = quick->size(); index-- > 0;)
+			{
+				if (quick->Get(index).instance_id() == item_instance)
+					quick->DeleteSubrange(index, 1);
+			}
+		};
+
 		if (accepted.present())
 		{
-			const auto owner = m_item_owners.find(instance);
-			if (owner != m_item_owners.end() && owner->second != player.id)
+			if (found != m_world_items.end() && found->second.present())
 			{
-				if (found != m_world_items.end())
-					reject_state(found->second);
+				const auto *entry = staged_items.find(instance);
+				if (!entry || entry->location != world_location
+				    || !item_ledger::same_stack(entry->item, accepted.item()))
+				{
+					reject_requested(
+					    "world item identity or stack values changed");
+					return;
+				}
+			}
+			else
+			{
+				const auto source_instance = message.source_instance_id().empty()
+				    ? instance
+				    : message.source_instance_id();
+				const auto *source = staged_items.find(source_instance);
+				if (!source || source->location != player_location)
+				{
+					reject_requested(
+					    "world drop has no matching player-owned source");
+					return;
+				}
+
+				if (source_instance == instance)
+				{
+					if ((message.transfer_count() != 0
+					        && message.transfer_count() != source->item.count())
+					    || !item_ledger::same_stack(
+					        source->item, accepted.item()))
+					{
+						reject_requested(
+						    "complete drop must preserve item identity and values");
+						return;
+					}
+					if (!staged_items.move(
+					        instance,
+					        player_location,
+					        world_location,
+					        item_error)
+					    || !staged_items.replace_item(
+					        accepted.item(), world_location, item_error))
+					{
+						reject_requested(item_error);
+						return;
+					}
+					remove_from_profile(instance);
+				}
 				else
 				{
-					auto absent = accepted;
-					absent.set_revision(1);
-					absent.set_present(false);
-					reject_state(absent);
+					const auto count = message.transfer_count() == 0
+					    ? accepted.item().count()
+					    : message.transfer_count();
+					if (accepted.item().count() != count
+					    || !item_ledger::same_stack(
+					        source->item, accepted.item(), false)
+					    || !staged_items.split(
+					        source_instance,
+					        player_location,
+					        instance,
+					        count,
+					        world_location,
+					        item_error))
+					{
+						reject_requested(
+						    item_error.empty()
+						        ? "split drop values do not match the source stack"
+						        : item_error);
+						return;
+					}
+					for (auto &profile_item :
+					     *updated_profile.mutable_inventory())
+					{
+						if (profile_item.instance_id() == source_instance)
+							profile_item.set_count(
+							    profile_item.count() - count);
+					}
 				}
+				profile_changed = true;
+			}
+		}
+		else if (found != m_world_items.end() && found->second.present())
+		{
+			const auto *source = staged_items.find(instance);
+			if (!source || source->location != world_location
+			    || !item_ledger::same_stack(source->item, found->second.item())
+			    || !item_ledger::same_stack(source->item, accepted.item()))
+			{
+				reject_requested("world pickup does not match the stored item");
 				return;
 			}
-			if (owner != m_item_owners.end())
+			if (!staged_items.move(
+			        instance,
+			        world_location,
+			        player_location,
+			        item_error))
 			{
-				auto *inventory = player.profile.mutable_inventory();
-				for (auto index = inventory->size(); index-- > 0;)
-				{
-					if (inventory->Get(index).instance_id() == instance)
-						inventory->DeleteSubrange(index, 1);
-				}
-				auto *quick = player.profile.mutable_quick_access_slots();
-				for (auto index = quick->size(); index-- > 0;)
-				{
-					if (quick->Get(index).instance_id() == instance)
-						quick->DeleteSubrange(index, 1);
-				}
-				auto *equipment = player.profile.mutable_avatar()->mutable_equipment();
-				equipment->Clear();
-				for (const auto &item : player.profile.inventory())
-				{
-					if (!item.has_equipped_slot())
-						continue;
-					auto *visible = equipment->Add();
-					visible->set_definition_id(item.definition_id());
-					visible->set_equipped_slot(item.equipped_slot());
-				}
-				player.avatar = player.profile.avatar();
-				m_item_owners.erase(owner);
-				persist_player(player, m_current_time);
+				reject_requested(item_error);
+				return;
 			}
-
-			bool objects_changed = false;
-			for (auto &[guid, object] : m_world_objects)
-			{
-				(void)guid;
-				auto *inventory = object.mutable_inventory();
-				const auto old_size = inventory->size();
-				for (auto index = inventory->size(); index-- > 0;)
-				{
-					if (inventory->Get(index).instance_id() == instance)
-						inventory->DeleteSubrange(index, 1);
-				}
-				if (inventory->size() == old_size)
-					continue;
-				object.set_revision(object.revision() + 1);
-				objects_changed = true;
-				protocol::Envelope updated;
-				*updated.mutable_world_object_updated()->mutable_state() = object;
-				broadcast(std::move(updated), reliability::reliable);
-			}
-			if (objects_changed)
-				persist_world_objects();
+			*updated_profile.add_inventory() = source->item;
+			profile_changed = true;
 		}
+		else if (found == m_world_items.end())
+		{
+			reject_requested("cannot remove an unknown world item");
+			return;
+		}
+
+		if (profile_changed)
+		{
+			updated_profile.set_revision(player.profile.revision() + 1);
+			player.profile = std::move(updated_profile);
+			rebuild_avatar_equipment(player);
+			persist_player(player, m_current_time);
+		}
+		m_items = std::move(staged_items);
 
 		accepted.set_revision(
 		    found == m_world_items.end() ? 1 : found->second.revision() + 1);
@@ -1708,6 +2215,8 @@ namespace kcd2mp::server
 		auto *ack = response.mutable_world_item_accepted();
 		ack->set_instance_id(instance);
 		ack->set_revision(accepted.revision());
+		if (profile_changed)
+			*ack->mutable_authoritative_profile() = player.profile;
 		queue(*player.connection, std::move(response), reliability::reliable);
 
 		protocol::Envelope updated;
@@ -1716,6 +2225,32 @@ namespace kcd2mp::server
 		    std::move(updated),
 		    reliability::reliable,
 		    player.connection);
+	}
+
+	void server_core::handle_npc_discovery(
+	    player_session &player,
+	    const protocol::ClientNpcDiscovery &message,
+	    time_point now)
+	{
+		m_npcs.observe(
+		    player.id,
+		    message,
+		    player.has_transform ? &player.transform : nullptr,
+		    !m_human_npcs_disabled,
+		    !m_animal_npcs_disabled,
+		    now);
+		const auto positions = player_positions();
+		queue_npc_events(m_npcs.reconcile(positions, now));
+	}
+
+	void server_core::handle_npc_update(
+	    player_session &player,
+	    const protocol::ClientNpcUpdate &message,
+	    time_point now)
+	{
+		// Stale/revoked leases are expected during handoff and packet reordering;
+		// ignore them instead of disconnecting an otherwise valid client.
+		(void)m_npcs.update(player.id, message, now);
 	}
 
 	void server_core::handle_transform(
@@ -2146,6 +2681,7 @@ namespace kcd2mp::server
 		{
 			return;
 		}
+		const auto dummy = iterator->second.dummy;
 		persist_player(iterator->second, now);
 		remove_sleep_vote(id);
 		release_activity(iterator->second);
@@ -2159,6 +2695,10 @@ namespace kcd2mp::server
 			    close);
 		}
 		m_players.erase(iterator);
+		const auto positions = player_positions();
+		queue_npc_events(m_npcs.remove_player(id, positions, now));
+		if (dummy)
+			m_items.erase_location(item_location::player(id));
 		broadcast(
 		    player_left_envelope(id, reason),
 		    reliability::reliable,
@@ -2451,6 +2991,21 @@ namespace kcd2mp::server
 		m_store.save_world_items(items);
 	}
 
+	void server_core::rebuild_avatar_equipment(player_session &player)
+	{
+		auto *equipment = player.profile.mutable_avatar()->mutable_equipment();
+		equipment->Clear();
+		for (const auto &item : player.profile.inventory())
+		{
+			if (!item.has_equipped_slot())
+				continue;
+			auto *visible = equipment->Add();
+			visible->set_definition_id(item.definition_id());
+			visible->set_equipped_slot(item.equipped_slot());
+		}
+		player.avatar = player.profile.avatar();
+	}
+
 	void server_core::remove_owned_items_from_world()
 	{
 		bool changed = false;
@@ -2461,7 +3016,10 @@ namespace kcd2mp::server
 			bool object_changed = false;
 			for (auto index = inventory->size(); index-- > 0;)
 			{
-				if (m_item_owners.contains(inventory->Get(index).instance_id()))
+				const auto *entry =
+				    m_items.find(inventory->Get(index).instance_id());
+				if (entry
+				    && entry->location.kind == item_location_kind::player)
 				{
 					inventory->DeleteSubrange(index, 1);
 					object_changed = true;
@@ -2482,7 +3040,9 @@ namespace kcd2mp::server
 		bool items_changed = false;
 		for (auto &[instance, item] : m_world_items)
 		{
-			if (!item.present() || !m_item_owners.contains(instance))
+			const auto *entry = m_items.find(instance);
+			if (!item.present() || !entry
+			    || entry->location.kind != item_location_kind::player)
 				continue;
 			item.set_present(false);
 			item.set_revision(item.revision() + 1);
@@ -2538,6 +3098,100 @@ namespace kcd2mp::server
 			*snapshot->add_players() = snapshot_of(player, false);
 		}
 		broadcast(std::move(envelope), reliability::unreliable);
+		queue_npc_snapshots();
+	}
+
+	std::vector<npc_registry::player_position>
+	server_core::player_positions() const
+	{
+		std::vector<npc_registry::player_position> result;
+		result.reserve(m_players.size());
+		for (const auto &[id, player] : m_players)
+		{
+			if (player.dummy)
+				continue;
+			result.push_back({
+			    id,
+			    player.has_transform ? &player.transform : nullptr,
+			    player.connection.has_value()});
+		}
+		return result;
+	}
+
+	void server_core::queue_npc_events(
+	    std::vector<npc_registry::event> events)
+	{
+		for (auto &event : events)
+		{
+			const auto player = m_players.find(event.recipient);
+			if (player == m_players.end() || !player->second.connection)
+				continue;
+			protocol::Envelope envelope;
+			switch (event.kind)
+			{
+			case npc_registry::event_kind::enter:
+				*envelope.mutable_server_npc_enter()->mutable_state() =
+				    std::move(event.state);
+				break;
+			case npc_registry::event_kind::leave:
+				envelope.mutable_server_npc_leave()->set_npc_id(
+				    event.state.npc_id());
+				envelope.mutable_server_npc_leave()->set_generation(
+				    event.state.generation());
+				break;
+			case npc_registry::event_kind::authority:
+			{
+				auto *authority = envelope.mutable_server_npc_authority();
+				authority->set_npc_id(event.state.npc_id());
+				authority->set_generation(event.state.generation());
+				authority->set_authority_player_id(
+				    event.state.authority_player_id());
+				authority->set_lease_id(event.state.lease_id());
+				break;
+			}
+			}
+			queue(
+			    *player->second.connection,
+			    std::move(envelope),
+			    reliability::reliable);
+		}
+	}
+
+	void server_core::queue_npc_snapshots()
+	{
+		constexpr std::size_t npc_snapshot_payload_budget = 56 * 1024;
+		for (const auto &[id, player] : m_players)
+		{
+			if (!player.connection || player.dummy)
+				continue;
+			auto states = m_npcs.states_for(id);
+			for (std::size_t offset{}; offset < states.size();)
+			{
+				protocol::Envelope envelope;
+				auto *snapshot = envelope.mutable_server_npc_snapshot();
+				snapshot->set_server_tick(m_server_tick);
+				std::size_t count{};
+				while (offset + count < states.size()
+				    && count < max_npcs_per_message)
+				{
+					*snapshot->add_npcs() = states[offset + count];
+					if (envelope.ByteSizeLong() > npc_snapshot_payload_budget
+					    && count != 0)
+					{
+						snapshot->mutable_npcs()->RemoveLast();
+						break;
+					}
+					++count;
+				}
+				if (count == 0)
+					break;
+				queue(
+				    *player.connection,
+				    std::move(envelope),
+				    reliability::unreliable);
+				offset += count;
+			}
+		}
 	}
 
 	server_core::player_session *server_core::find_by_connection(

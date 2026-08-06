@@ -6,7 +6,16 @@
 #include <crysystem/CCryAction.h>
 #include <crysystem/SSystemGlobalEnvironment.h>
 #include <entitymodule/C_Actor.h>
+#include <entitymodule/C_Inventory.h>
+#include <entitymodule/C_Item.h>
+#include <entitymodule/S_ItemClass.h>
+#include <framework/GuidUtils.h>
 #include <game/S_GameContext.h>
+#include <rpgmodule/C_Soul.h>
+#include <dialogmodule/C_DialogInstance.h>
+#include <dialogmodule/C_DialogManager.h>
+#include <dialogmodule/C_DialogModule.h>
+#include <combatmodule/C_CombatActor.h>
 #include <Offsets/vtables/IEntity.h>
 #include <Offsets/vtables/IEntityIt.h>
 #include <Offsets/vtables/IEntitySystem.h>
@@ -14,12 +23,14 @@
 #include <Offsets/vtables/ICVar.h>
 
 #include <chrono>
+#include <algorithm>
 #include <cstddef>
 #include <cmath>
 #include <format>
 #include <string_view>
 #include <thread>
 #include <unordered_set>
+#include <unordered_map>
 #include <utility>
 
 namespace kcd2mp::kcse
@@ -78,6 +89,159 @@ namespace kcd2mp::kcse
 			    std::chrono::duration_cast<std::chrono::milliseconds>(
 			        std::chrono::steady_clock::now().time_since_epoch())
 			        .count());
+		}
+
+		std::uint64_t stable_inventory_revision(
+		    const protocol::NpcInventoryState &inventory)
+		{
+			std::uint64_t hash = 1469598103934665603ULL;
+			for (const auto &item : inventory.items())
+			{
+				for (const auto value : item.instance_id())
+					hash = (hash ^ static_cast<unsigned char>(value))
+					    * 1099511628211ULL;
+				hash = (hash ^ item.count()) * 1099511628211ULL;
+			}
+			return hash == 0 ? 1 : hash;
+		}
+
+		bool capture_npc_gameplay(
+		    wh::entitymodule::C_Actor *actor,
+		    Offsets::IEntity *entity,
+		    protocol::NpcGameplayState &wire) noexcept
+		{
+			if (!actor || !entity)
+				return false;
+				const auto timestamp = now_ms();
+				wire.set_revision(timestamp == 0 ? 1 : timestamp);
+				wire.set_health(std::max(0.0F, actor->GetHealth()));
+				wire.set_max_health(std::max(0.01F, actor->GetMaxHealth()));
+				const bool dead = actor->IsDeadByHealth() || actor->IsDead();
+				wire.set_dead(dead);
+				const auto combat = read_combat_state(actor->m_pCombatActor);
+				wire.set_behavior(dead
+				        ? protocol::NPC_BEHAVIOR_DEAD
+				        : (combat.combat_mode || combat.active_in_combat)
+				        ? protocol::NPC_BEHAVIOR_COMBAT
+				        : protocol::NPC_BEHAVIOR_IDLE);
+
+				if (auto *inventory = actor->GetInventory())
+				{
+					auto *snapshot = wire.mutable_inventory();
+					for (const auto *item : inventory->m_items)
+					{
+						if (!item || !item->m_pClassData || item->m_amount <= 0)
+							continue;
+						auto *entry = snapshot->add_items();
+						entry->set_instance_id(wh::FormatGuid(item->m_instanceGuid));
+						entry->set_definition_id(
+						    wh::FormatGuid(item->m_pClassData->m_guid));
+						entry->set_count(static_cast<std::uint32_t>(item->m_amount));
+						entry->set_quality(static_cast<float>(item->GetQuality()));
+						entry->set_condition(item->GetCondition());
+					}
+					snapshot->set_revision(stable_inventory_revision(*snapshot));
+				}
+
+				auto *dialog_module = wh::dialogmodule::C_DialogModule::GetInstance();
+				auto *manager = dialog_module ? dialog_module->m_pManager : nullptr;
+				auto *dialog = manager
+				    ? static_cast<wh::dialogmodule::C_DialogInstance *>(
+				          manager->m_pActiveSession)
+				    : nullptr;
+				if (dialog)
+				{
+					const auto participant = [&](void *candidate)
+					{
+						return candidate == actor || candidate == entity
+						    || candidate == actor->m_pSoul;
+					};
+					const bool participates = participant(dialog->m_pParticipant)
+					    || std::ranges::any_of(dialog->m_params.m_listA, participant)
+					    || std::ranges::any_of(dialog->m_params.m_listC, participant);
+					if (participates)
+					{
+						auto *state = wire.mutable_dialog();
+						state->set_revision(timestamp == 0 ? 1 : timestamp);
+						state->set_session_id(dialog->m_params.m_uniqueId);
+						state->set_phase(dialog->m_phase);
+						state->set_active(true);
+						wire.set_behavior(protocol::NPC_BEHAVIOR_DIALOGUE);
+					}
+				}
+				return true;
+		}
+
+		bool apply_npc_inventory(
+		    wh::entitymodule::C_Inventory &inventory,
+		    const protocol::NpcInventoryState &desired) noexcept
+		{
+				std::unordered_map<std::string, wh::entitymodule::C_Item *> existing;
+				for (auto *item : inventory.m_items)
+					if (item)
+						existing.emplace(wh::FormatGuid(item->m_instanceGuid), item);
+				std::unordered_set<std::string> retained;
+				for (const auto &wire : desired.items())
+				{
+					retained.insert(wire.instance_id());
+					auto found = existing.find(wire.instance_id());
+					wh::entitymodule::C_Item *item = found == existing.end()
+					    ? nullptr : found->second;
+					if (!item)
+					{
+						CryGUID definition{};
+						CryGUID instance{};
+						if (!wh::ParseGuid(wire.definition_id().c_str(), definition)
+						    || !wh::ParseGuid(wire.instance_id().c_str(), instance))
+							return false;
+						item = inventory.CreateItem(
+						    definition, wire.condition(), wire.count());
+						if (!item)
+							return false;
+						item->SetInstanceGuid(instance);
+					}
+					else
+					{
+						if (!item->m_pClassData
+						    || wh::FormatGuid(item->m_pClassData->m_guid)
+						        != wire.definition_id())
+							return false;
+						const auto count = static_cast<std::int32_t>(wire.count());
+						if (item->m_amount != count
+						    && !inventory.ChangeItemAmount(item, count - item->m_amount))
+							return false;
+						(void)item->SetQuality(static_cast<std::int32_t>(
+						    std::lround(wire.quality())));
+						if (!item->SetCondition(wire.condition()))
+							return false;
+					}
+				}
+				for (const auto &[instance, item] : existing)
+					if (!retained.contains(instance) && item)
+						inventory.RemoveItem(item, 2, item->m_amount);
+				return true;
+		}
+
+		const char *guarded_entity_class_name(void *entity_class) noexcept
+		{
+			if (!entity_class)
+				return nullptr;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				auto **vtable = *reinterpret_cast<void ***>(entity_class);
+				using get_name = const char *(__fastcall *)(const void *);
+				return vtable && vtable[2]
+				    ? reinterpret_cast<get_name>(vtable[2])(entity_class)
+				    : nullptr;
+#ifdef _WIN32
+			}
+			__except(KCD2MP_JOIN_SEH_FILTER("npc-entity-class.GetName.seh"))
+			{
+				return nullptr;
+			}
+#endif
 		}
 
 		bool guarded_read_spawn(
@@ -384,13 +548,16 @@ namespace kcd2mp::kcse
 
 		bool guarded_restore_entity(
 		    Offsets::IEntity *entity,
-		    bool hidden) noexcept
+		    bool hidden,
+		    std::optional<bool> active = std::nullopt) noexcept
 		{
 			if (!entity)
 				return false;
 #ifdef _WIN32
 			__try
 			{
+				if (active)
+					entity->Activate(*active);
 				entity->Hide(hidden);
 				return true;
 			}
@@ -399,8 +566,71 @@ namespace kcd2mp::kcse
 				return false;
 			}
 #else
+			if (active)
+				entity->Activate(*active);
 			entity->Hide(hidden);
 			return true;
+#endif
+		}
+
+		bool guarded_set_npc_role(
+		    Offsets::IEntity *entity,
+		    bool visible,
+		    bool active) noexcept
+		{
+			if (!entity)
+				return false;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				entity->Activate(active);
+				entity->Hide(!visible);
+				return true;
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return false;
+			}
+#endif
+		}
+
+		std::uint64_t guarded_entity_guid(Offsets::IEntity *entity) noexcept
+		{
+			if (!entity)
+				return 0;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				return entity->GetGuid();
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return 0;
+			}
+#endif
+		}
+
+		std::uint32_t guarded_find_entity_by_guid(
+		    Offsets::IEntitySystem *system,
+		    std::uint64_t guid) noexcept
+		{
+			if (!system || guid == 0)
+				return 0;
+#ifdef _WIN32
+			__try
+			{
+#endif
+				return system->FindEntityByGuid(guid);
+#ifdef _WIN32
+			}
+			__except(EXCEPTION_EXECUTE_HANDLER)
+			{
+				return 0;
+			}
 #endif
 		}
 
@@ -882,11 +1112,14 @@ namespace kcd2mp::kcse
 	}
 
 	void native_entity_backend::register_player_entity(
-	    std::uint32_t entity_id)
+	    std::uint32_t entity_id,
+	    std::uint64_t player_id)
 	{
 		if (entity_id != 0)
 		{
 			m_player_entities.insert(entity_id);
+			if (player_id != 0)
+				m_player_entity_ids.insert_or_assign(player_id, entity_id);
 			m_pending_control.erase(entity_id);
 			if (const auto isolated = m_isolated.find(entity_id);
 			    isolated != m_isolated.end())
@@ -908,6 +1141,11 @@ namespace kcd2mp::kcse
 	    std::uint32_t entity_id)
 	{
 		m_player_entities.erase(entity_id);
+		for (auto iterator = m_player_entity_ids.begin();
+		     iterator != m_player_entity_ids.end();)
+			iterator = iterator->second == entity_id
+			    ? m_player_entity_ids.erase(iterator)
+			    : std::next(iterator);
 	}
 
 	native_entity_backend::human_npc_spawn_scope
@@ -1016,16 +1254,18 @@ namespace kcd2mp::kcse
 			return;
 		m_world_sync.process();
 		m_world_item_sync.process();
-		if (!m_isolation_active || managed_human_spawn_active())
-			return;
-		refresh_local_player_exclusion(*system);
 		++m_isolation_maintenance_frame;
 		if (m_isolation_maintenance_frame
 		        % isolation_maintenance_interval_frames
 		    == 0)
 		{
-			maintain_isolated_entities(*system);
+			maintain_managed_npcs(*system);
+			if (m_isolation_active)
+				maintain_isolated_entities(*system);
 		}
+		if (!m_isolation_active || managed_human_spawn_active())
+			return;
+		refresh_local_player_exclusion(*system);
 		refresh_actor_roster(*system);
 		if (m_pending_control.empty())
 			return;
@@ -1125,6 +1365,251 @@ namespace kcd2mp::kcse
 		return m_world_item_sync.apply(state, error);
 	}
 
+	std::vector<protocol::NpcObservation>
+	native_entity_backend::poll_npc_observations()
+	{
+		std::vector<protocol::NpcObservation> result;
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		auto *system = environment ? environment->pEntitySystem : nullptr;
+		if (!system)
+			return result;
+		auto *iterator = system->GetEntityIterator();
+		if (!iterator)
+			return result;
+		iterator->AddRef();
+		const auto entity_count = system->GetNumEntities();
+		iterator->MoveFirst();
+		std::unordered_set<std::uint64_t> seen;
+		for (std::uint32_t visited{}; visited < entity_count; ++visited)
+		{
+			auto *entity = iterator->Next();
+			if (!entity)
+				break;
+			const auto kind = classify_npc_actor(entity);
+			if (!kind
+			    || (*kind == protocol::NPC_KIND_HUMAN
+			        && m_human_npcs_disabled)
+			    || (*kind == protocol::NPC_KIND_ANIMAL
+			        && m_animal_npcs_disabled))
+				continue;
+			const auto guid = guarded_entity_guid(entity);
+			if (guid == 0 || !seen.insert(guid).second)
+				continue;
+			const auto *matrix = entity->GetWorldTMPtr();
+			if (!matrix)
+				continue;
+			result.emplace_back();
+			result.back().set_authored_guid(guid);
+			result.back().set_kind(*kind);
+			if (const auto managed = std::ranges::find_if(
+			        m_managed_npcs,
+			        [entity](const auto &entry)
+			        { return entry.second.entity_id == entity->GetId(); });
+			    managed != m_managed_npcs.end())
+				result.back().set_known_npc_id(managed->first);
+			const std::string_view entity_name = entity->GetName()
+			    ? entity->GetName() : "";
+			// The production server owns the authored world catalog and turns
+			// catalog hits back into authored NPCs. A miss is a runtime spawn and
+			// receives a canonical server id.
+			result.back().set_dynamic(true);
+			{
+				auto *entity_class = entity->GetClass();
+				const auto *class_name = guarded_entity_class_name(entity_class);
+				result.back().set_entity_class(
+				    class_name && class_name[0] != '\0'
+				    ? class_name : (*kind == protocol::NPC_KIND_HUMAN
+				        ? "NPC" : "Animal"));
+				result.back().set_entity_name(entity_name);
+			}
+			auto *transform = result.back().mutable_transform();
+			transform->mutable_position()->set_x(matrix->m03);
+			transform->mutable_position()->set_y(matrix->m13);
+			transform->mutable_position()->set_z(matrix->m23);
+			*transform->mutable_rotation() = quaternion_from_matrix(*matrix);
+			transform->mutable_velocity();
+			transform->set_client_time_ms(now_ms());
+			auto *context = wh::game::S_GameContext::GetInstance();
+			auto *actor = context ? context->GetActorById(entity->GetId()) : nullptr;
+			if (!capture_npc_gameplay(
+			        actor, entity, *result.back().mutable_gameplay()))
+				result.pop_back();
+		}
+		iterator->Release();
+		return result;
+	}
+
+	bool native_entity_backend::apply_npc_state(
+	    const protocol::NpcState &state,
+	    bool local_authority,
+	    std::string &error)
+	{
+		if (!is_valid_npc_state(state))
+		{
+			error = "native NPC state is invalid";
+			return false;
+		}
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		auto *system = environment ? environment->pEntitySystem : nullptr;
+		if (!system)
+		{
+			error = "native NPC sync requires the entity system";
+			return false;
+		}
+		std::uint32_t entity_id{};
+		if (const auto managed = m_managed_npcs.find(state.npc_id());
+		    managed != m_managed_npcs.end())
+			entity_id = managed->second.entity_id;
+		if (entity_id == 0 && !state.dynamic())
+			entity_id = guarded_find_entity_by_guid(system, state.authored_guid());
+		auto *entity = system->GetEntity(entity_id);
+		if (!entity && state.dynamic())
+		{
+			auto *context = wh::game::S_GameContext::GetInstance();
+			const Vec3 position(
+			    state.transform().position().x(),
+			    state.transform().position().y(),
+			    state.transform().position().z());
+			const Quat rotation(
+			    state.transform().rotation().w(),
+			    state.transform().rotation().x(),
+			    state.transform().rotation().y(),
+			    state.transform().rotation().z());
+			const Vec3 scale(1.0F, 1.0F, 1.0F);
+			const auto name = std::format("KCD2MP_Dynamic_{}", state.npc_id());
+			Offsets::IActor *spawned{};
+				if (context && context->m_pActorSystem)
+				{
+					if (state.kind() == protocol::NPC_KIND_HUMAN)
+					{
+						auto scope = authorize_human_npc_spawn(name);
+						spawned = context->m_pActorSystem->CreateActor(
+						    0, name.c_str(), state.entity_class().c_str(),
+						    &position, &rotation, &scale, 0);
+					}
+					else
+						spawned = context->m_pActorSystem->CreateActor(
+						    0, name.c_str(), state.entity_class().c_str(),
+						    &position, &rotation, &scale, 0);
+				}
+			entity = spawned ? spawned->GetEntity() : nullptr;
+			entity_id = entity ? entity->GetId() : 0;
+		}
+		const auto kind = classify_npc_actor(entity);
+		if (!entity || (!state.dynamic() && (!kind || *kind != state.kind())))
+		{
+			// Authored NPCs stream independently on each client. A valid state may
+			// arrive before its local entity; the next snapshot adopts it once loaded.
+			error.clear();
+			return true;
+		}
+
+		auto found = m_managed_npcs.find(state.npc_id());
+		if (found != m_managed_npcs.end()
+		    && found->second.entity_id != entity_id)
+		{
+			(void)guarded_restore_entity(
+			    system->GetEntity(found->second.entity_id),
+			    found->second.original.hidden,
+			    found->second.original.active);
+			m_managed_npcs.erase(found);
+			found = m_managed_npcs.end();
+		}
+		if (found == m_managed_npcs.end())
+		{
+			managed_npc managed;
+			managed.authored_guid = state.authored_guid();
+			managed.entity_id = entity_id;
+			managed.generation = state.generation();
+			managed.original = {entity->IsHidden(), entity->IsActive()};
+			found = m_managed_npcs.emplace(state.npc_id(), managed).first;
+		}
+		found->second.in_interest = true;
+		found->second.local_authority = local_authority;
+		if (!guarded_set_npc_role(entity, true, local_authority))
+		{
+			error = "could not apply native NPC simulation role";
+			return false;
+		}
+		if (!local_authority && !write_transform(entity, state.transform(), error))
+			return false;
+		auto *context = wh::game::S_GameContext::GetInstance();
+		auto *actor = context ? context->GetActorById(entity_id) : nullptr;
+		if (actor && state.has_gameplay()
+		    && state.gameplay().revision() >= found->second.gameplay_revision)
+		{
+			const auto desired = state.gameplay().health();
+			const auto current = std::max(0.0F, actor->GetHealth());
+			actor->SetMaxHealth(state.gameplay().max_health());
+			if (!local_authority && desired + 0.001F < current
+			    && actor->m_pSoul)
+				actor->m_pSoul->m_combatSoul.DealDamage(
+				    0.0F, current - desired, 0, false, nullptr);
+			// Keep the actor-side mirror exact. The native damage pipeline above
+			// remains responsible for reactions, death and combat results.
+			if (!local_authority)
+				actor->m_health = desired;
+			if (!local_authority && state.gameplay().has_inventory()
+			    && state.gameplay().inventory().revision()
+			        > found->second.inventory_revision)
+				if (auto *inventory = actor->GetInventory(); inventory
+				    && !apply_npc_inventory(
+				        *inventory, state.gameplay().inventory()))
+				{
+					error = "could not reconcile native NPC inventory";
+					return false;
+				}
+			if (!local_authority
+			    && state.gameplay().combat_target_player_id() != 0)
+			{
+				const auto target = m_player_entity_ids.find(
+				    state.gameplay().combat_target_player_id());
+				auto *target_actor = target != m_player_entity_ids.end()
+				    && context ? context->GetActorById(target->second) : nullptr;
+				if (target_actor && actor->m_pCombatActor)
+					actor->m_pCombatActor->SetOpponent(
+					    target_actor->GetOrCreateCombatActor());
+			}
+			if (!local_authority && state.gameplay().has_behavior_target()
+			    && (state.gameplay().behavior() == protocol::NPC_BEHAVIOR_TRAVEL
+			        || state.gameplay().behavior()
+			            == protocol::NPC_BEHAVIOR_INVESTIGATE
+			        || state.gameplay().behavior() == protocol::NPC_BEHAVIOR_FLEE))
+			{
+				const Vec3 goal(
+				    state.gameplay().behavior_target().x(),
+				    state.gameplay().behavior_target().y(),
+				    state.gameplay().behavior_target().z());
+				(void)actor->RequestLocomotion(
+				    &goal, state.gameplay().desired_speed());
+			}
+			found->second.gameplay_revision = state.gameplay().revision();
+			if (state.gameplay().has_inventory())
+				found->second.inventory_revision =
+				    state.gameplay().inventory().revision();
+			if (state.gameplay().has_dialog())
+				found->second.dialog_revision = state.gameplay().dialog().revision();
+		}
+		error.clear();
+		return true;
+	}
+
+	void native_entity_backend::remove_npc_state(
+	    std::uint64_t npc_id,
+	    std::uint32_t generation)
+	{
+		const auto found = m_managed_npcs.find(npc_id);
+		if (found == m_managed_npcs.end()
+		    || found->second.generation != generation)
+			return;
+		found->second.in_interest = false;
+		auto *environment = SSystemGlobalEnvironment::GetInstance();
+		auto *system = environment ? environment->pEntitySystem : nullptr;
+		if (system)
+			(void)guarded_set_npc_role(
+			    system->GetEntity(found->second.entity_id), false, false);
+	}
+
 	void native_entity_backend::reset_world_sync()
 	{
 		m_world_sync.reset();
@@ -1142,10 +1627,19 @@ namespace kcd2mp::kcse
 		m_last_actor_count = -1;
 		m_pending_control.clear();
 		m_human_npc_classes.clear();
+		m_player_entity_ids.clear();
 		auto *environment = SSystemGlobalEnvironment::GetInstance();
 		auto *system = environment ? environment->pEntitySystem : nullptr;
 		if (system)
 		{
+			for (const auto &[npc_id, state] : m_managed_npcs)
+			{
+				(void)npc_id;
+				(void)guarded_restore_entity(
+				    system->GetEntity(state.entity_id),
+				    state.original.hidden,
+				    state.original.active);
+			}
 			for (const auto &[id, state] : m_isolated)
 			{
 				(void)guarded_restore_entity(
@@ -1153,6 +1647,7 @@ namespace kcd2mp::kcse
 				    state.hidden);
 			}
 		}
+		m_managed_npcs.clear();
 		m_isolated.clear();
 	}
 
@@ -1279,6 +1774,22 @@ namespace kcd2mp::kcse
 		}
 	}
 
+	void native_entity_backend::maintain_managed_npcs(
+	    Offsets::IEntitySystem &system)
+	{
+		for (auto &[npc_id, managed] : m_managed_npcs)
+		{
+			(void)npc_id;
+			auto *entity = system.GetEntity(managed.entity_id);
+			if (!entity)
+				continue;
+			(void)guarded_set_npc_role(
+			    entity,
+			    managed.in_interest,
+			    managed.in_interest && managed.local_authority);
+		}
+	}
+
 	void native_entity_backend::ensure_sink_registered(
 	    Offsets::IEntitySystem &system)
 	{
@@ -1353,7 +1864,7 @@ namespace kcd2mp::kcse
 		// later ticks; force-removing the Entity leaves those references dangling.
 		// Hiding only the positively classified NPC preserves that ownership graph
 		// while excluding it from rendering and normal entity updates.
-		const entity_state state{entity->IsHidden()};
+		const entity_state state{entity->IsHidden(), entity->IsActive()};
 		join_trace::write_diagnostic(
 		    "entity-control.isolate.begin",
 		    std::format(
@@ -1383,19 +1894,31 @@ namespace kcd2mp::kcse
 	bool native_entity_backend::should_isolate_npc_actor(
 	    Offsets::IEntity *entity)
 	{
+		const auto kind = classify_npc_actor(entity);
+		return kind
+		    && ((*kind == protocol::NPC_KIND_HUMAN
+		            && m_human_npcs_disabled)
+		        || (*kind == protocol::NPC_KIND_ANIMAL
+		            && m_animal_npcs_disabled));
+	}
+
+	std::optional<protocol::NpcKind>
+	native_entity_backend::classify_npc_actor(
+	    Offsets::IEntity *entity)
+	{
 		if (!entity)
-			return false;
+			return std::nullopt;
 		const auto entity_id = entity->GetId();
 		auto *context = wh::game::S_GameContext::GetInstance();
 		auto *actor = context ? context->GetActorById(entity_id) : nullptr;
 		if (!actor)
-			return false;
+			return std::nullopt;
 		// The actor-map entry must own this exact entity. This rejects stale or
 		// reused ids before any runtime-type or AI probe is trusted.
 		if (guarded_actor_owns_entity(actor, entity)
 		    != actor_type_match::yes)
 		{
-			return false;
+			return std::nullopt;
 		}
 		auto *framework = CCryAction::GetInstance();
 		auto *client_entity = framework ? framework->GetClientEntity() : nullptr;
@@ -1403,14 +1926,14 @@ namespace kcd2mp::kcse
 		    && static_cast<void *>(client_entity)
 		        == static_cast<void *>(entity))
 		{
-			return false;
+			return std::nullopt;
 		}
 		auto *client_actor = framework ? framework->GetClientActor() : nullptr;
 		if (client_actor
 		    && static_cast<void *>(client_actor)
 		        == static_cast<void *>(actor))
 		{
-			return false;
+			return std::nullopt;
 		}
 		const auto player = guarded_actor_is_player(actor);
 		if (player != actor_type_match::no)
@@ -1418,7 +1941,7 @@ namespace kcd2mp::kcse
 			// A positive result protects every engine-recognized player. A failed
 			// player probe also stays active: NPC isolation must never risk
 			// disabling input, combat, inventory, camera, or player controllers.
-			return false;
+			return std::nullopt;
 		}
 		if (guarded_is_player_scheduler_proxy(entity))
 		{
@@ -1432,7 +1955,7 @@ namespace kcd2mp::kcse
 			    std::format(
 			        "entity_id={} reason=player-scheduler-proxy",
 			        entity_id));
-			return false;
+			return std::nullopt;
 		}
 		const auto human = guarded_actor_type_matches(actor, true);
 		if (human == actor_type_match::yes)
@@ -1442,23 +1965,23 @@ namespace kcd2mp::kcse
 			// C_Human is also the base of C_Player and potentially other human
 			// gameplay actors. A real NPC must additionally own an AI object;
 			// animation, combat and other system actors do not.
-			return m_human_npcs_disabled
-			    && guarded_entity_has_ai(entity)
-			        == actor_type_match::yes;
+			return guarded_entity_has_ai(entity) == actor_type_match::yes
+			    ? std::optional<protocol::NpcKind>{protocol::NPC_KIND_HUMAN}
+			    : std::nullopt;
 		}
 		if (human == actor_type_match::failed)
-			return false;
+			return std::nullopt;
 
 		const auto animal = guarded_actor_type_matches(actor, false);
 		if (animal == actor_type_match::yes)
-			return m_animal_npcs_disabled;
+			return protocol::NPC_KIND_ANIMAL;
 		if (animal == actor_type_match::failed)
-			return false;
+			return std::nullopt;
 
 		// Unknown Actor subclasses stay active. Disabling a class that is not
 		// proven to derive from C_Human or C_Animal can also suspend gameplay
 		// helpers such as combat/system actors.
-		return false;
+		return std::nullopt;
 	}
 
 	void native_entity_backend::entity_event(
@@ -1484,6 +2007,12 @@ namespace kcd2mp::kcse
 		m_isolated.erase(id);
 		m_player_entities.erase(id);
 		m_pending_control.erase(id);
+		for (auto &[npc_id, managed] : m_managed_npcs)
+		{
+			(void)npc_id;
+			if (managed.entity_id == id)
+				managed.entity_id = 0;
+		}
 		m_world_sync.entity_removed(entity);
 	}
 }

@@ -152,6 +152,20 @@ namespace kcd2mp
 		{
 			return true;
 		}
+		[[nodiscard]] virtual std::vector<protocol::NpcObservation>
+		poll_npc_observations()
+		{
+			return {};
+		}
+		[[nodiscard]] virtual bool apply_npc_state(
+		    const protocol::NpcState &,
+		    bool)
+		{
+			return true;
+		}
+		virtual void remove_npc_state(std::uint64_t, std::uint32_t)
+		{
+		}
 		[[nodiscard]] virtual bool apply_environment_state(
 		    const protocol::EnvironmentState &,
 		    bool)

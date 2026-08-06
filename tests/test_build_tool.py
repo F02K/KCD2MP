@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import stat
 import struct
 import tempfile
 import unittest
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -28,6 +30,24 @@ from tools.build_tui.core import (
     parse_vdf,
     resolve_game_location,
 )
+
+
+class BuildTargetCoverageTests(unittest.TestCase):
+    def test_aggregate_target_builds_every_registered_kcd2mp_test(self) -> None:
+        cmake_path = Path(__file__).resolve().parents[1] / "CMakeLists.txt"
+        cmake = cmake_path.read_text(encoding="utf-8")
+        registered = set(
+            re.findall(r"add_test\s*\(\s*NAME\s+(KCD2MP[A-Za-z0-9_]+)", cmake)
+        )
+        aggregate_match = re.search(
+            r"add_custom_target\s*\(\s*KCD2MPTests\b(?P<body>.*?)\n\s*\)",
+            cmake,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(aggregate_match)
+        aggregate = aggregate_match.group("body")
+        missing = sorted(name for name in registered if name not in aggregate)
+        self.assertEqual(missing, [], "KCD2MPTests misses registered test targets")
 
 
 def _vdf_path(path: Path) -> str:
@@ -552,6 +572,39 @@ class PackagingTests(unittest.TestCase):
                     ).decode("utf-8").replace("\r\n", "\n"),
                     "menu.title=Gebündeltes Release\n",
                 )
+
+    def test_package_includes_generated_server_game_data(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project, result = self._project_and_result(root)
+            game_data = result.dll_path.parent / "server_game_data"
+            game_data.mkdir()
+            required = {
+                "WHGame.dll": b"audited-game-code",
+                "content_manifest.json": b'{"content_fingerprint":"test"}\n',
+                "npc_archetypes.json": b'{"generated":true}\n',
+                "npc_world_catalog.json": b'{"levels":[]}\n',
+                "property_catalog_2.pb": b"two",
+                "property_catalog_3.pb": b"three",
+                "property_catalog_4.pb": b"four",
+            }
+            for name, content in required.items():
+                (game_data / name).write_bytes(content)
+
+            package = package_artifacts(
+                replace(result, server_game_data_dir=game_data),
+                project,
+                root / "package",
+            )
+
+            self.assertEqual(
+                (package.server_root / "game_data" / "WHGame.dll").read_bytes(),
+                b"audited-game-code",
+            )
+            self.assertEqual(
+                (package.server_root / "npc_archetypes.json").read_bytes(),
+                b'{"generated":true}\n',
+            )
 
 
 class AddressLibraryTests(unittest.TestCase):

@@ -68,6 +68,10 @@ namespace kcd2mp
 			case payload_case::kActivityGranted:
 			case payload_case::kActivityDenied:
 			case payload_case::kPlayerActivityUpdated:
+			case payload_case::kServerNpcEnter:
+			case payload_case::kServerNpcLeave:
+			case payload_case::kServerNpcAuthority:
+			case payload_case::kServerNpcSnapshot:
 				return true;
 			default:
 				return false;

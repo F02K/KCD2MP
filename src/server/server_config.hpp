@@ -57,6 +57,9 @@ namespace kcd2mp::server
 		float movement_tolerance_m{2.0F};
 		std::filesystem::path world_directory{"world"};
 		std::filesystem::path starter_profile_path{"starter_profile.toml"};
+		// Generated from the audited retail level PAKs and shipped beside the
+		// dedicated server. Production levels use it as an NPC GUID/kind allowlist.
+		std::filesystem::path npc_world_catalog_path;
 		// Optional KCD2 installation root. When configured, the server builds the
 		// level-wide property catalog once and persists it in world_directory.
 		std::filesystem::path property_game_root;

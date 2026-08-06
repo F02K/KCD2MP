@@ -30,7 +30,7 @@ class BuildAppTests(unittest.IsolatedAsyncioTestCase):
             (game_bin / "KingdomCome.exe").write_bytes(b"game")
 
             class FakeService:
-                def build(self, profile, log):
+                def build(self, profile, log, game_root=None):
                     artifact_dir = root / "artifacts"
                     artifact_dir.mkdir(exist_ok=True)
                     dll = artifact_dir / "d3d12_.dll"
@@ -67,7 +67,7 @@ class BuildAppTests(unittest.IsolatedAsyncioTestCase):
             release_build = threading.Event()
 
             class SlowService:
-                def build(self, profile, log):
+                def build(self, profile, log, game_root=None):
                     artifact_dir = root / "artifacts"
                     artifact_dir.mkdir(exist_ok=True)
                     dll = artifact_dir / "d3d12_.dll"
@@ -178,16 +178,7 @@ class BuildAppTests(unittest.IsolatedAsyncioTestCase):
             (game_bin / "WHGame.dll").write_bytes(b"unsupported")
 
             class FailingAuditService:
-                def build(self, profile, log):
-                    artifact_dir = root / "artifacts"
-                    artifact_dir.mkdir(exist_ok=True)
-                    dll = artifact_dir / "d3d12_.dll"
-                    pdb = artifact_dir / "d3d12_.pdb"
-                    dll.write_bytes(b"dll")
-                    pdb.write_bytes(b"pdb")
-                    return BuildResult(profile, artifact_dir, dll, pdb)
-
-                def audit(self, profile, selected_root, log, build_result=None):
+                def build(self, profile, log, game_root=None):
                     log("ERROR: unsupported WHGame.dll")
                     raise BuildToolError("Signature audit failed.")
 
