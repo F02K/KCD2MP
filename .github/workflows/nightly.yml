@@ -76,12 +76,13 @@ jobs:
       - name: Build 64bit release DLL
         shell: pwsh
         run: |
-          cmake --build ./build --config RelWithDebInfo --target KCD2MPRuntime KCD2MPServer KCD2MPSignatureAudit KCD2MPTests --
+          cmake --build ./build --config RelWithDebInfo --target KCD2MPRuntime KCD2MPServer KCD2MPSignatureAudit KCD2MPPropertyCatalog KCD2MPTests --
           ctest --test-dir ./build -C RelWithDebInfo -R "^KCD2MP" --output-on-failure
 
       - name: Package release outputs
         shell: pwsh
         run: |
+          python -m pip install --disable-pip-version-check --requirement tools/build_tui/requirements.txt
           python tools/package_build.py --build-dir build --config RelWithDebInfo --output out/package/release
 
       - name: Upload Artifact
@@ -153,7 +154,7 @@ jobs:
         id: build_sha
         shell: bash
         run: |
-          sha256sum package/client/KCD2MP-Client-v*.zip > sha256.checksum
+          sha256sum package/client/KCD2MP-Client-v*.zip package/server/KCD2MP-Server-v*.zip > sha256.checksum
           echo "build_sha=$(cat sha256.checksum)" >> $GITHUB_OUTPUT
           cat sha256.checksum
 
@@ -166,7 +167,7 @@ jobs:
             **This release has been built by Github Actions**
             [Link to build](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
 
-            Client package SHA256:
+            Client and server package SHA256:
             ```
             ${{ steps.build_sha.outputs.build_sha }}
             ```
@@ -181,10 +182,5 @@ jobs:
             ```
           files: |
             package/client/KCD2MP-Client-v*.zip
-            package/server/KCD2MPServer.exe
-            package/server/KCD2MPServer.pdb
-            package/server/server.toml.example
-            package/server/starter_profile.toml
-            package/server/npc_archetypes.json
-            package/server/tools/*
+            package/server/KCD2MP-Server-v*.zip
             package/SHA256SUMS.txt

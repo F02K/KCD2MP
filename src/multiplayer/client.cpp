@@ -2652,13 +2652,20 @@ namespace kcd2mp
 				    || (state.revision() <= current->second.revision()
 				        && state.lease_id() == current->second.lease_id()))
 					continue;
-				m_npcs.insert_or_assign(state.npc_id(), state);
+				auto merged = state;
+				if (current != m_npcs.end() && current->second.has_gameplay()
+				    && current->second.gameplay().has_inventory()
+				    && merged.has_gameplay()
+				    && !merged.gameplay().has_inventory())
+					*merged.mutable_gameplay()->mutable_inventory() =
+					    current->second.gameplay().inventory();
+				m_npcs.insert_or_assign(merged.npc_id(), merged);
 				m_npc_by_guid.insert_or_assign(
-				    state.authored_guid(), state.npc_id());
+				    merged.authored_guid(), merged.npc_id());
 				const bool authority =
-				    state.authority_player_id() == m_status.local_player_id;
+				    merged.authority_player_id() == m_status.local_player_id;
 				lock.unlock();
-				(void)m_runtime.apply_npc_state(state, authority);
+				(void)m_runtime.apply_npc_state(merged, authority);
 				lock.lock();
 			}
 		}

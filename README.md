@@ -3,7 +3,7 @@
 Experimental multiplayer for Kingdom Come: Deliverance II.
 
 > [!WARNING]
-> KCD2MP **v0.0.9 is a prototype**, not a production-ready multiplayer mod.
+> KCD2MP **v0.1.0 is a prototype**, not a production-ready multiplayer mod.
 > Expect breaking changes, incomplete world simulation, compatibility limits,
 > and loss of multiplayer-world data while development continues. Use test
 > saves and keep backups of anything important.
@@ -12,7 +12,7 @@ Experimental multiplayer for Kingdom Come: Deliverance II.
 
 | | |
 | --- | --- |
-| Current version | **0.0.9** |
+| Current version | **0.1.0** |
 | Development stage | Prototype / technical preview |
 | Networking | Direct IP, dedicated authoritative server |
 | Platform | Windows x64 |
@@ -24,7 +24,7 @@ network handshake. During the prototype phase, clients and servers must run the
 exact same KCD2MP version. There is no separate user-facing "protocol version".
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-## What works in v0.0.9
+## What works in v0.1.0
 
 - Direct-IP client/server connection with authentication and reconnect support
 - Persistent server sessions and player profiles
@@ -106,7 +106,7 @@ Every successful build also creates a clean package tree under
 `out/package/<debug|release>/`:
 
 ```text
-client/   install-ready game tree and KCD2MP-Client-v0.0.9.zip
+client/   install-ready game tree and KCD2MP-Client-v0.1.0.zip
 server/   dedicated server, configuration, data, symbols, and audit tool
 tests/    test executables and their symbols only
 SHA256SUMS.txt
@@ -173,7 +173,7 @@ terrain. Native weapon actions are excluded until their runtime path is verified
    level. From the pause menu, an already loaded matching level is adopted.
 
 The in-game UI follows KCD2's current `g_language` setting. Editable UTF-8
-translations are installed in `<game-root>\mods\KCD2MP\Lang\`; English is the
+translations are installed in `<game-root>\Mods\KCD2MP\Lang\`; English is the
 fallback when no file exists for the selected game language.
 
 The client waits for `NewGame`, `PreDataLoaded`, `DataLoaded`, the target
@@ -189,10 +189,10 @@ For manual deployment:
 1. Copy `d3d12_.dll` beside `KingdomCome.exe` and rename it to `d3d12.dll`.
 2. Copy KCSE's `dinput8.dll` beside `KingdomCome.exe`.
 3. Copy `KCD2MPKCSEClient.dll` to
-   `<game-root>\mods\KCD2MP\KCSE\Plugins\`.
+   `<game-root>\Mods\KCD2MP\KCSE\Plugins\`.
 4. Copy the matching Address Library table to
    `<game-root>\KCSE\addresslib\`.
-5. Copy `data\lang\*.lang` to `<game-root>\mods\KCD2MP\Lang\`.
+5. Copy `data\lang\*.lang` to `<game-root>\Mods\KCD2MP\Lang\`.
 
 The default Steam binary directory is:
 
@@ -201,7 +201,7 @@ KingdomComeDeliverance2\Bin\Win64MasterMasterSteamPGO
 ```
 
 To uninstall the runtime, remove or rename `d3d12.dll`, `dinput8.dll`, and
-`mods\KCD2MP\KCSE\Plugins\KCD2MPKCSEClient.dll`.
+`Mods\KCD2MP\KCSE\Plugins\KCD2MPKCSEClient.dll`.
 
 ## Diagnostics and testing
 

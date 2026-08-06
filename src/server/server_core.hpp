@@ -315,6 +315,14 @@ namespace kcd2mp::server
 		    m_world_objects;
 		std::unordered_map<std::string, protocol::WorldItemState> m_world_items;
 		item_ledger m_items;
+		struct npc_delivery_state
+		{
+			std::uint64_t inventory_revision{};
+			time_point inventory_sent_at{};
+		};
+		std::unordered_map<player_id,
+		    std::unordered_map<std::uint64_t, npc_delivery_state>>
+		    m_npc_delivery;
 		std::optional<connection_id> m_initializer;
 		std::uint64_t m_next_dummy_index{1};
 		bool m_human_npcs_disabled{};

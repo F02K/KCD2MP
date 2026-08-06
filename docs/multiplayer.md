@@ -1,6 +1,6 @@
 # Multiplayer architecture and prototype status
 
-This document describes KCD2MP **v0.0.9**. The implementation is an active
+This document describes KCD2MP **v0.1.0**. The implementation is an active
 prototype and is not intended for production servers or valuable saves.
 
 ## Versioning and compatibility
@@ -13,7 +13,7 @@ KCD2MP has one semantic project version shared by:
 - packaged artifacts; and
 - the multiplayer handshake.
 
-The current version is `0.0.9`. There is no separate public protocol or KCSE C
+The current version is `0.1.0`. There is no separate public protocol or KCSE C
 ABI version. The KCSE query boundary reads the same generated major, minor, and
 patch components as the rest of the project. During the prototype phase, all
 components must match exactly; a mismatch is rejected before authentication or
@@ -235,6 +235,14 @@ target; Aggro decays while the NPC is outside combat. Observers apply damage
 through `C_CombatSoul::DealDamage`, reconcile inventory through native
 `C_Inventory` operations, and establish a resolvable remote-player opponent
 through `C_CombatActor::SetOpponent`.
+
+The native hot path is tiered to protect frame time. Transform, health, and
+combat state remain on the 200 ms lease-update path. Full Entity/RTTI roster
+discovery runs at most once per second; observer NPCs are not sampled at all;
+and only the lease owner reads an NPC inventory, staggered at five-second
+intervals. Unchanged gameplay keeps its revision, inventory payloads are omitted
+from ordinary snapshots and refreshed periodically, and snapshot size accounting
+is linear instead of repeatedly serializing a growing envelope.
 
 Behavior replication is intentionally semantic: idle, travel, investigate,
 combat, flee, dialogue, and dead, with an optional locomotion target/speed.

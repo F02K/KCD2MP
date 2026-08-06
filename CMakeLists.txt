@@ -8,7 +8,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
 
-project(KCD2MP VERSION 0.0.9 LANGUAGES CXX C ASM ASM_MASM)
+project(KCD2MP VERSION 0.1.0 LANGUAGES CXX C ASM ASM_MASM)
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/multiplayer/version.hpp.in"
@@ -612,7 +612,7 @@ target_compile_definitions(KCD2MP PRIVATE
 )
 
 # Keep the raw CMake build output usable as a client artifact tree as well.
-# The runtime resolves translations below <game-root>/mods/KCD2MP/Lang, so the
+# The runtime resolves translations below <game-root>/Mods/KCD2MP/Lang, so the
 # same relative layout is emitted beside the other build artifacts. The custom
 # target intentionally runs on every KCD2MP build, allowing translation-only
 # edits to be picked up without relinking the DLL.
@@ -633,9 +633,9 @@ endif()
 
 add_custom_target(KCD2MPLanguageFiles
     COMMAND "${CMAKE_COMMAND}" -E remove_directory
-        "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
+        "$<TARGET_FILE_DIR:KCD2MP>/Mods/KCD2MP/Lang"
     COMMAND "${CMAKE_COMMAND}" -E make_directory
-        "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
+        "$<TARGET_FILE_DIR:KCD2MP>/Mods/KCD2MP/Lang"
     DEPENDS ${KCD2MP_LANGUAGE_FILES}
     COMMENT "Bundling KCD2MP language files"
     VERBATIM
@@ -644,7 +644,7 @@ foreach(KCD2MP_LANGUAGE_FILE IN LISTS KCD2MP_LANGUAGE_FILES)
     add_custom_command(TARGET KCD2MPLanguageFiles POST_BUILD
         COMMAND "${CMAKE_COMMAND}" -E copy_if_different
             "${KCD2MP_LANGUAGE_FILE}"
-            "$<TARGET_FILE_DIR:KCD2MP>/mods/KCD2MP/Lang"
+            "$<TARGET_FILE_DIR:KCD2MP>/Mods/KCD2MP/Lang"
     )
 endforeach()
 add_dependencies(KCD2MP KCD2MPLanguageFiles)

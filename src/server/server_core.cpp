@@ -2695,6 +2695,7 @@ namespace kcd2mp::server
 			    close);
 		}
 		m_players.erase(iterator);
+		m_npc_delivery.erase(id);
 		const auto positions = player_positions();
 		queue_npc_events(m_npcs.remove_player(id, positions, now));
 		if (dummy)
@@ -3160,27 +3161,50 @@ namespace kcd2mp::server
 	void server_core::queue_npc_snapshots()
 	{
 		constexpr std::size_t npc_snapshot_payload_budget = 56 * 1024;
+		constexpr auto inventory_refresh_interval = std::chrono::seconds(5);
+		const auto now = m_current_time == time_point{}
+		    ? std::chrono::steady_clock::now() : m_current_time;
 		for (const auto &[id, player] : m_players)
 		{
 			if (!player.connection || player.dummy)
 				continue;
 			auto states = m_npcs.states_for(id);
+			auto &deliveries = m_npc_delivery[id];
+			for (auto &state : states)
+			{
+				if (!state.has_gameplay()
+				    || !state.gameplay().has_inventory())
+					continue;
+				auto &delivery = deliveries[state.npc_id()];
+				const auto revision = state.gameplay().inventory().revision();
+				const bool include = delivery.inventory_revision != revision
+				    || delivery.inventory_sent_at == time_point{}
+				    || now - delivery.inventory_sent_at >= inventory_refresh_interval;
+				if (include)
+				{
+					delivery.inventory_revision = revision;
+					delivery.inventory_sent_at = now;
+				}
+				else
+					state.mutable_gameplay()->clear_inventory();
+			}
 			for (std::size_t offset{}; offset < states.size();)
 			{
 				protocol::Envelope envelope;
 				auto *snapshot = envelope.mutable_server_npc_snapshot();
 				snapshot->set_server_tick(m_server_tick);
 				std::size_t count{};
+				std::size_t payload_size = 32;
 				while (offset + count < states.size()
 				    && count < max_npcs_per_message)
 				{
-					*snapshot->add_npcs() = states[offset + count];
-					if (envelope.ByteSizeLong() > npc_snapshot_payload_budget
-					    && count != 0)
-					{
-						snapshot->mutable_npcs()->RemoveLast();
+					const auto state_size =
+					    states[offset + count].ByteSizeLong() + 16;
+					if (count != 0
+					    && payload_size + state_size > npc_snapshot_payload_budget)
 						break;
-					}
+					*snapshot->add_npcs() = states[offset + count];
+					payload_size += state_size;
 					++count;
 				}
 				if (count == 0)

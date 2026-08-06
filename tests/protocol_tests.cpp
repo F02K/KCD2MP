@@ -90,7 +90,7 @@ int main()
 	const auto decoded = decode(encoded->bytes, &error);
 	assert(decoded);
 	assert(decoded->client_hello().display_name() == "Henry");
-	assert(decoded->client_hello().version() == "0.0.9");
+	assert(decoded->client_hello().version() == "0.1.0");
 	auto incompatible = envelope;
 	incompatible.mutable_client_hello()->set_version("0.0.8");
 	assert(encode(incompatible, reliability::reliable, &error));
@@ -515,7 +515,7 @@ int main()
 	    valid_environment;
 	assert(!encode(environment_update, reliability::reliable, &error));
 
-	assert(kcd2mp_version == "0.0.9");
+	assert(kcd2mp_version == "0.1.0");
 	auto unknown_address_library = *runtime;
 	unknown_address_library.set_address_library_sha256(std::string(64, '0'));
 	assert(is_valid_address_library_identity(unknown_address_library));

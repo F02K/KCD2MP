@@ -12,6 +12,7 @@ import pathlib
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
@@ -55,6 +56,52 @@ ANIMAL_ENTITY_CLASSES = frozenset(
 
 class GameDataError(RuntimeError):
     """An actionable server-game-data generation failure."""
+
+
+def _bundled_tool(name: str) -> Optional[pathlib.Path]:
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    if bundle_root is None:
+        return None
+    candidate = pathlib.Path(bundle_root) / name
+    return candidate if candidate.is_file() else None
+
+
+def _detect_game_root() -> Optional[pathlib.Path]:
+    try:
+        from tools.build_tui.core import detect_game_root
+    except ImportError:
+        try:
+            from build_tui.core import detect_game_root
+        except ImportError:
+            return None
+    return detect_game_root()
+
+
+def _normalize_game_root(path: pathlib.Path) -> pathlib.Path:
+    candidate = path.expanduser().resolve()
+    executable_name = "KingdomCome.exe"
+    if candidate.is_file() or candidate.name.lower() == executable_name.lower():
+        candidate = candidate.parent
+    if (
+        candidate.name.lower() == GAME_BIN_RELATIVE.name.lower()
+        and (candidate / executable_name).is_file()
+    ):
+        return candidate.parents[1]
+    return candidate
+
+
+def _default_output() -> pathlib.Path:
+    if getattr(sys, "frozen", False):
+        return pathlib.Path(sys.executable).resolve().parent / "game_data"
+    return pathlib.Path.cwd() / "game_data"
+
+
+def _run_signature_audit(game_root: pathlib.Path, tool: pathlib.Path) -> None:
+    whgame = game_root / GAME_BIN_RELATIVE / "WHGame.dll"
+    try:
+        subprocess.run([str(tool), str(whgame)], check=True)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise GameDataError(f"WHGame.dll signature audit failed: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -231,7 +278,11 @@ def _catalog_level(level_id: str, level_name: str, pak: pathlib.Path) -> dict:
 
 def _mod_paks(game_root: pathlib.Path) -> tuple[pathlib.Path, ...]:
     mods = next(
-        (candidate for candidate in (game_root / "mods", game_root / "Mods") if candidate.is_dir()),
+        (
+            candidate
+            for candidate in (game_root / "Mods", game_root / "mods")
+            if candidate.is_dir()
+        ),
         None,
     )
     if mods is None:
@@ -379,18 +430,59 @@ def generate_server_game_data(
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--game-root", type=pathlib.Path, required=True)
-    parser.add_argument("--output", type=pathlib.Path, required=True)
+    parser.add_argument("--game-root", type=pathlib.Path)
+    parser.add_argument("--output", type=pathlib.Path)
     parser.add_argument("--property-catalog-tool", type=pathlib.Path)
+    parser.add_argument("--signature-audit-tool", type=pathlib.Path)
     options = parser.parse_args(argv)
+    interactive = not argv if argv is not None else len(sys.argv) == 1
     try:
+        game_root = options.game_root
+        if game_root is None:
+            game_root = _detect_game_root()
+        if game_root is None:
+            entered = input(
+                "KCD2 was not auto-detected. Enter the KingdomComeDeliverance2 folder: "
+            ).strip().strip('"')
+            if not entered:
+                raise GameDataError("no KCD2 installation directory was provided")
+            game_root = pathlib.Path(entered)
+        game_root = _normalize_game_root(game_root)
+
+        property_catalog_tool = (
+            options.property_catalog_tool
+            or _bundled_tool("KCD2MPPropertyCatalog.exe")
+        )
+        if property_catalog_tool is None:
+            raise GameDataError("KCD2MPPropertyCatalog.exe is not bundled or specified")
+        signature_audit_tool = (
+            options.signature_audit_tool
+            or _bundled_tool("KCD2MPSignatureAudit.exe")
+        )
+        if signature_audit_tool is not None:
+            print("Auditing the installed WHGame.dll...", flush=True)
+            _run_signature_audit(game_root, signature_audit_tool)
+
+        output_path = options.output or _default_output()
+        print(
+            f"Generating dedicated-server game data from {game_root}...",
+            flush=True,
+        )
         output = generate_server_game_data(
-            options.game_root, options.output, options.property_catalog_tool
+            game_root, output_path, property_catalog_tool
         )
     except GameDataError as exc:
-        parser.error(str(exc))
-    print(output)
-    return 0
+        print(f"ERROR: {exc}", file=sys.stderr)
+        result = 2
+    else:
+        print(f"Game data generated successfully: {output}")
+        result = 0
+    if interactive:
+        try:
+            input("Press Enter to close...")
+        except EOFError:
+            pass
+    return result
 
 
 if __name__ == "__main__":

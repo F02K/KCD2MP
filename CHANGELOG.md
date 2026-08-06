@@ -10,6 +10,24 @@ changes. Client and server versions must match exactly.
 
 - No unreleased changes documented yet.
 
+## [0.1.0] - 2026-08-06
+
+### Added
+
+- Added an install-ready dedicated-server ZIP with `start_server.bat` and a
+  standalone game-data generator for GitHub Release users.
+
+### Changed
+
+- Bumped the shared client, server, protocol, resource, and package version to
+  `0.1.0`.
+- Corrected packaged game-directory paths to use `Mods`.
+
+### Security
+
+- Excluded the locally sourced `game_data` directory and `WHGame.dll` from the
+  dedicated-server release ZIP while preserving local build-tool generation.
+
 ## [0.0.9] - 2026-08-03
 
 ### Added

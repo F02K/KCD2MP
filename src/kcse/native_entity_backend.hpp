@@ -7,6 +7,7 @@
 #include <Offsets/vtables/IEntitySystem.h>
 
 #include <cstdint>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <thread>
@@ -146,9 +147,15 @@ namespace kcd2mp::kcse
 			std::uint64_t gameplay_revision{};
 			std::uint64_t inventory_revision{};
 			std::uint64_t dialog_revision{};
+			std::chrono::steady_clock::time_point next_inventory_sample{};
 			entity_state original;
 			bool in_interest{};
 			bool local_authority{};
+		};
+		struct cached_npc
+		{
+			std::uint64_t guid{};
+			protocol::NpcKind kind{protocol::NPC_KIND_UNSPECIFIED};
 		};
 		struct human_npc_spawn_authorization
 		{
@@ -187,6 +194,8 @@ namespace kcd2mp::kcse
 		void *m_game_object_system{};
 		std::unordered_map<std::uint32_t, entity_state> m_isolated;
 		std::unordered_map<std::uint64_t, managed_npc> m_managed_npcs;
+		std::unordered_map<std::uint32_t, std::uint64_t> m_managed_npc_by_entity;
+		std::unordered_map<std::uint32_t, cached_npc> m_npc_roster;
 		std::unordered_set<std::uint32_t> m_player_entities;
 		std::unordered_map<std::uint64_t, std::uint32_t> m_player_entity_ids;
 		std::unordered_map<std::uint32_t, pending_entity> m_pending_control;
@@ -196,6 +205,7 @@ namespace kcd2mp::kcse
 		std::uint32_t m_local_player_entity_id{};
 		std::uint32_t m_isolation_maintenance_frame{};
 		std::uint64_t m_next_human_npc_spawn_token{};
+		std::chrono::steady_clock::time_point m_last_npc_roster_refresh{};
 		int m_last_actor_count{-1};
 		bool m_human_npcs_disabled{};
 		bool m_animal_npcs_disabled{};

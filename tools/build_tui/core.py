@@ -24,6 +24,7 @@ PROJECT_TARGET = "KCD2MPRuntime"
 SERVER_TARGET = "KCD2MPServer"
 AUDIT_TARGET = "KCD2MPSignatureAudit"
 PROPERTY_CATALOG_TARGET = "KCD2MPPropertyCatalog"
+GAME_DATA_GENERATOR_EXECUTABLE = "KCD2MPGameDataGenerator.exe"
 SERVER_GAME_DATA_DIRECTORY = "server_game_data"
 TEST_TARGETS = ("KCD2MPTests",)
 VCPKG_BASELINE = "908da3a305a0a8028d9602ab241b433652b3df69"
@@ -76,6 +77,7 @@ class PackageResult:
     server_root: Path
     tests_root: Path
     client_zip: Path
+    server_zip: Path
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class BuildResult:
     kcse_client_path: Optional[Path] = None
     kcse_client_pdb_path: Optional[Path] = None
     address_library_paths: Tuple[Path, ...] = ()
+    game_data_generator_path: Optional[Path] = None
     server_game_data_dir: Optional[Path] = None
     package: Optional[PackageResult] = None
 
@@ -554,9 +557,8 @@ class BuildService:
             PROJECT_TARGET,
             SERVER_TARGET,
             AUDIT_TARGET,
+            PROPERTY_CATALOG_TARGET,
         ]
-        if game_root is not None:
-            build_command.append(PROPERTY_CATALOG_TARGET)
         build_command.append("--parallel")
         self._run(build_command, log)
         self._run(
@@ -623,6 +625,24 @@ class BuildService:
                     "\n".join(missing)
                 )
             )
+        log("=== Building standalone dedicated-server game-data generator ===")
+        self._run(
+            [
+                sys.executable,
+                str(self.project_root / "tools" / "build_game_data_generator.py"),
+                "--property-catalog-tool",
+                str(artifact_dir / "{}.exe".format(PROPERTY_CATALOG_TARGET)),
+                "--signature-audit-tool",
+                str(result.audit_path),
+                "--output",
+                str(artifact_dir / GAME_DATA_GENERATOR_EXECUTABLE),
+            ],
+            log,
+        )
+        result = replace(
+            result,
+            game_data_generator_path=artifact_dir / GAME_DATA_GENERATOR_EXECUTABLE,
+        )
         if game_root is not None:
             normalized_game_root = normalize_game_root(game_root)
             whgame = self.audit(
@@ -1064,11 +1084,11 @@ def client_deployment_layout(
         (result.kcse_loader_pdb_path, game_bin / "dinput8.pdb"),
         (
             result.kcse_client_path,
-            Path("mods") / "KCD2MP" / "KCSE" / "Plugins" / "KCD2MPKCSEClient.dll",
+            Path("Mods") / "KCD2MP" / "KCSE" / "Plugins" / "KCD2MPKCSEClient.dll",
         ),
         (
             result.kcse_client_pdb_path,
-            Path("mods") / "KCD2MP" / "KCSE" / "Plugins" / "KCD2MPKCSEClient.pdb",
+            Path("Mods") / "KCD2MP" / "KCSE" / "Plugins" / "KCD2MPKCSEClient.pdb",
         ),
     )
     targets.extend(
@@ -1083,7 +1103,7 @@ def client_deployment_layout(
         )
         for path in result.address_library_paths
     )
-    language_root = result.dll_path.parent / "mods" / "KCD2MP" / "Lang"
+    language_root = result.dll_path.parent / "Mods" / "KCD2MP" / "Lang"
     language_files = tuple(sorted(language_root.glob("*.lang")))
     fallback_language = language_root / CLIENT_FALLBACK_LANGUAGE_FILE
     if fallback_language not in language_files:
@@ -1095,14 +1115,14 @@ def client_deployment_layout(
     targets.extend(
         (
             path,
-            Path("mods") / "KCD2MP" / "Lang" / path.name,
+            Path("Mods") / "KCD2MP" / "Lang" / path.name,
         )
         for path in language_files
     )
     language_readme = language_root / "README.md"
     if language_readme.is_file():
         targets.append(
-            (language_readme, Path("mods") / "KCD2MP" / "Lang" / "README.md")
+            (language_readme, Path("Mods") / "KCD2MP" / "Lang" / "README.md")
         )
     return tuple(targets)
 
@@ -1168,7 +1188,7 @@ def package_artifacts(
     project_root: Path = PROJECT_ROOT,
     output_root: Optional[Path] = None,
 ) -> PackageResult:
-    """Create separated client/server/test outputs and an install-ready client ZIP."""
+    """Create separated outputs plus install-ready client and server ZIPs."""
 
     project_root = project_root.resolve()
     package_root = (
@@ -1183,6 +1203,15 @@ def package_artifacts(
     _required_artifacts(client_layout, "package the client")
     if result.server_path is None or not result.server_path.is_file():
         raise BuildToolError("Cannot package the server: KCD2MPServer.exe is missing.")
+    if (
+        result.game_data_generator_path is None
+        or not result.game_data_generator_path.is_file()
+    ):
+        raise BuildToolError(
+            "Cannot package the server: {} is missing.".format(
+                GAME_DATA_GENERATOR_EXECUTABLE
+            )
+        )
 
     artifact_dir = result.dll_path.parent
     test_executables = tuple(sorted(artifact_dir.glob("KCD2MP*Tests.exe")))
@@ -1219,9 +1248,12 @@ def package_artifacts(
         server_sources = (
             result.server_path,
             result.server_path.with_suffix(".pdb"),
+            result.game_data_generator_path,
             project_root / "server.toml.example",
             project_root / "starter_profile.toml",
             archetype_source,
+            project_root / "data" / "server" / "start_server.bat",
+            project_root / "data" / "server" / "README.txt",
         )
         missing_server = [str(path) for path in server_sources if not path.is_file()]
         if missing_server:
@@ -1281,6 +1313,17 @@ def package_artifacts(
         client_zip = client_root / "KCD2MP-Client-v{}.zip".format(version)
         _write_deterministic_zip(game_root, client_zip)
 
+        server_bundle_name = "KCD2MP-Server-v{}".format(version)
+        server_bundle_root = staging / server_bundle_name
+        shutil.copytree(
+            server_root,
+            server_bundle_root,
+            ignore=shutil.ignore_patterns("game_data"),
+        )
+        server_zip = server_root / "{}.zip".format(server_bundle_name)
+        _write_deterministic_zip(server_bundle_root, server_zip)
+        shutil.rmtree(server_bundle_root)
+
         checksum_files = sorted(
             path
             for path in staging.rglob("*")
@@ -1307,6 +1350,9 @@ def package_artifacts(
         client_zip=package_root
         / "client"
         / "KCD2MP-Client-v{}.zip".format(read_project_version(project_root)),
+        server_zip=package_root
+        / "server"
+        / "KCD2MP-Server-v{}.zip".format(read_project_version(project_root)),
     )
 
 

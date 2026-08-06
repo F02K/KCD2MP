@@ -95,6 +95,14 @@ int main()
 	damaged->set_health(75.0F);
 	damaged->set_max_health(100.0F);
 	damaged->set_behavior(protocol::NPC_BEHAVIOR_COMBAT);
+	auto *inventory = damaged->mutable_inventory();
+	inventory->set_revision(99);
+	auto *item = inventory->add_items();
+	item->set_instance_id("11111111-1111-4111-8111-111111111111");
+	item->set_definition_id("22222222-2222-4222-8222-222222222222");
+	item->set_count(2);
+	item->set_quality(1.0F);
+	item->set_condition(1.0F);
 	assert(registry.update(2, damage, start + 150ms));
 	const auto after_damage = registry.states_for(1).front().gameplay();
 	assert(after_damage.health() == 75.0F);
@@ -104,6 +112,20 @@ int main()
 	assert(after_damage.aggro(0).value() == 25.0F);
 	assert(after_damage.last_combat_result().attacker_player_id() == 2);
 	assert(after_damage.last_combat_result().health_damage() == 25.0F);
+	assert(after_damage.inventory().revision() == 1);
+	assert(after_damage.inventory().items_size() == 1);
+	const auto gameplay_revision = after_damage.revision();
+
+	protocol::ClientNpcUpdate transform_only;
+	transform_only.set_npc_id(0x1234);
+	transform_only.set_generation(1);
+	transform_only.set_lease_id(first_states.front().lease_id());
+	*transform_only.mutable_transform() = transform(12.5F);
+	assert(registry.update(2, transform_only, start + 175ms));
+	const auto after_transform_only = registry.states_for(1).front().gameplay();
+	assert(after_transform_only.revision() == gameplay_revision);
+	assert(after_transform_only.inventory().revision() == 1);
+	assert(after_transform_only.inventory().items_size() == 1);
 
 	players[1].connected = false;
 	const auto handoff = registry.remove_player(2, players, start + 200ms);

@@ -76,6 +76,25 @@ namespace kcd2mp::server
 			b.set_revision(0);
 			return a.SerializeAsString() == b.SerializeAsString();
 		}
+
+		bool same_gameplay(
+		    const protocol::NpcGameplayState &left,
+		    const protocol::NpcGameplayState &right)
+		{
+			auto a = left;
+			auto b = right;
+			a.set_revision(0);
+			b.set_revision(0);
+			if (a.has_inventory())
+				a.mutable_inventory()->set_revision(0);
+			if (b.has_inventory())
+				b.mutable_inventory()->set_revision(0);
+			if (a.has_dialog())
+				a.mutable_dialog()->set_revision(0);
+			if (b.has_dialog())
+				b.mutable_dialog()->set_revision(0);
+			return a.SerializeAsString() == b.SerializeAsString();
+		}
 	}
 
 	npc_registry::npc_registry(
@@ -246,8 +265,10 @@ namespace kcd2mp::server
 			gameplay.mutable_inventory()->set_revision(changed
 			        ? (previous_gameplay.has_inventory()
 			              ? previous_gameplay.inventory().revision() + 1 : 1)
-			        : previous_gameplay.inventory().revision());
+		        : previous_gameplay.inventory().revision());
 		}
+		else if (previous_gameplay.has_inventory())
+			*gameplay.mutable_inventory() = previous_gameplay.inventory();
 		if (gameplay.has_dialog())
 		{
 			const auto changed = !previous_gameplay.has_dialog()
@@ -257,13 +278,16 @@ namespace kcd2mp::server
 			              ? previous_gameplay.dialog().revision() + 1 : 1)
 		        : previous_gameplay.dialog().revision());
 		}
-		else if (previous_gameplay.has_dialog())
+		else if (previous_gameplay.has_dialog()
+		    && previous_gameplay.dialog().active())
 		{
 			*gameplay.mutable_dialog() = previous_gameplay.dialog();
 			gameplay.mutable_dialog()->set_revision(
 			    previous_gameplay.dialog().revision() + 1);
 			gameplay.mutable_dialog()->set_active(false);
 		}
+		else if (previous_gameplay.has_dialog())
+			*gameplay.mutable_dialog() = previous_gameplay.dialog();
 		const auto previous_health = entry.state.gameplay().health();
 		if (gameplay.health() + 0.001F < previous_health)
 		{
@@ -311,7 +335,11 @@ namespace kcd2mp::server
 			if (gameplay.aggro().empty())
 				gameplay.set_combat_target_player_id(0);
 		}
-		gameplay.set_revision(entry.state.revision() + 1);
+		const bool gameplay_changed = !same_gameplay(
+		    gameplay, previous_gameplay);
+		gameplay.set_revision(gameplay_changed
+		        ? previous_gameplay.revision() + 1
+		        : previous_gameplay.revision());
 		*entry.state.mutable_gameplay() = std::move(gameplay);
 		entry.state.set_revision(entry.state.revision() + 1);
 		entry.last_update = now;

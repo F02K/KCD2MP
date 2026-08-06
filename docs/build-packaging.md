@@ -7,7 +7,7 @@ out/package/<profile>/
 ```
 
 The raw CMake configuration directory also contains the language files in the
-runtime-relative layout `mods/KCD2MP/Lang/`. This applies both to builds started
+runtime-relative layout `Mods/KCD2MP/Lang/`. This applies both to builds started
 through `build.bat` and direct `cmake --build` invocations of the `KCD2MP`
 target. Translation-only changes are copied again on the next build without
 requiring the client DLL to be relinked.
@@ -27,19 +27,22 @@ out/package/release/
 |   |   |   |-- d3d12.pdb
 |   |   |   |-- dinput8.dll
 |   |   |   `-- dinput8.pdb
-|   |   |-- mods/KCD2MP/KCSE/Plugins/
+|   |   |-- Mods/KCD2MP/KCSE/Plugins/
 |   |   |   |-- KCD2MPKCSEClient.dll
 |   |   |   `-- KCD2MPKCSEClient.pdb
-|   |   |-- mods/KCD2MP/Lang/
+|   |   |-- Mods/KCD2MP/Lang/
 |   |   |   |-- de.lang
 |   |   |   |-- en.lang
 |   |   |   `-- README.md
 |   |   `-- KCSE/addresslib/
 |   |       `-- kcd_addresslib_*.bin
-|   `-- KCD2MP-Client-v0.0.9.zip
+|   `-- KCD2MP-Client-v0.1.0.zip
 |-- server/
 |   |-- KCD2MPServer.exe
 |   |-- KCD2MPServer.pdb
+|   |-- KCD2MPGameDataGenerator.exe
+|   |-- start_server.bat
+|   |-- README.txt
 |   |-- server.toml.example
 |   |-- starter_profile.toml
 |   |-- npc_archetypes.json
@@ -51,9 +54,10 @@ out/package/release/
 |   |   |-- property_catalog_2.pb
 |   |   |-- property_catalog_3.pb
 |   |   `-- property_catalog_4.pb
-|   `-- tools/
-|       |-- KCD2MPSignatureAudit.exe
-|       `-- KCD2MPSignatureAudit.pdb
+|   |-- tools/
+|   |   |-- KCD2MPSignatureAudit.exe
+|   |   `-- KCD2MPSignatureAudit.pdb
+|   `-- KCD2MP-Server-v0.1.0.zip
 |-- tests/
 |   |-- KCD2MP*Tests.exe
 |   `-- KCD2MP*Tests.pdb
@@ -67,10 +71,13 @@ PAKs. The NPC world catalog gives authored humans and animals a stable
 `level_id:entity_guid` identity and records animal-spawner metadata. Property
 catalogs are generated for all three production levels.
 
-The DLL copy is deliberately server-only and is never added to the client ZIP.
+The DLL copy is deliberately server-only and is never added to either release
+ZIP.
 It comes from the builder's local installation, so locally produced packages
 containing it must not be redistributed unless the game publisher's terms
-permit that. CI builds without a game installation omit `game_data`.
+permit that. The loose local server tree still receives `game_data` exactly as
+before. The server ZIP always omits the entire directory, even when it exists in
+the local package tree.
 
 The loose client tree and ZIP are built from the same deployment mapping used
 by the build tool. Changing a deploy destination therefore changes package
@@ -94,6 +101,20 @@ identical input binaries, packaging produces identical archive bytes. The ZIP
 contains the same runtime files, symbols, plugin, and Address Library tables as
 the normal deploy operation.
 
+## Server ZIP
+
+`KCD2MP-Server-v<version>.zip` contains the dedicated server, symbols,
+configuration examples, `start_server.bat`, diagnostic tools, and the standalone
+`KCD2MPGameDataGenerator.exe`. It never contains `game_data`.
+
+Before the first server start, run the generator once on a Windows PC with KCD2
+installed. It auto-detects Steam or prompts for the game directory, audits the
+installed `WHGame.dll`, and writes `game_data` next to itself. Transfer that
+directory with the server files if the host is a different machine.
+
+`start_server.bat` creates `server.toml` from `server.toml.example` when needed
+and refuses to start with a clear setup message while `game_data` is missing.
+
 ## Standalone packaging
 
 Packaging can be repeated from an already completed CMake build without
@@ -116,8 +137,7 @@ The nightly workflow uploads the complete `client`, `server`, and `tests`
 directory tree as one Actions artifact. GitHub Releases receive:
 
 - the install-ready client ZIP;
-- the dedicated-server files;
-- the signature-audit tool; and
+- the install-ready dedicated-server ZIP; and
 - `SHA256SUMS.txt`.
 
 The test executables and all symbols remain available in the Actions artifact
