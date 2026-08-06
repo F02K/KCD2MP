@@ -41,3 +41,6 @@ menu.death.respawn=RESPAWN
 menu.death.respawn_pending=RESPAWN WIRD VORBEREITET
 menu.death.respawn_tooltip=Belebt dich am Spawnpunkt des Servers wieder
 menu.death.no_save=KEIN SPIELSTAND WIRD GELADEN
+chat.title=MEHRSPIELER-CHAT
+chat.help=Enter: senden   Esc: schließen
+chat.input_hint=Nachricht schreiben...

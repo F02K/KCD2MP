@@ -41,3 +41,6 @@ menu.death.respawn=RESPAWN
 menu.death.respawn_pending=PREPARING RESPAWN
 menu.death.respawn_tooltip=Revives you at the server spawn point
 menu.death.no_save=NO SAVEGAME WILL BE LOADED
+chat.title=MULTIPLAYER CHAT
+chat.help=Enter: send   Esc: close
+chat.input_hint=Write a message...

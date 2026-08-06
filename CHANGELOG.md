@@ -8,7 +8,45 @@ changes. Client and server versions must match exactly.
 
 ## [Unreleased]
 
-- No unreleased changes documented yet.
+No unreleased changes documented yet.
+
+## [0.1.1] - 2026-08-06
+
+### Added
+
+- Added a localized in-game multiplayer chat overlay with input capture and
+  fading recent-message history.
+
+### Changed
+
+- Bumped the shared client, server, protocol, resource, and package version to
+  `0.1.1`.
+- The generated NPC world catalog now seeds the server registry before client
+  discovery; lease owners still run native AI and report routines, health,
+  inventory, and dialogue state back to the server.
+- Runtime NPC discovery IDs are deduplicated across reporters, and clients
+  adopt an existing matching actor before attempting a managed spawn.
+
+### Fixed
+
+- Accepted native trading, quest/crafting, and authored-world item gains into
+  the ownership ledger without rejecting and deleting the live game item.
+- Made initial authored-world pickups atomic and broadcast their removal to
+  other clients.
+- Avoided full native inventory/equipment reconciliation when only server wire
+  metadata changed, and closed on destructive ledger conflicts without
+  mutating a live trading inventory.
+- Serialized MSVC program-database writes for parallel KCSE native-runtime
+  builds, preventing intermittent `C1041` build failures.
+- Prevented uncatalogued NPC discoveries from spawning duplicate actors inside
+  existing NPCs.
+- Excluded stable local/remote player Entities and managed actor names from NPC
+  discovery, including during temporary dialogue/cinematic Actor changes.
+
+### Known issues
+
+- NPC synchronization remains unreliable. A known identity/spawn bug can still
+  cause the same NPC to spawn multiple times.
 
 ## [0.1.0] - 2026-08-06
 

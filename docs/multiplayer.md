@@ -1,6 +1,6 @@
 # Multiplayer architecture and prototype status
 
-This document describes KCD2MP **v0.1.0**. The implementation is an active
+This document describes KCD2MP **v0.1.1**. The implementation is an active
 prototype and is not intended for production servers or valuable saves.
 
 ## Versioning and compatibility
@@ -13,7 +13,7 @@ KCD2MP has one semantic project version shared by:
 - packaged artifacts; and
 - the multiplayer handshake.
 
-The current version is `0.1.0`. There is no separate public protocol or KCSE C
+The current version is `0.1.1`. There is no separate public protocol or KCSE C
 ABI version. The KCSE query boundary reads the same generated major, minor, and
 patch components as the rest of the project. During the prototype phase, all
 components must match exactly; a mismatch is rejected before authentication or
@@ -214,18 +214,25 @@ class/name descriptor to peers. Observers create a local Actor when no authored
 Entity exists and bind that local Entity to the canonical ID; local runtime IDs
 still never cross the network.
 
-Clients report loaded authored NPCs to the server. The server maintains
-120-metre enter and 150-metre leave radii, sends reliable enter/leave and lease
-changes, and sends revisioned transforms in unreliable snapshots. At most one
+For production levels, the generated catalog seeds authored NPC identity,
+class, initial transform, and a conservative gameplay state on the server
+before clients connect. A client's first valid in-range observation updates the
+catalog transform to the NPC's current streamed schedule position. Custom and
+runtime actors continue through discovery. The server maintains 120-metre
+enter and 150-metre leave radii, sends reliable enter/leave and lease changes,
+and sends revisioned transforms in unreliable snapshots. At most one
 interested client receives a two-second simulation lease. Valid transform
 reports renew that lease; disconnects, interest changes, and expiry reassign it
 to the nearest interested player. Stale lease updates are ignored.
 
-The lease owner leaves the native NPC active so KCD2 can simulate it. Observers
-adopt the same authored Entity, deactivate its local simulation, and apply the
-server transform. An out-of-interest NPC is hidden and inactive, then reused
-when it re-enters interest. Disconnect and world teardown restore the Entity's
-original active/hidden state.
+The lease owner leaves the native NPC active so KCD2 can simulate its routines.
+Observers adopt the same authored Entity, deactivate its local simulation, and
+apply the server transform. Dynamic states also look up and adopt their local
+discovery GUID before a spawn is attempted; the server maps a discovery token
+globally so multiple reporters cannot create stacked identities. An
+out-of-interest NPC is hidden and inactive, then reused when it re-enters
+interest. Disconnect and world teardown restore the Entity's original
+active/hidden state.
 
 The lease owner also reports native health/death, combat mode, inventory, and
 dialog participation. The server canonicalizes gameplay, inventory, and dialog
@@ -304,6 +311,8 @@ The test suites cover:
 
 ## Known prototype limitations
 
+- NPC synchronization remains unreliable, and a known identity/spawn issue can
+  still cause the same NPC to spawn multiple times
 - NPC dialogue sync exposes session/phase state but does not yet replay exact
   dialogue branches or cinematic timing on every peer
 - No shared quests, schedules, crime, reputation, or story progression

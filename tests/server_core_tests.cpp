@@ -1016,6 +1016,100 @@ int main()
 		    != config.allowed_avatar_archetypes.end());
 	}
 
+	temporary_world authored_pickup_world;
+	{
+		server_core core(config_for(authored_pickup_world.path));
+		protocol::PlayerProfile profile;
+		(void)connect_new_player(core, 44, start, 1, &profile);
+		(void)connect_new_player(core, 46, start + 1ms, 2, nullptr, "Hans");
+
+		protocol::Envelope pickup;
+		auto *update = pickup.mutable_client_world_item_update();
+		update->set_base_revision(0);
+		auto *state = update->mutable_state();
+		state->set_instance_id(
+		    "bbbbbbbb-0000-4000-8000-000000000001");
+		state->set_revision(0);
+		state->set_present(false);
+		auto *item = state->mutable_item();
+		item->set_instance_id(state->instance_id());
+		item->set_definition_id(
+		    "bbbbbbbb-0000-4000-8000-000000000002");
+		item->set_count(1);
+		item->set_quality(1.0F);
+		item->set_condition(1.0F);
+		state->mutable_transform()->mutable_position();
+		state->mutable_transform()->mutable_rotation()->set_w(1.0F);
+		state->mutable_transform()->mutable_velocity();
+		core.on_message(44, pickup, start + 2ms);
+		const auto outbound = core.take_outbound();
+		const auto accepted = std::ranges::find_if(
+		    outbound,
+		    [](const outbound_message &message)
+		    {
+			    return message.connection == 44
+			        && message.envelope.has_world_item_accepted();
+		    });
+		assert(accepted != outbound.end());
+		assert(accepted->envelope.world_item_accepted().revision() == 1);
+		assert(accepted->envelope.world_item_accepted()
+		           .has_authoritative_profile());
+		assert(std::ranges::any_of(
+		    accepted->envelope.world_item_accepted()
+		        .authoritative_profile()
+		        .inventory(),
+		    [&](const protocol::InventoryItem &candidate)
+		    { return candidate.instance_id() == state->instance_id(); }));
+		assert(std::ranges::any_of(
+		    outbound,
+		    [&](const outbound_message &message)
+		    {
+			    return message.envelope.has_world_item_updated()
+			        && message.envelope.world_item_updated().state().instance_id()
+			            == state->instance_id()
+			        && !message.envelope.world_item_updated().state().present();
+		    }));
+	}
+
+	temporary_world native_acquisition_world;
+	{
+		server_core core(config_for(native_acquisition_world.path));
+		protocol::PlayerProfile profile;
+		(void)connect_new_player(core, 45, start, 1, &profile);
+
+		protocol::Envelope acquired;
+		auto *update = acquired.mutable_client_profile_update();
+		update->set_base_revision(profile.revision());
+		*update->mutable_profile() = profile;
+		auto *item = update->mutable_profile()->add_inventory();
+		item->set_instance_id(
+		    "aaaaaaaa-0000-4000-8000-000000000001");
+		item->set_definition_id(
+		    "aaaaaaaa-0000-4000-8000-000000000002");
+		item->set_count(1);
+		item->set_quality(1.0F);
+		item->set_condition(1.0F);
+		core.on_message(45, acquired, start + 1ms);
+		auto outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_accepted());
+		assert(outbound.front().envelope.profile_accepted().revision() == 2);
+
+		profile = update->profile();
+		profile.set_revision(2);
+		protocol::Envelope stack_growth;
+		auto *growth = stack_growth.mutable_client_profile_update();
+		growth->set_base_revision(profile.revision());
+		*growth->mutable_profile() = profile;
+		growth->mutable_profile()->mutable_inventory(
+		    growth->profile().inventory_size() - 1)->set_count(4);
+		core.on_message(45, stack_growth, start + 2ms);
+		outbound = core.take_outbound();
+		assert(outbound.size() == 1);
+		assert(outbound.front().envelope.has_profile_accepted());
+		assert(outbound.front().envelope.profile_accepted().revision() == 3);
+	}
+
 	temporary_world world_sync_world;
 	std::string world_identity_token;
 	{
@@ -1041,21 +1135,17 @@ int main()
 		    fabricated_item.mutable_client_profile_update();
 		fabricated_update->set_base_revision(first_profile.revision());
 		*fabricated_update->mutable_profile() = first_profile;
-		auto *fabricated = fabricated_update->mutable_profile()->add_inventory();
-		fabricated->set_instance_id(
-		    "aaaaaaaa-0000-4000-8000-000000000001");
-		fabricated->set_definition_id(
-		    "aaaaaaaa-0000-4000-8000-000000000002");
-		fabricated->set_count(1);
-		fabricated->set_quality(100.0F);
-		fabricated->set_condition(1.0F);
+		// A known UUID owned by another player remains protected even though
+		// native game-origin acquisitions are accepted below.
+		*fabricated_update->mutable_profile()->add_inventory() =
+		    second_profile.inventory(0);
 		core.on_message(50, fabricated_item, start + 7ms);
 		auto outbound = core.take_outbound();
 		assert(outbound.size() == 1);
 		assert(outbound.front().envelope.has_profile_rejected());
 		assert(
 		    outbound.front().envelope.profile_rejected().reason()
-		    == "item has no server-authoritative world or container source");
+		    == "item is already owned by another player");
 
 		protocol::Envelope observed_container;
 		auto *container_update =

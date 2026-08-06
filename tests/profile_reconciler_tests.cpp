@@ -209,6 +209,15 @@ int main()
 		    return operation.starts_with("equip:");
 	    }));
 
+	auto acknowledged = target;
+	acknowledged.set_revision(target.revision() + 1);
+	acknowledged.mutable_last_transform()->mutable_position()->set_x(999.0F);
+	acknowledged.set_transform_valid(true);
+	assert(same_native_profile_state(target, acknowledged));
+	acknowledged.mutable_inventory(0)->set_count(
+	    acknowledged.inventory(0).count() + 1);
+	assert(!same_native_profile_state(target, acknowledged));
+
 	auto equipped_target = target;
 	auto *equipped_item = equipped_target.add_inventory();
 	equipped_item->set_instance_id(

@@ -55,6 +55,12 @@ namespace kcd2mp::server
 			    || (kind == protocol::NPC_KIND_ANIMAL && animals_enabled);
 		}
 
+		bool reserved_managed_actor_name(std::string_view name)
+		{
+			return name.starts_with("KCD2MP_Remote_")
+			    || name.starts_with("KCD2MP_Dynamic_");
+		}
+
 		bool same_inventory(
 		    const protocol::NpcInventoryState &left,
 		    const protocol::NpcInventoryState &right)
@@ -122,7 +128,48 @@ namespace kcd2mp::server
 				    : kind_name == "animal" ? protocol::NPC_KIND_ANIMAL
 				                              : protocol::NPC_KIND_UNSPECIFIED;
 				if (guid && is_valid_npc_kind(kind))
+				{
 					m_catalog.insert_or_assign(*guid, kind);
+					const auto position = npc.find("position");
+					if (position == npc.end() || !position->is_array()
+					    || position->size() != 3)
+						continue;
+
+					entry created;
+					created.state.set_npc_id(*guid);
+					created.state.set_generation(1);
+					created.state.set_authored_guid(*guid);
+					created.state.set_kind(kind);
+					created.state.set_dynamic(false);
+					created.state.set_entity_class(
+					    npc.value("entity_class", std::string{}));
+					created.state.set_entity_name(
+					    npc.value("name", std::string{}));
+					auto *transform = created.state.mutable_transform();
+					transform->mutable_position()->set_x((*position)[0].get<float>());
+					transform->mutable_position()->set_y((*position)[1].get<float>());
+					transform->mutable_position()->set_z((*position)[2].get<float>());
+					auto *rotation = transform->mutable_rotation();
+					rotation->set_w(1.0F);
+					if (const auto value = npc.find("rotation");
+					    value != npc.end() && value->is_array()
+					    && value->size() == 4)
+					{
+						rotation->set_x((*value)[0].get<float>());
+						rotation->set_y((*value)[1].get<float>());
+						rotation->set_z((*value)[2].get<float>());
+						rotation->set_w((*value)[3].get<float>());
+						(void)normalize_rotation(rotation);
+					}
+					transform->mutable_velocity();
+					auto *gameplay = created.state.mutable_gameplay();
+					gameplay->set_revision(1);
+					gameplay->set_health(100.0F);
+					gameplay->set_max_health(100.0F);
+					gameplay->set_behavior(protocol::NPC_BEHAVIOR_IDLE);
+					created.state.set_revision(1);
+					m_entries.emplace(*guid, std::move(created));
+				}
 			}
 			m_catalog_required = true;
 			break;
@@ -139,6 +186,13 @@ namespace kcd2mp::server
 	{
 		for (const auto &observation : message.observations())
 		{
+			// Managed remote players and server-created dynamic NPCs must always
+			// arrive with a known canonical id. Rejecting them at discovery also
+			// prevents an older/misclassifying client from recursively spawning
+			// player or NPC puppets as fresh dynamic actors.
+			if (observation.dynamic()
+			    && reserved_managed_actor_name(observation.entity_name()))
+				continue;
 			const auto catalog_entry = m_catalog.find(
 			    observation.authored_guid());
 			const bool catalog_conflict = m_catalog_required
@@ -162,7 +216,7 @@ namespace kcd2mp::server
 				continue;
 			if (npc_id == 0 && runtime_dynamic)
 			{
-				const dynamic_key key{reporter, observation.authored_guid()};
+				const auto key = observation.authored_guid();
 				const auto mapped = m_dynamic_ids.find(key);
 				if (mapped != m_dynamic_ids.end())
 					npc_id = mapped->second;
@@ -185,6 +239,22 @@ namespace kcd2mp::server
 				// first positively classified observation.
 				if (found->second.state.kind() != observation.kind())
 					continue;
+				// Catalog entries are created server-side before clients arrive.
+				// Their first trustworthy in-range observation replaces the static
+				// authored transform with the currently streamed schedule position.
+				if (!found->second.observed
+				    && found->second.state.authority_player_id() == 0)
+				{
+					*found->second.state.mutable_transform() =
+					    observation.transform();
+					if (observation.has_gameplay())
+						*found->second.state.mutable_gameplay() =
+						    observation.gameplay();
+					found->second.state.set_revision(
+					    found->second.state.revision() + 1);
+					found->second.last_update = now;
+					found->second.observed = true;
+				}
 				continue;
 			}
 
@@ -213,6 +283,7 @@ namespace kcd2mp::server
 			(void)normalize_rotation(created.state.mutable_transform()->mutable_rotation());
 			created.state.set_revision(1);
 			created.last_update = now;
+			created.observed = true;
 			m_entries.emplace(npc_id, std::move(created));
 		}
 	}

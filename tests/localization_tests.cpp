@@ -27,10 +27,14 @@ int main()
 	           "menu.status.connected_server",
 	           {{"server", "Kuttenberg"}})
 	    == "VERBUNDEN: Kuttenberg");
+	assert(catalog.text("chat.title") == "MEHRSPIELER-CHAT");
+	assert(catalog.text("chat.help").find("schlie\xC3\x9F" "en")
+	    != std::string::npos);
 
 	assert(catalog.load(directory, "french", error));
 	assert(catalog.language() == "fr");
 	assert(catalog.text("menu.action.connect") == "CONNECT TO SERVER");
+	assert(catalog.text("chat.input_hint") == "Write a message...");
 	assert(catalog.text("missing.key") == "[[missing.key]]");
 	return 0;
 }

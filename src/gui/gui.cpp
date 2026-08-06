@@ -1,5 +1,6 @@
 #include "gui.hpp"
 
+#include "gui/ingame_chat.hpp"
 #include "gui/native_multiplayer_menu.hpp"
 #include "gui/renderer.hpp"
 #include "hooks/hooking.hpp"
@@ -1478,6 +1479,8 @@ namespace big
 
 	void gui::dx_on_tick()
 	{
+		ingame_chat::render(m_is_open);
+
 		std::scoped_lock l(lua_manager_extension::g_manager_mutex);
 
 		if (!g_lua_manager)
@@ -2247,6 +2250,9 @@ namespace big
 		    msg,
 		    wparam,
 		    lparam);
+		ingame_chat::on_window_message(
+		    msg,
+		    static_cast<std::uintptr_t>(wparam));
 
 		if (msg == WM_RBUTTONUP)
 		{

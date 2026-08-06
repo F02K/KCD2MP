@@ -182,6 +182,46 @@ namespace kcd2mp
 			    && left.quality() == right.quality()
 			    && left.condition() == right.condition();
 		}
+
+		bool inventory_correction_is_destructive(
+		    const protocol::PlayerProfile &observed,
+		    const protocol::PlayerProfile &authoritative)
+		{
+			for (const auto &item : observed.inventory())
+			{
+				const auto match = std::ranges::find_if(
+				    authoritative.inventory(),
+				    [&](const protocol::InventoryItem &candidate)
+				    { return candidate.instance_id() == item.instance_id(); });
+				if (match == authoritative.inventory().end()
+				    || match->definition_id() != item.definition_id()
+				    || match->count() != item.count()
+				    || match->quality() != item.quality()
+				    || match->condition() != item.condition()
+				    || match->has_equipped_slot() != item.has_equipped_slot()
+				    || (item.has_equipped_slot()
+				        && match->equipped_slot() != item.equipped_slot()))
+					return true;
+			}
+			if (observed.quick_access_slots_size()
+			    != authoritative.quick_access_slots_size())
+				return true;
+			for (const auto &slot : observed.quick_access_slots())
+			{
+				const auto match = std::ranges::find_if(
+				    authoritative.quick_access_slots(),
+				    [&](const protocol::QuickAccessSlot &candidate)
+				    {
+					    return candidate.outfit() == slot.outfit()
+					        && candidate.type() == slot.type()
+					        && candidate.slot() == slot.slot();
+				    });
+				if (match == authoritative.quick_access_slots().end()
+				    || match->instance_id() != slot.instance_id())
+					return true;
+			}
+			return false;
+		}
 	}
 
 	multiplayer_client::multiplayer_client(client_runtime &runtime) :
@@ -2263,6 +2303,20 @@ namespace kcd2mp
 			}
 			const auto authoritative =
 			    envelope.profile_rejected().authoritative_profile();
+			const auto destructive = inventory_correction_is_destructive(
+			    *m_pending_profile, authoritative);
+			if (destructive)
+			{
+				m_pending_profile.reset();
+				m_profile_update_pending = false;
+				m_status.error =
+				    "server rejected an inventory change; session closed without "
+				    "mutating the live native inventory: "
+				    + envelope.profile_rejected().reason();
+				(void)transition_state_locked(client_state::closing, m_status.error);
+				queue_network(disconnect_command{});
+				return;
+			}
 			lock.unlock();
 			const bool applied =
 			    m_runtime.apply_authoritative_profile(authoritative);

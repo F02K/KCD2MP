@@ -210,8 +210,9 @@ namespace kcd2mp::kcse
 		}
 		for (const auto *item : manager->m_worldInventory.m_registeredItems)
 		{
-			if (item)
-				m_initial_world_items.insert(wh::FormatGuid(item->m_instanceGuid));
+			if (auto state = capture(item))
+				m_initial_world_items.insert_or_assign(
+				    state->instance_id(), std::move(*state));
 		}
 		m_active = true;
 		error.clear();
@@ -234,8 +235,15 @@ namespace kcd2mp::kcse
 		for (auto iterator = m_initial_world_items.begin();
 		     iterator != m_initial_world_items.end();)
 		{
-			if (find_item(*inventory, *iterator))
+			if (find_item(*inventory, iterator->first))
+			{
+				auto removed = iterator->second;
+				removed.set_revision(0);
+				removed.set_present(false);
+				m_managed.insert_or_assign(iterator->first, removed);
+				m_updates.push_back(std::move(removed));
 				iterator = m_initial_world_items.erase(iterator);
+			}
 			else
 				++iterator;
 		}
@@ -306,7 +314,7 @@ namespace kcd2mp::kcse
 	}
 
 	std::optional<protocol::WorldItemState> native_world_item_sync::capture(
-	    wh::entitymodule::C_Item *item) const
+	    const wh::entitymodule::C_Item *item) const
 	{
 		if (!item || !item->m_pClassData || !item->m_pLinkedEntity
 		    || item->m_amount <= 0)

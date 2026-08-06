@@ -7,7 +7,6 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
 
 namespace wh::entitymodule
@@ -30,12 +29,13 @@ namespace kcd2mp::kcse
 
 	private:
 		[[nodiscard]] std::optional<protocol::WorldItemState> capture(
-		    wh::entitymodule::C_Item *item) const;
+		    const wh::entitymodule::C_Item *item) const;
 
 		bool m_active{};
 		bool m_applying{};
 		std::uint32_t m_poll_frame{};
-		std::unordered_set<std::string> m_initial_world_items;
+		std::unordered_map<std::string, protocol::WorldItemState>
+		    m_initial_world_items;
 		std::unordered_map<std::string, protocol::WorldItemState> m_managed;
 		std::unordered_map<std::string, protocol::WorldItemState> m_deferred;
 		std::deque<protocol::WorldItemState> m_updates;

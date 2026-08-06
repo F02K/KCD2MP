@@ -1123,6 +1123,7 @@ namespace kcd2mp::kcse
 		if (entity_id != 0)
 		{
 			m_player_entities.insert(entity_id);
+			m_npc_roster.erase(entity_id);
 			if (player_id != 0)
 				m_player_entity_ids.insert_or_assign(player_id, entity_id);
 			m_pending_control.erase(entity_id);
@@ -1268,9 +1269,12 @@ namespace kcd2mp::kcse
 			if (m_isolation_active)
 				maintain_isolated_entities(*system);
 		}
+		// NPC discovery runs even when server entity isolation is disabled, so
+		// keep the stable local-player exclusion current in every multiplayer
+		// mode rather than only in the isolation path.
+		refresh_local_player_exclusion(*system);
 		if (!m_isolation_active || managed_human_spawn_active())
 			return;
-		refresh_local_player_exclusion(*system);
 		refresh_actor_roster(*system);
 		if (m_pending_control.empty())
 			return;
@@ -1337,6 +1341,11 @@ namespace kcd2mp::kcse
 			return false;
 		}
 		ensure_sink_registered(*system);
+		if (const auto local = player(); local.entity)
+		{
+			m_local_player_entity_id = local.entity->GetId();
+			m_npc_roster.erase(m_local_player_entity_id);
+		}
 		m_world_sync.reset();
 		if (!m_world_item_sync.begin(error))
 			return false;
@@ -1416,6 +1425,9 @@ namespace kcd2mp::kcse
 		result.reserve(m_npc_roster.size());
 		for (const auto &[entity_id, cached] : m_npc_roster)
 		{
+			if (entity_id == m_local_player_entity_id
+			    || m_player_entities.contains(entity_id))
+				continue;
 			auto *entity = system->GetEntity(entity_id);
 			if (!entity || guarded_entity_guid(entity) != cached.guid)
 				continue;
@@ -1502,7 +1514,10 @@ namespace kcd2mp::kcse
 		if (const auto managed = m_managed_npcs.find(state.npc_id());
 		    managed != m_managed_npcs.end())
 			entity_id = managed->second.entity_id;
-		if (entity_id == 0 && !state.dynamic())
+		// A dynamic discovery describes an actor which already existed on the
+		// reporting client. Always adopt a matching local GUID first; spawning
+		// immediately for dynamic states created an NPC inside that actor.
+		if (entity_id == 0)
 			entity_id = guarded_find_entity_by_guid(system, state.authored_guid());
 		auto *entity = system->GetEntity(entity_id);
 		if (!entity && state.dynamic())
@@ -1538,10 +1553,19 @@ namespace kcd2mp::kcse
 			entity_id = entity ? entity->GetId() : 0;
 		}
 		const auto kind = classify_npc_actor(entity);
-		if (!entity || (!state.dynamic() && (!kind || *kind != state.kind())))
+		if (!entity || !kind || *kind != state.kind())
 		{
 			// Authored NPCs stream independently on each client. A valid state may
 			// arrive before its local entity; the next snapshot adopts it once loaded.
+			error.clear();
+			return true;
+		}
+		if (const auto bound = m_managed_npc_by_entity.find(entity_id);
+		    bound != m_managed_npc_by_entity.end()
+		    && bound->second != state.npc_id())
+		{
+			// Never bind or spawn a second server identity over an actor already
+			// managed by another canonical NPC state.
 			error.clear();
 			return true;
 		}
@@ -1789,7 +1813,15 @@ namespace kcd2mp::kcse
 		const auto current_id = entity->GetId();
 		if (current_id == 0)
 			return;
+		auto *context = wh::game::S_GameContext::GetInstance();
+		auto *actor = context ? context->GetActorById(current_id) : nullptr;
+		// Dialogue/cinematic systems may temporarily expose another client-side
+		// Actor. Only a positively identified player may replace the stable local
+		// exclusion captured during sandbox setup.
+		if (guarded_actor_is_player(actor) != actor_type_match::yes)
+			return;
 		m_local_player_entity_id = current_id;
+		m_npc_roster.erase(current_id);
 		m_pending_control.erase(current_id);
 		if (const auto isolated = m_isolated.find(current_id);
 		    isolated != m_isolated.end())
@@ -1964,6 +1996,9 @@ namespace kcd2mp::kcse
 		if (!entity)
 			return std::nullopt;
 		const auto entity_id = entity->GetId();
+		if (entity_id == 0 || entity_id == m_local_player_entity_id
+		    || m_player_entities.contains(entity_id))
+			return std::nullopt;
 		auto *context = wh::game::S_GameContext::GetInstance();
 		auto *actor = context ? context->GetActorById(entity_id) : nullptr;
 		if (!actor)

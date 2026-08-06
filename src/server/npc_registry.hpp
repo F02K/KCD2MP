@@ -73,21 +73,7 @@ namespace kcd2mp::server
 			protocol::NpcState state;
 			npc_time_point lease_expires{};
 			npc_time_point last_update{};
-		};
-		struct dynamic_key
-		{
-			player_id reporter{};
-			std::uint64_t token{};
-			bool operator==(const dynamic_key &) const = default;
-		};
-		struct dynamic_key_hash
-		{
-			std::size_t operator()(const dynamic_key &value) const noexcept
-			{
-				return std::hash<std::uint64_t>{}(
-				    value.token ^ (value.reporter + 0x9e3779b97f4a7c15ULL
-				        + (value.token << 6U) + (value.token >> 2U)));
-			}
+			bool observed{};
 		};
 
 		[[nodiscard]] bool catalog_allows(
@@ -104,8 +90,10 @@ namespace kcd2mp::server
 		std::unordered_map<player_id, std::unordered_set<std::uint64_t>>
 		    m_interest;
 		std::unordered_map<std::uint64_t, protocol::NpcKind> m_catalog;
-		std::unordered_map<dynamic_key, std::uint64_t, dynamic_key_hash>
-		    m_dynamic_ids;
+		// A runtime GUID is the discovery token. Mapping it globally prevents
+		// two clients observing the same uncatalogued actor from creating two
+		// server NPCs at the same position.
+		std::unordered_map<std::uint64_t, std::uint64_t> m_dynamic_ids;
 		std::uint64_t m_next_lease_id{};
 		std::uint64_t m_next_dynamic_id{0x8000000000000000ULL};
 		bool m_catalog_required{};

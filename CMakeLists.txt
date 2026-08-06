@@ -8,7 +8,7 @@ set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
 set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG Release)
 
-project(KCD2MP VERSION 0.1.0 LANGUAGES CXX C ASM ASM_MASM)
+project(KCD2MP VERSION 0.1.1 LANGUAGES CXX C ASM ASM_MASM)
 
 configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/src/multiplayer/version.hpp.in"
@@ -531,9 +531,11 @@ if(KCD2MP_BUILD_KCSE)
     )
     # CryEngine's legacy SDK headers still rely on MSVC's delayed template
     # lookup. Keep the runtime on C++23 while retaining that source-compatible
-    # lookup mode; this does not alter generated ABI.
+    # lookup mode; this does not alter generated ABI. /FS serializes access to
+    # the target PDB when MSBuild launches several compiler processes in
+    # parallel.
     target_compile_options(KCD2MPKCSENativeRuntime PRIVATE
-        /utf-8 /W4 /wd4100 /wd4819 /permissive
+        /utf-8 /W4 /wd4100 /wd4819 /permissive /FS
     )
     target_link_libraries(KCD2MPKCSENativeRuntime PRIVATE
         kcd_re

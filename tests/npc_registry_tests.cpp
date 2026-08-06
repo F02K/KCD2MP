@@ -160,7 +160,7 @@ int main()
 	    / "kcd2mp-npc-registry-catalog.json";
 	{
 		std::ofstream catalog(catalog_path, std::ios::binary | std::ios::trunc);
-		catalog << R"({"levels":[{"level_id":"2","npcs":[{"entity_guid":"12345678-9abc-def0","kind":"human"}]}]})";
+		catalog << R"({"levels":[{"level_id":"2","npcs":[{"entity_guid":"12345678-9abc-def0","kind":"human","entity_class":"NPC","name":"catalogued","position":[0.0,0.0,0.0],"rotation":[0.0,0.0,0.0,1.0]}]}]})";
 	}
 	npc_registry catalogued("2", catalog_path);
 	protocol::ClientNpcDiscovery catalog_discovery;
@@ -171,7 +171,7 @@ int main()
 	set_gameplay(*catalog_human, 100.0F);
 	catalogued.observe(
 	    1, catalog_discovery, &first_position, true, true, start + 500ms);
-	assert(catalogued.size() == 0); // reporter is too far from the observation
+	assert(catalogued.size() == 1); // server catalog is populated before discovery
 	first_position = transform(0.0F);
 	catalogued.observe(
 	    1, catalog_discovery, &first_position, true, true, start + 600ms);
@@ -195,11 +195,33 @@ int main()
 	dynamic->set_kind(protocol::NPC_KIND_HUMAN);
 	dynamic->set_dynamic(true);
 	dynamic->set_entity_class("NPC");
-	dynamic->set_entity_name("KCD2MP_Dynamic_test");
+	dynamic->set_entity_name("runtime_bandit");
 	*dynamic->mutable_transform() = transform(5.0F);
 	set_gameplay(*dynamic, 80.0F);
 	catalogued.observe(
 	    1, dynamic_discovery, &first_position, true, true, start + 700ms);
+	assert(catalogued.size() == 2);
+	// A second reporter observing the same uncatalogued runtime GUID must
+	// resolve to the existing canonical dynamic NPC, not create a duplicate.
+	catalogued.observe(
+	    2, dynamic_discovery, &first_position, true, true, start + 701ms);
+	assert(catalogued.size() == 2);
+	protocol::ClientNpcDiscovery recursive_managed_discovery;
+	auto *recursive = recursive_managed_discovery.add_observations();
+	recursive->set_authored_guid(0xCAFE);
+	recursive->set_kind(protocol::NPC_KIND_HUMAN);
+	recursive->set_dynamic(true);
+	recursive->set_entity_class("NPC");
+	recursive->set_entity_name("KCD2MP_Remote_1_2_3");
+	*recursive->mutable_transform() = transform(5.0F);
+	set_gameplay(*recursive, 100.0F);
+	catalogued.observe(
+	    1,
+	    recursive_managed_discovery,
+	    &first_position,
+	    true,
+	    true,
+	    start + 702ms);
 	assert(catalogued.size() == 2);
 	std::vector<npc_registry::player_position> dynamic_players{
 	    {1, &first_position, true}};

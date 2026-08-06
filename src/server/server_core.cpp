@@ -75,6 +75,10 @@ namespace kcd2mp::server
 	    m_environment_weather_transition_ms(
 	        m_config.weather_transition_seconds * 1000U)
 	{
+		if (m_human_npcs_disabled)
+			(void)m_npcs.disable_kind(protocol::NPC_KIND_HUMAN);
+		if (m_animal_npcs_disabled)
+			(void)m_npcs.disable_kind(protocol::NPC_KIND_ANIMAL);
 		const auto catalog_needs_markers = std::ranges::none_of(
 		    m_store.property_catalog().properties(),
 		    [](const protocol::PropertyDefinition &definition)
@@ -1545,12 +1549,10 @@ namespace kcd2mp::server
 				if (moved == source.count())
 					merged_away.insert(source.instance_id());
 			}
-			if (remaining != 0)
-			{
-				reject_profile(
-				    "item stack growth has no matching merge source");
-				return;
-			}
+			// KCD2 can grow a stack through native systems that have no network
+			// transaction of their own (shops, quest rewards, crafting and
+			// authored world loot). Known merge sources are consumed above; any
+			// remainder is accepted as game-origin stack growth below.
 		}
 
 		for (const auto &created : accepted.inventory())
@@ -1601,14 +1603,6 @@ namespace kcd2mp::server
 			const auto current = current_items.find(item.instance_id());
 			if (current != current_items.end())
 			{
-				const auto *staged = staged_items.find(item.instance_id());
-				if (item.count() > current->second->count()
-				    && (!staged || staged->item.count() != item.count()))
-				{
-					reject_profile(
-					    "item stack growth requires an authoritative transfer");
-					return;
-				}
 				if (!staged_items.replace_item(
 				        item, player_location, item_error))
 				{
@@ -1621,9 +1615,17 @@ namespace kcd2mp::server
 			const auto *source = staged_items.find(item.instance_id());
 			if (!source)
 			{
-				reject_profile(
-				    "item has no server-authoritative world or container source");
-				return;
+				// The native game is authoritative for acquisitions which do not
+				// expose a multiplayer transaction (trading, rewards and initial
+				// authored pickups). Register the first observation atomically. A
+				// UUID already owned elsewhere still takes the conflict path below.
+				if (!staged_items.register_item(
+				        item, player_location, item_error))
+				{
+					reject_profile(item_error);
+					return;
+				}
+				continue;
 			}
 			if (source->location.kind == item_location_kind::player
 			    && !split_created.contains(item.instance_id()))
@@ -2193,8 +2195,28 @@ namespace kcd2mp::server
 		}
 		else if (found == m_world_items.end())
 		{
-			reject_requested("cannot remove an unknown world item");
-			return;
+			// The client's initial world scan deliberately does not upload every
+			// authored item. Its first disappearance into the player's inventory
+			// is therefore the atomic registration + pickup transaction.
+			const auto *existing = staged_items.find(instance);
+			if (!existing)
+			{
+				if (!staged_items.register_item(
+				        accepted.item(), player_location, item_error))
+				{
+					reject_requested(item_error);
+					return;
+				}
+				*updated_profile.add_inventory() = accepted.item();
+				profile_changed = true;
+			}
+			else if (existing->location != player_location
+			    || !item_ledger::same_stack(existing->item, accepted.item()))
+			{
+				reject_requested(
+				    "authored world pickup conflicts with registered ownership");
+				return;
+			}
 		}
 
 		if (profile_changed)

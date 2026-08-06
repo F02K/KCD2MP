@@ -91,10 +91,10 @@ int main()
 	    archetypes,
 	    diagnostic_logging};
 	assert(compatible(&valid));
-	static_assert(kcd2mp::kcd2mp_version == "0.1.0");
+	static_assert(kcd2mp::kcd2mp_version == "0.1.1");
 	static_assert(kcd2mp::kcd2mp_version_major == 0);
 	static_assert(kcd2mp::kcd2mp_version_minor == 1);
-	static_assert(kcd2mp::kcd2mp_version_patch == 0);
+	static_assert(kcd2mp::kcd2mp_version_patch == 1);
 
 	auto wrong_version = valid;
 	++wrong_version.version_patch;

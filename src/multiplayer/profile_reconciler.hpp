@@ -276,6 +276,30 @@ namespace kcd2mp
 		}
 	}
 
+	// Server acknowledgements advance wire metadata even when the native game
+	// state already matches. Comparing that metadata as part of a live
+	// correction used to force a full inventory/equipment transaction after
+	// every pickup. Keep native state comparison separate from wire identity and
+	// the continuously sampled transform.
+	[[nodiscard]] inline bool same_native_profile_state(
+	    protocol::PlayerProfile left,
+	    protocol::PlayerProfile right)
+	{
+		const auto normalize = [](protocol::PlayerProfile &profile)
+		{
+			profile.set_player_id(0);
+			profile.clear_persistent_id();
+			profile.set_revision(0);
+			profile.clear_display_name();
+			profile.clear_level_id();
+			profile.set_transform_valid(false);
+			profile.clear_last_transform();
+		};
+		normalize(left);
+		normalize(right);
+		return detail::same_profile(left, right);
+	}
+
 	[[nodiscard]] inline profile_apply_result reconcile_profile(
 	    profile_backend &backend,
 	    const protocol::PlayerProfile &target)

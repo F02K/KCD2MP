@@ -36,7 +36,7 @@ out/package/release/
 |   |   |   `-- README.md
 |   |   `-- KCSE/addresslib/
 |   |       `-- kcd_addresslib_*.bin
-|   `-- KCD2MP-Client-v0.1.0.zip
+|   `-- KCD2MP-Client-v0.1.1.zip
 |-- server/
 |   |-- KCD2MPServer.exe
 |   |-- KCD2MPServer.pdb
@@ -57,7 +57,7 @@ out/package/release/
 |   |-- tools/
 |   |   |-- KCD2MPSignatureAudit.exe
 |   |   `-- KCD2MPSignatureAudit.pdb
-|   `-- KCD2MP-Server-v0.1.0.zip
+|   `-- KCD2MP-Server-v0.1.1.zip
 |-- tests/
 |   |-- KCD2MP*Tests.exe
 |   `-- KCD2MP*Tests.pdb

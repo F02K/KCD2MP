@@ -3,7 +3,7 @@
 Experimental multiplayer for Kingdom Come: Deliverance II.
 
 > [!WARNING]
-> KCD2MP **v0.1.0 is a prototype**, not a production-ready multiplayer mod.
+> KCD2MP **v0.1.1 is a prototype**, not a production-ready multiplayer mod.
 > Expect breaking changes, incomplete world simulation, compatibility limits,
 > and loss of multiplayer-world data while development continues. Use test
 > saves and keep backups of anything important.
@@ -12,7 +12,7 @@ Experimental multiplayer for Kingdom Come: Deliverance II.
 
 | | |
 | --- | --- |
-| Current version | **0.1.0** |
+| Current version | **0.1.1** |
 | Development stage | Prototype / technical preview |
 | Networking | Direct IP, dedicated authoritative server |
 | Platform | Windows x64 |
@@ -24,7 +24,11 @@ network handshake. During the prototype phase, clients and servers must run the
 exact same KCD2MP version. There is no separate user-facing "protocol version".
 See [CHANGELOG.md](CHANGELOG.md) for version history.
 
-## What works in v0.1.0
+> [!CAUTION]
+> NPC synchronization is still unreliable. A known bug can cause the same NPC
+> to spawn multiple times, so NPC sync is not yet suitable for normal play.
+
+## What works in v0.1.1
 
 - Direct-IP client/server connection with authentication and reconnect support
 - Persistent server sessions and player profiles
@@ -106,7 +110,7 @@ Every successful build also creates a clean package tree under
 `out/package/<debug|release>/`:
 
 ```text
-client/   install-ready game tree and KCD2MP-Client-v0.1.0.zip
+client/   install-ready game tree and KCD2MP-Client-v0.1.1.zip
 server/   dedicated server, configuration, data, symbols, and audit tool
 tests/    test executables and their symbols only
 SHA256SUMS.txt

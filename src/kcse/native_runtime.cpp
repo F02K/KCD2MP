@@ -1845,6 +1845,16 @@ namespace kcd2mp::kcse
 	{
 		if (!is_valid_profile(profile))
 			return false;
+		std::string capture_error;
+		if (const auto current = m_profiles.capture(capture_error);
+		    current && same_native_profile_state(*current, profile))
+		{
+			// Only the server revision/identity or sampled transform changed. The
+			// inventory is already correct, so touching live trading/equipment
+			// objects would add risk without changing native state.
+			m_profiles.set_wire_identity(profile);
+			return true;
+		}
 		const auto applied = reconcile_profile(m_profiles, profile);
 		if (!applied.success)
 		{
