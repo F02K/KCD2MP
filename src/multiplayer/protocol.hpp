@@ -29,6 +29,7 @@ namespace kcd2mp
 	constexpr std::size_t min_display_name_codepoints = 3;
 	constexpr std::size_t max_chat_codepoints = 256;
 	constexpr std::size_t max_avatar_equipment_items = 32;
+	constexpr std::size_t max_animation_fragment_bytes = 96;
 	constexpr std::size_t max_avatar_archetypes = 32;
 	constexpr std::size_t profile_stat_count = 10;
 	constexpr std::size_t profile_skill_count = 35;

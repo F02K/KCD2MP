@@ -37,6 +37,30 @@ namespace kcd2mp
 			        });
 		}
 
+		bool is_non_combat_animation_fragment(std::string_view value)
+		{
+			if (value.empty() || value.size() > max_animation_fragment_bytes)
+				return false;
+			std::string lower(value);
+			std::ranges::transform(
+			    lower,
+			    lower.begin(),
+			    [](unsigned char character)
+			    {
+				    return static_cast<char>(std::tolower(character));
+			    });
+			constexpr std::string_view excluded[] = {
+			    "combat", "attack", "strike", "parry", "block", "hit",
+			    "death", "finisher", "motion", "locomotion", "idle",
+			    "walk", "run", "sprint"};
+			return std::ranges::none_of(
+			    excluded,
+			    [&](std::string_view token)
+			    {
+				    return lower.contains(token);
+			    });
+		}
+
 		bool valid_player_snapshot(
 		    const protocol::PlayerSnapshot &player,
 		    bool require_avatar)
@@ -1065,10 +1089,53 @@ namespace kcd2mp
 		const auto &position = transform.position();
 		const auto &rotation = transform.rotation();
 		const auto &velocity = transform.velocity();
-		return finite(position.x()) && finite(position.y()) && finite(position.z())
+		const bool base_finite = finite(position.x()) && finite(position.y()) && finite(position.z())
 		    && finite(rotation.x()) && finite(rotation.y()) && finite(rotation.z())
 		    && finite(rotation.w()) && finite(velocity.x()) && finite(velocity.y())
 		    && finite(velocity.z());
+		if (!base_finite)
+			return false;
+
+		if (transform.has_locomotion())
+		{
+			const auto &state = transform.locomotion();
+			if (!state.has_local_velocity() || !state.has_acceleration()
+			    || !state.has_facing_direction())
+				return false;
+			auto finite_vec = [](const protocol::Vec3 &value)
+			{
+				return finite(value.x()) && finite(value.y()) && finite(value.z());
+			};
+			if (!finite_vec(state.local_velocity())
+			    || !finite_vec(state.acceleration())
+			    || !finite_vec(state.facing_direction())
+			    || !finite(state.speed()) || state.speed() < 0.0F
+			    || state.speed() > 100.0F
+			    || !finite(state.yaw_rate())
+			    || std::abs(state.yaw_rate()) > 100.0F)
+				return false;
+		}
+
+		if (transform.has_animation())
+		{
+			const auto &animation = transform.animation();
+			if (animation.sequence() == 0
+			    || animation.fragment().size() > max_animation_fragment_bytes
+			    || (animation.active()
+			        && !is_non_combat_animation_fragment(animation.fragment()))
+			    || (!animation.active() && !animation.fragment().empty())
+			    || !std::ranges::all_of(
+			        animation.fragment(),
+			        [](unsigned char character)
+			        {
+				        return std::isalnum(character) != 0
+				            || character == '_' || character == '-'
+				            || character == '/' || character == '.'
+				            || character == ':';
+			        }))
+				return false;
+		}
+		return true;
 	}
 
 	bool normalize_rotation(protocol::Quaternion *rotation)
@@ -1111,6 +1178,8 @@ namespace kcd2mp
 		{
 			return protocol::MOVEMENT_MODE_WALK;
 		}
-		return protocol::MOVEMENT_MODE_RUN;
+		if (horizontal_speed < 4.3F)
+			return protocol::MOVEMENT_MODE_RUN;
+		return protocol::MOVEMENT_MODE_SPRINT;
 	}
 }

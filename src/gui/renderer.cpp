@@ -3,6 +3,7 @@
 #include "file_manager/file_manager.hpp"
 #include "fonts/fonts.hpp"
 #include "gui.hpp"
+#include "gui/ingame_chat.hpp"
 #include "hooks/hooking.hpp"
 
 #include <backends/imgui_impl_dx12.h>
@@ -292,9 +293,22 @@ namespace big
 	}
 
 	static std::recursive_mutex g_imgui_draw_data_mutex;
+	enum class imgui_frame_source
+	{
+		none,
+		engine,
+		chat
+	};
+	static imgui_frame_source g_imgui_frame_source = imgui_frame_source::none;
 
 	void render_imgui_frame()
 	{
+		// The chat owns its own presentation-rate ImGui frame while it is open.
+		// Do not let the engine update consume queued text input in a second frame.
+		if (ingame_chat::blocks_game_input())
+		{
+			return;
+		}
 		if (ImGui::GetCurrentContext() && m_command_queue && gMainRenderTargetResource[0])
 		{
 			if (!g_imgui_draw_data_mutex.try_lock())
@@ -315,6 +329,7 @@ namespace big
 			}
 
 			ImGui::Render();
+			g_imgui_frame_source = imgui_frame_source::engine;
 
 			g_imgui_draw_data_mutex.unlock();
 		}
@@ -963,28 +978,41 @@ namespace big
 		if (ImGui::GetCurrentContext() && m_command_queue && gMainRenderTargetResource[0])
 		{
 			static ImDrawDataSnapshot snapshot;
-			auto draw_data_to_render = ImGui::GetDrawData();
-
-			bool locked_mutex = false;
-			if (draw_data_to_render)
+			ImDrawData* chat_draw_data = nullptr;
+			const bool locked_mutex = g_imgui_draw_data_mutex.try_lock();
+			if (locked_mutex)
 			{
-				if (g_imgui_draw_data_mutex.try_lock())
+				// Engine UI may still be produced from CScriptSystem::Update because
+				// those callbacks touch Lua/native state. Preserve that draw data, then
+				// build only the self-contained chat at presentation cadence.
+				if (g_imgui_frame_source == imgui_frame_source::engine)
 				{
-					//return;
-
-					locked_mutex = true;
-
-					snapshot.SnapUsingSwap(draw_data_to_render, ImGui::GetTime());
-					draw_data_to_render = &snapshot.DrawData;
+					if (auto* engine_draw_data = ImGui::GetDrawData(); engine_draw_data && engine_draw_data->Valid)
+					{
+						snapshot.SnapUsingSwap(engine_draw_data, ImGui::GetTime());
+					}
+					g_imgui_frame_source = imgui_frame_source::none;
 				}
-				else
+
+				if (g_gui && g_gui->is_open())
 				{
-					draw_data_to_render = &snapshot.DrawData;
+					// Opening the main GUI must also release a chat input capture before
+					// the next engine-driven UI frame is allowed to run.
+					if (ingame_chat::blocks_game_input())
+					{
+						ingame_chat::render(true);
+					}
 				}
-			}
-			else
-			{
-				draw_data_to_render = &snapshot.DrawData;
+				else if (g_gui)
+				{
+					ImGui_ImplDX12_NewFrame();
+					ImGui_ImplWin32_NewFrame();
+					ImGui::NewFrame();
+					ingame_chat::render(false);
+					ImGui::Render();
+					chat_draw_data = ImGui::GetDrawData();
+					g_imgui_frame_source = imgui_frame_source::chat;
+				}
 			}
 
 			UINT backBufferIdx                       = pSwapChain->GetCurrentBackBufferIndex();
@@ -1003,7 +1031,14 @@ namespace big
 
 			gPd3DCommandList->OMSetRenderTargets(1, &gMainRenderTargetDescriptor[backBufferIdx], FALSE, nullptr);
 			gPd3DCommandList->SetDescriptorHeaps(1, &gPd3DSrvDescHeap);
-			ImGui_ImplDX12_RenderDrawData(draw_data_to_render, gPd3DCommandList);
+			if (snapshot.DrawData.Valid)
+			{
+				ImGui_ImplDX12_RenderDrawData(&snapshot.DrawData, gPd3DCommandList);
+			}
+			if (chat_draw_data && chat_draw_data->Valid)
+			{
+				ImGui_ImplDX12_RenderDrawData(chat_draw_data, gPd3DCommandList);
+			}
 			barrier.Transition.StateAfter  = D3D12_RESOURCE_STATE_PRESENT;
 			barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_RENDER_TARGET;
 			gPd3DCommandList->ResourceBarrier(1, &barrier);

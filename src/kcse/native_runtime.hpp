@@ -161,7 +161,11 @@ namespace kcd2mp::kcse
 		std::uint64_t m_capabilities{};
 		std::string m_level_id;
 		std::optional<protocol::TransformState> m_local_transform;
+		std::chrono::steady_clock::time_point m_local_transform_sampled_at{};
 		std::uint64_t m_transform_sequence{};
+		std::string m_local_animation_fragment;
+		std::uint64_t m_animation_sequence{};
+		std::uint64_t m_animation_started_at_ms{};
 		std::string m_diagnostic;
 		bool m_transition_safe{};
 		std::string m_transition_blocker;

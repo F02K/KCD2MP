@@ -104,14 +104,13 @@ int main()
 	for (const auto state : states)
 	{
 		assert(!is_server_message_allowed(state, payload::kClientHello));
-		assert(!is_server_message_allowed(
-		    state,
-		    payload::kClientProfileUpdate));
+		assert(!is_server_message_allowed(state, payload::kClientProfileUpdate));
 	}
 	assert(!server_message_requires_game_thread(payload::kServerChallenge));
 	assert(!server_message_requires_game_thread(payload::kServerRejected));
 	assert(!server_message_requires_game_thread(payload::kServerShutdown));
 	assert(!server_message_requires_game_thread(payload::kPong));
+	assert(!server_message_requires_game_thread(payload::kChatBroadcast));
 	assert(server_message_requires_game_thread(payload::kServerBootstrap));
 	assert(server_message_requires_game_thread(payload::kWorldSnapshot));
 	return 0;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "kcse/native_entity_backend.hpp"
+#include "kcse/native_remote_avatar_equipment.hpp"
 #include "kcse/remote_avatar_readiness.hpp"
 #include "multiplayer/remote_avatar.hpp"
 
@@ -77,8 +78,12 @@ namespace kcd2mp::kcse
 			protocol::MovementMode last_movement_mode{
 			    protocol::MOVEMENT_MODE_IDLE};
 			protocol::Vec3 last_motion_velocity;
+			protocol::LocomotionState last_locomotion;
 			std::chrono::steady_clock::time_point
 			    last_motion_request_at{};
+			std::chrono::steady_clock::time_point
+			    last_native_transform_at{};
+			std::uint64_t last_animation_sequence{};
 			std::chrono::steady_clock::time_point
 			    last_native_validation_at{};
 			bool first_transform_logged{};
@@ -87,7 +92,7 @@ namespace kcd2mp::kcse
 			bool failed{};
 			std::string failure;
 			protocol::AvatarDescriptor appearance;
-			std::vector<std::string> item_instances;
+			std::vector<native_remote_equipment_instance> item_instances;
 			bool activity_active{};
 			protocol::PlayerActivityKind activity_kind{
 			    protocol::PLAYER_ACTIVITY_KIND_NONE};
@@ -110,6 +115,9 @@ namespace kcd2mp::kcse
 		    entry &avatar,
 		    const remote_avatar_snapshot &player,
 		    std::string &error);
+		void apply_animation(
+		    entry &avatar,
+		    const remote_avatar_snapshot &player);
 		[[nodiscard]] bool apply_display_name(
 		    entry &avatar,
 		    const remote_avatar_snapshot &player,
@@ -135,6 +143,7 @@ namespace kcd2mp::kcse
 		remote_avatar_handle m_next_handle{1};
 		bool m_native_locomotion_enabled{true};
 		bool m_native_weapon_actions_enabled{true};
+		bool m_native_animation_actions_enabled{true};
 		mutable bool m_catalogs_ready{};
 		mutable std::string m_diagnostic;
 	};

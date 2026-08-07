@@ -7,6 +7,7 @@
 #include "multiplayer/client_state.hpp"
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -262,7 +263,9 @@ namespace kcd2mp
 		std::string m_server_id;
 		identity_store m_identities;
 		std::unordered_map<player_id, remote_player> m_remote_players;
+		mutable std::mutex m_chat_mutex;
 		std::deque<chat_entry> m_chat;
+		std::atomic_bool m_chat_connected{};
 		std::optional<protocol::TransformState> m_local_correction;
 		std::optional<protocol::PlayerProfile> m_profile;
 		std::optional<protocol::PlayerProfile> m_pending_profile;
@@ -305,10 +308,11 @@ namespace kcd2mp
 		game_command_queue m_game_commands;
 		std::jthread m_network_thread;
 		std::chrono::steady_clock::time_point m_last_transform_sent{};
+		std::optional<protocol::TransformState> m_last_sent_transform;
 		std::chrono::steady_clock::time_point m_last_profile_sent{};
 		std::chrono::steady_clock::time_point m_last_avatar_sent{};
 		std::chrono::steady_clock::time_point m_last_avatar_sampled{};
 		std::chrono::steady_clock::time_point m_last_npc_sampled{};
 		std::chrono::steady_clock::time_point m_last_npc_discovery_sent{};
 	};
-}
+} // namespace kcd2mp

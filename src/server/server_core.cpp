@@ -3100,8 +3100,22 @@ namespace kcd2mp::server
 	    reliability delivery,
 	    close_kind close)
 	{
-		m_outbound.push_back(
-		    {connection, std::move(envelope), delivery, close});
+		outbound_message outgoing{
+		    connection, std::move(envelope), delivery, close};
+		if (outgoing.envelope.has_chat_broadcast())
+		{
+			const auto first_sync = std::ranges::find_if(
+			    m_outbound,
+			    [](const outbound_message &queued)
+			    {
+				    return !queued.envelope.has_chat_broadcast();
+			    });
+			m_outbound.insert(first_sync, std::move(outgoing));
+		}
+		else
+		{
+			m_outbound.push_back(std::move(outgoing));
+		}
 	}
 
 	void server_core::queue_snapshot(time_point now)

@@ -101,6 +101,19 @@ namespace kcd2mp::kcse
 			    > velocity_epsilon_squared;
 		}
 
+		bool locomotion_changed(
+		    const protocol::LocomotionState &left,
+		    const protocol::LocomotionState &right)
+		{
+			return std::abs(left.speed() - right.speed()) > 0.05F
+			    || std::abs(left.yaw_rate() - right.yaw_rate()) > 0.05F
+			    || left.strafing() != right.strafing()
+			    || velocity_changed(
+			        left.local_velocity(), right.local_velocity())
+			    || velocity_changed(
+			        left.facing_direction(), right.facing_direction());
+		}
+
 		Quat native_rotation(const protocol::Quaternion &rotation)
 		{
 			return Quat(
@@ -139,13 +152,12 @@ namespace kcd2mp::kcse
 
 		locomotion_request_result guarded_request_locomotion(
 		    wh::entitymodule::C_Actor &actor,
-		    const Vec3 *move_target,
-		    float speed) noexcept
+		    const SMultiplayerLocomotionRequest &request) noexcept
 		{
 #ifdef _WIN32
 			__try
 			{
-				return actor.RequestLocomotion(move_target, speed)
+				return actor.RequestLocomotion(request)
 				    ? locomotion_request_result::applied
 				    : locomotion_request_result::rejected;
 			}
@@ -155,7 +167,7 @@ namespace kcd2mp::kcse
 				return locomotion_request_result::faulted;
 			}
 #else
-			return actor.RequestLocomotion(move_target, speed)
+			return actor.RequestLocomotion(request)
 			    ? locomotion_request_result::applied
 			    : locomotion_request_result::rejected;
 #endif
@@ -213,6 +225,87 @@ namespace kcd2mp::kcse
 				return false;
 			}
 #endif
+		}
+
+		std::string lua_string(std::string_view value)
+		{
+			std::string result{"\""};
+			result.reserve(value.size() + 2);
+			for (const char character : value)
+			{
+				if (character == '\\' || character == '\"')
+					result.push_back('\\');
+				result.push_back(character);
+			}
+			result.push_back('\"');
+			return result;
+		}
+
+		protocol::TransformState smooth_transform_target(
+		    Offsets::IEntity &entity,
+		    const protocol::TransformState &target,
+		    float seconds,
+		    bool &needs_write)
+		{
+			auto result = target;
+			const auto *matrix = entity.GetWorldTMPtr();
+			if (!matrix)
+			{
+				needs_write = true;
+				return result;
+			}
+			const protocol::Vec3 current_position = [&]
+			{
+				protocol::Vec3 value;
+				value.set_x(matrix->m03);
+				value.set_y(matrix->m13);
+				value.set_z(matrix->m23);
+				return value;
+			}();
+			const auto dx = target.position().x() - current_position.x();
+			const auto dy = target.position().y() - current_position.y();
+			const auto dz = target.position().z() - current_position.z();
+			const auto error = std::sqrt(dx * dx + dy * dy + dz * dz);
+			if (error > 5.0F)
+			{
+				needs_write = true;
+				return result;
+			}
+
+			needs_write = true;
+			const auto factor = std::clamp(
+			    1.0F - std::exp(-14.0F * std::clamp(seconds, 0.0F, 0.1F)),
+			    0.08F,
+			    0.7F);
+			auto *position = result.mutable_position();
+			if (error < 0.025F)
+				*position = current_position;
+			else
+			{
+				position->set_x(current_position.x() + dx * factor);
+				position->set_y(current_position.y() + dy * factor);
+				position->set_z(current_position.z() + dz * factor);
+			}
+
+			const Quat current(*matrix);
+			const auto &desired = target.rotation();
+			auto dot = current.v.x * desired.x()
+			    + current.v.y * desired.y()
+			    + current.v.z * desired.z()
+			    + current.w * desired.w();
+			if (error < 0.025F && std::abs(dot) > 0.99995F)
+			{
+				needs_write = false;
+				return result;
+			}
+			const auto sign = dot < 0.0F ? -1.0F : 1.0F;
+			auto *rotation = result.mutable_rotation();
+			rotation->set_x(current.v.x + (desired.x() * sign - current.v.x) * factor);
+			rotation->set_y(current.v.y + (desired.y() * sign - current.v.y) * factor);
+			rotation->set_z(current.v.z + (desired.z() * sign - current.v.z) * factor);
+			rotation->set_w(current.w + (desired.w() * sign - current.w) * factor);
+			(void)normalize_rotation(rotation);
+			return result;
 		}
 
 		bool remote_semantics_api_ready() noexcept
@@ -492,7 +585,7 @@ namespace kcd2mp::kcse
 			return active_probe_result::failed;
 		}
 		auto *item = find_inventory_item(
-		    *inventory, value->item_instances.front());
+		    *inventory, value->item_instances.front().instance_id);
 		if (!item || (item->m_flags & native_item_equipped) == 0)
 		{
 			error = "active native probe item was not equipped";
@@ -1118,7 +1211,9 @@ namespace kcd2mp::kcse
 		    || movement_stopped
 		    || position_or_rotation_changed(
 		        value->last_transform,
-		        player.transform));
+		        player.transform)
+		    || now - value->last_native_transform_at
+		        >= std::chrono::milliseconds(16));
 		bool transform_succeeded = true;
 		if (transform_changed)
 		{
@@ -1126,11 +1221,30 @@ namespace kcd2mp::kcse
 			auto *entity = resolve_entity(value->entity_id);
 			if (!entity)
 				error = "native remote entity disappeared";
+			auto corrected = player.transform;
+			bool needs_write = true;
+			if (entity && value->transform_applied)
+			{
+				const auto seconds = value->last_native_transform_at
+			        == std::chrono::steady_clock::time_point{}
+				    ? 1.0F / 60.0F
+				    : std::chrono::duration<float>(
+				          transform_started - value->last_native_transform_at)
+				          .count();
+				corrected = smooth_transform_target(
+				    *entity,
+				    player.transform,
+				    seconds,
+				    needs_write);
+			}
 			transform_succeeded = entity
-			    && m_entities.write_transform(
-			        entity,
-			        player.transform,
-			        error);
+			    && (!needs_write
+			        || m_entities.write_transform(
+			            entity,
+			            corrected,
+			            error));
+			if (transform_succeeded)
+				value->last_native_transform_at = transform_started;
 			transform_time =
 			    std::chrono::steady_clock::now() - transform_started;
 		}
@@ -1141,6 +1255,8 @@ namespace kcd2mp::kcse
 			motion_succeeded = drive_motion(*value, player, error);
 			motion_time = std::chrono::steady_clock::now() - motion_started;
 		}
+		if (transform_succeeded && value->presented)
+			apply_animation(*value, player);
 		if (!transform_succeeded || !motion_succeeded)
 		{
 			value->failed = true;
@@ -1650,7 +1766,11 @@ namespace kcd2mp::kcse
 		const auto &velocity = player.transform.velocity();
 		const bool motion_changed = !avatar.motion_applied
 		    || avatar.last_movement_mode != player.movement_mode
-		    || velocity_changed(avatar.last_motion_velocity, velocity);
+		    || velocity_changed(avatar.last_motion_velocity, velocity)
+		    || (player.transform.has_locomotion()
+		        && locomotion_changed(
+		            avatar.last_locomotion,
+		            player.transform.locomotion()));
 		const bool keepalive_due = avatar.motion_applied
 		    && player.movement_mode != protocol::MOVEMENT_MODE_IDLE
 		    && now - avatar.last_motion_request_at
@@ -1689,19 +1809,25 @@ namespace kcd2mp::kcse
 			return true;
 		}
 		float speed{};
-		switch (player.movement_mode)
+		if (player.transform.has_locomotion())
+			speed = player.transform.locomotion().speed();
+		else switch (player.movement_mode)
 		{
 		case protocol::MOVEMENT_MODE_WALK:
 			speed = 1.5F;
 			break;
 		case protocol::MOVEMENT_MODE_RUN:
-			speed = 4.5F;
+			speed = 3.8F;
+			break;
+		case protocol::MOVEMENT_MODE_SPRINT:
+			speed = 5.0F;
 			break;
 		case protocol::MOVEMENT_MODE_IDLE:
 		default:
 			break;
 		}
 		std::optional<Vec3> move_target;
+		std::optional<Vec3> facing_direction;
 		if (speed > 0.0F)
 		{
 			Vec3 direction(velocity.x(), velocity.y(), velocity.z());
@@ -1716,14 +1842,25 @@ namespace kcd2mp::kcse
 			}
 			move_target =
 			    native_position(player.transform.position())
-			    + direction * 2.0F;
+			    + direction * std::clamp(speed * 0.4F, 1.2F, 2.5F);
+		}
+		if (player.transform.has_locomotion()
+		    && player.transform.locomotion().has_facing_direction())
+		{
+			facing_direction = native_position(
+			    player.transform.locomotion().facing_direction());
 		}
 		if (m_native_locomotion_enabled)
 		{
+			const SMultiplayerLocomotionRequest request{
+			    move_target ? &*move_target : nullptr,
+			    facing_direction ? &*facing_direction : nullptr,
+			    speed,
+			    player.transform.has_locomotion()
+			        && player.transform.locomotion().strafing()};
 			const auto result = guarded_request_locomotion(
 			    *actor,
-			    move_target ? &*move_target : nullptr,
-			    speed);
+			    request);
 			if (result != locomotion_request_result::applied)
 			{
 				// RequestMovement is an optional presentation enhancement. Some
@@ -1747,7 +1884,58 @@ namespace kcd2mp::kcse
 		avatar.motion_applied = true;
 		avatar.last_movement_mode = player.movement_mode;
 		avatar.last_motion_velocity = velocity;
+		if (player.transform.has_locomotion())
+			avatar.last_locomotion = player.transform.locomotion();
 		avatar.last_motion_request_at = now;
 		return true;
+	}
+
+	void native_remote_avatar_backend::apply_animation(
+	    entry &avatar,
+	    const remote_avatar_snapshot &player)
+	{
+		if (!m_native_animation_actions_enabled
+		    || !player.transform.has_animation())
+			return;
+		const auto &animation = player.transform.animation();
+		if (animation.sequence() <= avatar.last_animation_sequence)
+			return;
+		avatar.last_animation_sequence = animation.sequence();
+		if (avatar.activity_active)
+			return;
+
+		const auto script = animation.active()
+		    ? std::format(
+		          "local e=System.GetEntity({}) if e and e.human "
+		          "and e.human.PlayAnim then e.human:PlayAnim({},'') end",
+		          avatar.entity_id,
+		          lua_string(animation.fragment()))
+		    : std::format(
+		          "local e=System.GetEntity({}) if e and e.human "
+		          "and e.human.StopAnim then e.human:StopAnim() end",
+		          avatar.entity_id);
+		if (!execute_remote_script(script))
+		{
+			m_native_animation_actions_enabled = false;
+			KCD2MP_JOIN_TRACE(
+			    "join.remote-animation.mannequin-disabled",
+			    std::format(
+			        "player_id={} entity_id={} sequence={} fragment=\"{}\"",
+			        avatar.player,
+			        avatar.entity_id,
+			        animation.sequence(),
+			        animation.fragment()));
+			return;
+		}
+		KCD2MP_JOIN_TRACE(
+		    "join.remote-animation.mannequin-applied",
+		    std::format(
+		        "player_id={} entity_id={} sequence={} active={} fragment=\"{}\" api=C_ScriptBindHuman::{}",
+		        avatar.player,
+		        avatar.entity_id,
+		        animation.sequence(),
+		        animation.active(),
+		        animation.fragment(),
+		        animation.active() ? "PlayAnim" : "StopAnim"));
 	}
 }

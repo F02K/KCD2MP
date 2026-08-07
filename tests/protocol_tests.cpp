@@ -113,7 +113,24 @@ int main()
 	value.mutable_velocity()->set_x(2.0F);
 	assert(movement_mode_for(value) == protocol::MOVEMENT_MODE_WALK);
 	value.mutable_velocity()->set_x(5.0F);
+	assert(movement_mode_for(value) == protocol::MOVEMENT_MODE_SPRINT);
+	value.mutable_velocity()->set_x(3.5F);
 	assert(movement_mode_for(value) == protocol::MOVEMENT_MODE_RUN);
+	auto *locomotion = value.mutable_locomotion();
+	locomotion->mutable_local_velocity();
+	locomotion->mutable_acceleration();
+	locomotion->mutable_facing_direction()->set_y(1.0F);
+	locomotion->set_speed(3.5F);
+	auto *animation = value.mutable_animation();
+	animation->set_sequence(1);
+	animation->set_fragment("Jump");
+	animation->set_active(true);
+	assert(is_finite_transform(value));
+	animation->set_fragment("Jump'); os.execute('bad");
+	assert(!is_finite_transform(value));
+	animation->set_fragment("CombatAttack");
+	assert(!is_finite_transform(value));
+	animation->set_fragment("Jump");
 	value.mutable_position()->set_x(std::numeric_limits<float>::infinity());
 	assert(!is_finite_transform(value));
 

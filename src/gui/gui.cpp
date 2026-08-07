@@ -1479,8 +1479,6 @@ namespace big
 
 	void gui::dx_on_tick()
 	{
-		ingame_chat::render(m_is_open);
-
 		std::scoped_lock l(lua_manager_extension::g_manager_mutex);
 
 		if (!g_lua_manager)

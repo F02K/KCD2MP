@@ -79,16 +79,16 @@ namespace
 
 	std::uint32_t narrow_count(std::size_t count) noexcept
 	{
-		return static_cast<std::uint32_t>(std::min<std::size_t>(
-		    count,
-		    std::numeric_limits<std::uint32_t>::max()));
+		return static_cast<std::uint32_t>(std::min<std::size_t>(count, std::numeric_limits<std::uint32_t>::max()));
 	}
 
-	bool remote_sync_due(
-	    frame_clock::time_point now,
-	    const kcd2mp::client_update_rates &rates)
+	bool remote_sync_due(frame_clock::time_point now, const kcd2mp::client_update_rates &rates)
 	{
-		const auto rate = std::clamp(rates.snapshot_rate, 1U, 120U);
+		// Snapshots arrive at the server cadence, but the interpolated transform
+		// changes every rendered frame. Apply it at up to 60 Hz so a 20 Hz
+		// snapshot rate does not turn otherwise smooth interpolation into visible
+		// 50 ms steps.
+		const auto rate = std::clamp(std::max(rates.snapshot_rate, 60U), 1U, 120U);
 		if (rate != g_remote_sync_rate)
 		{
 			g_remote_sync_rate = rate;
@@ -98,9 +98,7 @@ namespace
 		{
 			return false;
 		}
-		const auto interval =
-		    std::chrono::duration_cast<frame_clock::duration>(
-		        std::chrono::duration<double>(1.0 / rate));
+		const auto interval = std::chrono::duration_cast<frame_clock::duration>(std::chrono::duration<double>(1.0 / rate));
 		// Keep the server cadence instead of drifting by one rendered frame
 		// whenever the two rates are not clean multiples of each other. Missed
 		// slots are skipped; native synchronization never runs more than once in

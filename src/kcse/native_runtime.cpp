@@ -32,6 +32,7 @@
 #include <cctype>
 #include <cmath>
 #include <format>
+#include <numbers>
 #include <string_view>
 
 namespace kcd2mp::kcse
@@ -670,6 +671,53 @@ namespace kcd2mp::kcse
 				result.Clear();
 				result.set_w(1.0F);
 			}
+			return result;
+		}
+
+		bool replayable_non_combat_fragment(std::string_view fragment)
+		{
+			if (fragment.empty() || fragment.size() > 96)
+				return false;
+			if (!std::ranges::all_of(
+			        fragment,
+			        [](unsigned char character)
+			        {
+				        return std::isalnum(character) != 0
+				            || character == '_' || character == '-'
+				            || character == '/' || character == '.'
+				            || character == ':';
+			        }))
+				return false;
+			std::string lower(fragment);
+			std::ranges::transform(
+			    lower,
+			    lower.begin(),
+			    [](unsigned char value)
+			    {
+				    return static_cast<char>(std::tolower(value));
+			    });
+			constexpr std::string_view excluded[] = {
+			    "combat", "attack", "strike", "parry", "block", "hit",
+			    "death", "finisher", "motion", "locomotion", "idle",
+			    "walk", "run", "sprint"};
+			return std::ranges::none_of(
+			    excluded,
+			    [&](std::string_view token)
+			    {
+				    return lower.contains(token);
+			    });
+		}
+
+		protocol::Vec3 facing_from_rotation(
+		    const protocol::Quaternion &rotation)
+		{
+			protocol::Vec3 result;
+			result.set_x(2.0F * (rotation.x() * rotation.y()
+			                         - rotation.w() * rotation.z()));
+			result.set_y(1.0F - 2.0F * (rotation.x() * rotation.x()
+			                            + rotation.z() * rotation.z()));
+			result.set_z(2.0F * (rotation.y() * rotation.z()
+			                         + rotation.w() * rotation.x()));
 			return result;
 		}
 
@@ -1969,30 +2017,22 @@ namespace kcd2mp::kcse
 	    const protocol::TransformState &transform)
 	{
 		std::string error;
-		if (!m_entities.write_transform(
-		        m_entities.player().entity,
-		        transform,
-		        error))
+		if (!m_entities.write_transform(m_entities.player().entity, transform, error))
 		{
 			std::scoped_lock lock(m_cache_mutex);
 			m_diagnostic = std::move(error);
 			return false;
 		}
 		std::scoped_lock lock(m_cache_mutex);
-		m_local_transform = transform;
-		m_transform_sequence = 0;
+		m_local_transform            = transform;
+		m_local_transform_sampled_at = std::chrono::steady_clock::now();
+		m_transform_sequence         = 0;
 		return true;
 	}
 
-	remote_avatar_sync_result native_runtime::sync_remote_players(
-	    std::span<const remote_avatar_snapshot> players)
+	remote_avatar_sync_result native_runtime::sync_remote_players(std::span<const remote_avatar_snapshot> players)
 	{
-		KCD2MP_JOIN_TRACE(
-		    "join.remote-sync.begin",
-		    std::format(
-		        "players={} epoch={}",
-		        players.size(),
-		        m_epoch.load(std::memory_order_acquire)));
+		KCD2MP_JOIN_TRACE("join.remote-sync.begin", std::format("players={} epoch={}", players.size(), m_epoch.load(std::memory_order_acquire)));
 		m_remote_backend.set_epoch(
 		    m_epoch.load(std::memory_order_acquire));
 		auto result = m_remote_avatars.sync(players);
@@ -2033,21 +2073,27 @@ namespace kcd2mp::kcse
 		m_profiles.reset();
 		m_remote_backend.reset_active_probe();
 		if (!m_unload_pending && !expected_transition)
+		{
 			restore_save_load();
+		}
 		m_epoch.fetch_add(1, std::memory_order_acq_rel);
 		std::scoped_lock lock(m_cache_mutex);
 		m_level_id.clear();
 		m_local_transform.reset();
-		m_transform_sequence = 0;
-		m_probe_transform_verified = false;
-		m_probe_complete = false;
-		m_probe_failed = false;
-		m_preparation_active = false;
-		m_preparation_frames = 0;
+		m_local_transform_sampled_at = {};
+		m_transform_sequence         = 0;
+		m_local_animation_fragment.clear();
+		m_animation_sequence         = 0;
+		m_animation_started_at_ms    = 0;
+		m_probe_transform_verified   = false;
+		m_probe_complete             = false;
+		m_probe_failed               = false;
+		m_preparation_active         = false;
+		m_preparation_frames         = 0;
 		m_probe_error.clear();
 		if (!m_unload_pending && !expected_transition)
 		{
-			m_sandbox_active = false;
+			m_sandbox_active   = false;
 			m_sandbox_progress = {};
 		}
 		if (expected_transition)
@@ -2072,6 +2118,7 @@ namespace kcd2mp::kcse
 		    runtime_capability_kcse | runtime_capability_game_thread;
 		std::string level;
 		std::optional<protocol::TransformState> transform;
+		std::string sampled_animation_fragment;
 		bool transition_safe = false;
 		std::string transition_blocker;
 
@@ -2141,6 +2188,9 @@ namespace kcd2mp::kcse
 				transform = std::move(state);
 				capabilities |= runtime_capability_transform_read;
 			}
+			const auto *fragment = context_actor->m_fragmentName.c_str();
+			if (fragment && replayable_non_combat_fragment(fragment))
+				sampled_animation_fragment = fragment;
 		}
 
 		std::string profile_error;
@@ -2305,31 +2355,111 @@ namespace kcd2mp::kcse
 		        static_cast<void *>(entity)));
 		if (entity && environment && environment->pConsole)
 		{
-			if (auto *level_cvar =
-			        environment->pConsole->GetCVar("wh_sys_BaseLevelId"))
+			if (auto *level_cvar = environment->pConsole->GetCVar("wh_sys_BaseLevelId"))
 			{
 				if (const auto *value = level_cvar->GetString())
+				{
 					level = value;
+				}
 			}
 		}
 
+		const auto transform_sampled_at = std::chrono::steady_clock::now();
 		std::scoped_lock lock(m_cache_mutex);
 		if (transform)
+		{
+			// IEntity only exposes the world transform here. Derive the wire
+			// velocity from consecutive game-thread samples so the server can
+			// classify locomotion instead of publishing every player as idle.
+			if (m_local_transform && m_local_transform_sampled_at != std::chrono::steady_clock::time_point{})
+			{
+				const auto elapsed = std::chrono::duration<float>(transform_sampled_at - m_local_transform_sampled_at).count();
+				if (elapsed >= 0.001F && elapsed <= 0.25F)
+				{
+					const auto &previous = m_local_transform->position();
+					const auto &current  = transform->position();
+					auto *velocity       = transform->mutable_velocity();
+					velocity->set_x((current.x() - previous.x()) / elapsed);
+					velocity->set_y((current.y() - previous.y()) / elapsed);
+					velocity->set_z((current.z() - previous.z()) / elapsed);
+
+					auto *locomotion = transform->mutable_locomotion();
+					const auto &rotation = transform->rotation();
+					const auto facing = facing_from_rotation(rotation);
+					*locomotion->mutable_facing_direction() = facing;
+					const auto speed = std::hypot(velocity->x(), velocity->y());
+					locomotion->set_speed(speed);
+					const auto &old_velocity = m_local_transform->velocity();
+					auto *acceleration = locomotion->mutable_acceleration();
+					acceleration->set_x((velocity->x() - old_velocity.x()) / elapsed);
+					acceleration->set_y((velocity->y() - old_velocity.y()) / elapsed);
+					acceleration->set_z((velocity->z() - old_velocity.z()) / elapsed);
+
+					// Rotate world velocity into the actor's local frame. KCD2/Cry
+					// uses +Y as actor forward.
+					auto *local = locomotion->mutable_local_velocity();
+					const auto &q = rotation;
+					const auto right_x = 1.0F - 2.0F * (q.y() * q.y() + q.z() * q.z());
+					const auto right_y = 2.0F * (q.x() * q.y() + q.w() * q.z());
+					const auto right_z = 2.0F * (q.x() * q.z() - q.w() * q.y());
+					local->set_x(velocity->x() * right_x + velocity->y() * right_y + velocity->z() * right_z);
+					local->set_y(velocity->x() * facing.x() + velocity->y() * facing.y() + velocity->z() * facing.z());
+					locomotion->set_strafing(
+					    std::abs(local->x()) > 0.2F
+					    && std::abs(local->y()) > 0.2F);
+
+					const auto old_facing = facing_from_rotation(
+					    m_local_transform->rotation());
+					const auto yaw = std::atan2(facing.x(), facing.y());
+					const auto old_yaw = std::atan2(old_facing.x(), old_facing.y());
+					auto yaw_delta = std::remainder(
+					    yaw - old_yaw,
+					    2.0F * std::numbers::pi_v<float>);
+					locomotion->set_yaw_rate(yaw_delta / elapsed);
+				}
+			}
+			if (!transform->has_locomotion())
+			{
+				auto *locomotion = transform->mutable_locomotion();
+				*locomotion->mutable_facing_direction() =
+				    facing_from_rotation(transform->rotation());
+				locomotion->mutable_local_velocity();
+				locomotion->mutable_acceleration();
+			}
+
+			if (sampled_animation_fragment != m_local_animation_fragment)
+			{
+				m_local_animation_fragment = sampled_animation_fragment;
+				++m_animation_sequence;
+				m_animation_started_at_ms = now_ms();
+			}
+			if (m_animation_sequence != 0)
+			{
+				auto *animation = transform->mutable_animation();
+				animation->set_sequence(m_animation_sequence);
+				animation->set_fragment(m_local_animation_fragment);
+				animation->set_started_at_ms(m_animation_started_at_ms);
+				animation->set_active(!m_local_animation_fragment.empty());
+			}
 			transform->set_sequence(++m_transform_sequence);
-		m_local_transform = std::move(transform);
-		m_level_id = std::move(level);
-		m_capabilities = capabilities;
-		m_transition_safe = transition_safe;
+			m_local_transform_sampled_at = transform_sampled_at;
+		}
+		else
+		{
+			m_local_transform_sampled_at = {};
+		}
+		m_local_transform    = std::move(transform);
+		m_level_id           = std::move(level);
+		m_capabilities       = capabilities;
+		m_transition_safe    = transition_safe;
 		m_transition_blocker = std::move(transition_blocker);
-		KCD2MP_JOIN_TRACE(
-		    "join.runtime.capabilities.updated",
-		    std::format(
-		        "capabilities=0x{:X} required=0x{:X} missing=0x{:X} "
-		        "level=\"{}\"",
-		        capabilities,
-		        required_client_runtime_capabilities,
-		        required_client_runtime_capabilities & ~capabilities,
-		        m_level_id));
+		KCD2MP_JOIN_TRACE("join.runtime.capabilities.updated",
+		                  std::format("capabilities=0x{:X} required=0x{:X} missing=0x{:X} "
+		                              "level=\"{}\"",
+		                              capabilities,
+		                              required_client_runtime_capabilities,
+		                              required_client_runtime_capabilities & ~capabilities,
+		                              m_level_id));
 		if ((capabilities & runtime_capability_local_player) == 0)
 		{
 			if (!m_world_start_bootstrap)

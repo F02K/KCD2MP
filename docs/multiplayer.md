@@ -114,11 +114,32 @@ boundary. The lifecycle is:
 5. consume interpolated movement snapshots; and
 6. transactionally remove all native state on leave or disconnect.
 
-Movement uses audited native transforms and the Actor movement controller.
-Equipment changes are ordered, validated, and recoverable. Avatar
+Movement snapshots carry world velocity plus local velocity, acceleration,
+facing, turn rate, strafing intent, and walk/run/sprint classification. The
+remote Actor feeds these values to KCD2's audited movement controller so the
+game selects and blends locomotion. Interpolated world transforms are recovery
+anchors: small divergence is corrected with exponential damping, while errors
+above five metres snap to the authoritative position.
+
+The local Actor's current Mannequin fragment is observed and sequenced. Safe
+non-combat one-shots (for example jump, gesture, and interaction fragments) are
+replayed through the native `C_ScriptBindHuman::PlayAnim`/`StopAnim` API.
+Locomotion and combat-named fragments are rejected so they cannot fight the
+movement controller or accidentally become an unauthoritative combat system.
+
+Equipment changes are ordered, validated, and recoverable. Reconciliation is
+incremental: unchanged native item instances remain equipped and only stale or
+new slots are mutated. Draw and holster transitions use the native weapon-set
+controller so KCD2 can play its authored transition instead of swapping a
+detached visual. Avatar
 materialization advances monotonically through Human, Soul, Soul-stabilization,
 and Inventory readiness. A regression, timeout, or failed desired Soul fails
 the client closed; the live runtime does not substitute the default Soul.
+
+Exact combat replay is deliberately deferred. A later combat protocol must
+carry authoritative action identity, phase/timing, target, hit validation,
+interrupts, stamina, and damage results; the presentation-only Mannequin stream
+must not be extended into combat by merely forwarding attack fragments.
 
 ## Doors and loot containers
 

@@ -8,7 +8,31 @@ changes. Client and server versions must match exactly.
 
 ## [Unreleased]
 
-No unreleased changes documented yet.
+### Added
+
+- Added sequenced, non-combat Mannequin fragment replication for jumps,
+  gestures, and interaction one-shots through KCD2's native `PlayAnim` path.
+- Added continuous locomotion intent (local velocity, acceleration, facing,
+  turn rate, strafing, and sprint classification) to player snapshots.
+
+### Changed
+
+- Remote transforms now use damped corrections with a teleport threshold while
+  KCD2's native movement controller owns locomotion blending.
+- Remote equipment reconciliation now retains unchanged native item instances
+  and only removes or creates actual deltas; weapon-set transitions continue
+  through the native draw/holster controller.
+
+### Fixed
+
+- Derived local player velocity from consecutive native transforms so remote
+  avatars enter walk/run locomotion instead of remaining idle.
+- Applied interpolated remote transforms at presentation cadence and reduced
+  the interpolation buffer at normal snapshot rates for smoother, more
+  responsive player movement.
+- Moved the in-game chat onto a presentation-rate ImGui frame, separated its
+  state from world/NPC synchronization, and prioritized its unbatched reliable
+  packets so UI and delivery no longer wait for engine refreshes.
 
 ## [0.1.1] - 2026-08-06
 

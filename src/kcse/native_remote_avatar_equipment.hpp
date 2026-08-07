@@ -20,6 +20,13 @@ namespace wh::rpgmodule
 
 namespace kcd2mp::kcse
 {
+	struct native_remote_equipment_instance
+	{
+		std::string definition_id;
+		std::string equipped_slot;
+		std::string instance_id;
+	};
+
 	// Inputs required by one remote equipment transaction. Actor lifecycle and
 	// avatar bookkeeping remain owned by native_remote_avatar_backend.
 	struct native_remote_equipment_context
@@ -35,11 +42,11 @@ namespace kcd2mp::kcse
 	[[nodiscard]] bool clear_native_remote_equipment(
 	    wh::rpgmodule::C_Soul &soul,
 	    wh::entitymodule::C_Inventory &inventory,
-	    std::vector<std::string> &item_instances,
+	    std::vector<native_remote_equipment_instance> &item_instances,
 	    std::string &error);
 	[[nodiscard]] bool apply_native_remote_equipment(
 	    const native_remote_equipment_context &native,
 	    const protocol::AvatarDescriptor &appearance,
-	    std::vector<std::string> &item_instances,
+	    std::vector<native_remote_equipment_instance> &item_instances,
 	    std::string &error);
 }

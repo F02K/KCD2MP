@@ -6,6 +6,7 @@ enum MovementMode {
   MOVEMENT_MODE_IDLE = 0;
   MOVEMENT_MODE_WALK = 1;
   MOVEMENT_MODE_RUN = 2;
+  MOVEMENT_MODE_SPRINT = 3;
 }
 
 enum AvatarStance {
@@ -68,12 +69,39 @@ message Quaternion {
   float w = 4;
 }
 
+// Continuous presentation intent consumed by KCD2's native movement
+// controller. World transforms remain authoritative recovery anchors; these
+// values let the engine choose and blend its own locomotion animations.
+message LocomotionState {
+  Vec3 local_velocity = 1;
+  Vec3 acceleration = 2;
+  Vec3 facing_direction = 3;
+  float speed = 4;
+  float yaw_rate = 5;
+  bool strafing = 6;
+  bool ground_contact_known = 7;
+  bool grounded = 8;
+}
+
+// Sequenced Mannequin presentation state. This is intentionally limited to
+// non-combat one-shots such as jumps, gestures and interactions. Exact combat
+// action replay requires a separate authoritative combat protocol.
+message AnimationState {
+  uint64 sequence = 1;
+  string fragment = 2;
+  uint64 started_at_ms = 3;
+  bool active = 4;
+  bool looped = 5;
+}
+
 message TransformState {
   Vec3 position = 1;
   Quaternion rotation = 2;
   Vec3 velocity = 3;
   uint64 sequence = 4;
   uint64 client_time_ms = 5;
+  LocomotionState locomotion = 6;
+  AnimationState animation = 7;
 }
 
 message AvatarEquipment {

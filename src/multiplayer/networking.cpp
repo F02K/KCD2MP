@@ -213,26 +213,19 @@ namespace kcd2mp::net
 		}
 	}
 
-	bool server_transport::send(
-	    connection_id connection,
-	    std::span<const std::byte> bytes,
-	    reliability delivery,
-	    std::string *error)
+	bool server_transport::send(connection_id connection, std::span<const std::byte> bytes, reliability delivery, std::string *error)
 	{
 		if (bytes.empty() || bytes.size() > max_application_message_size)
 		{
 			set_error(error, "message size is invalid");
 			return false;
 		}
-		const auto flags = delivery == reliability::reliable
-		    ? k_nSteamNetworkingSend_Reliable
-		    : k_nSteamNetworkingSend_UnreliableNoDelay;
-		const auto result = m_impl->sockets->SendMessageToConnection(
-		    static_cast<HSteamNetConnection>(connection),
-		    bytes.data(),
-		    static_cast<std::uint32_t>(bytes.size()),
-		    flags,
-		    nullptr);
+		const auto flags = delivery == reliability::reliable ? k_nSteamNetworkingSend_ReliableNoNagle : k_nSteamNetworkingSend_UnreliableNoDelay;
+		const auto result = m_impl->sockets->SendMessageToConnection(static_cast<HSteamNetConnection>(connection),
+		                                                             bytes.data(),
+		                                                             static_cast<std::uint32_t>(bytes.size()),
+		                                                             flags,
+		                                                             nullptr);
 		if (result != k_EResultOK)
 		{
 			set_error(error, "SendMessageToConnection returned "
@@ -444,15 +437,9 @@ namespace kcd2mp::net
 			set_error(error, "message size is invalid");
 			return false;
 		}
-		const auto flags = delivery == reliability::reliable
-		    ? k_nSteamNetworkingSend_Reliable
-		    : k_nSteamNetworkingSend_UnreliableNoDelay;
-		const auto result = m_impl->sockets->SendMessageToConnection(
-		    m_impl->connection,
-		    bytes.data(),
-		    static_cast<std::uint32_t>(bytes.size()),
-		    flags,
-		    nullptr);
+		const auto flags = delivery == reliability::reliable ? k_nSteamNetworkingSend_ReliableNoNagle : k_nSteamNetworkingSend_UnreliableNoDelay;
+		const auto result =
+		    m_impl->sockets->SendMessageToConnection(m_impl->connection, bytes.data(), static_cast<std::uint32_t>(bytes.size()), flags, nullptr);
 		if (result != k_EResultOK)
 		{
 			set_error(error, "SendMessageToConnection returned "

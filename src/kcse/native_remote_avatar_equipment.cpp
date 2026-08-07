@@ -98,15 +98,20 @@ namespace kcd2mp::kcse
 	bool clear_native_remote_equipment(
 	    wh::rpgmodule::C_Soul &soul,
 	    wh::entitymodule::C_Inventory &inventory,
-	    std::vector<std::string> &item_instances,
+	    std::vector<native_remote_equipment_instance> &item_instances,
 	    std::string &error)
 	{
 		for (auto iterator = item_instances.rbegin();
 		     iterator != item_instances.rend(); ++iterator)
 		{
-			auto *item = find_inventory_item(inventory, *iterator);
+			auto *item = find_inventory_item(inventory, iterator->instance_id);
 			if (item
-			    && !remove_item(soul, inventory, *item, *iterator, error))
+			    && !remove_item(
+			        soul,
+			        inventory,
+			        *item,
+			        iterator->instance_id,
+			        error))
 			{
 				return false;
 			}
@@ -118,19 +123,9 @@ namespace kcd2mp::kcse
 	bool apply_native_remote_equipment(
 	    const native_remote_equipment_context &native,
 	    const protocol::AvatarDescriptor &appearance,
-	    std::vector<std::string> &item_instances,
+	    std::vector<native_remote_equipment_instance> &item_instances,
 	    std::string &error)
 	{
-		if (native.human.IsWeaponDrawn()
-		    && !set_weapon_set_drawn(
-		        native.human,
-		        native_weapon_set::any,
-		        false))
-		{
-			error = "remote equipment change could not holster active weapon";
-			return false;
-		}
-
 		std::vector<desired_equipment_item> desired;
 		desired.reserve(appearance.equipment_size());
 		for (const auto &wire : appearance.equipment())
@@ -167,17 +162,70 @@ namespace kcd2mp::kcse
 		    {
 			    return left.layer < right.layer;
 		    });
-		if (!clear_native_remote_equipment(
-		        native.soul,
-		        native.inventory,
-		        item_instances,
-		        error))
+
+		std::vector<bool> retained(item_instances.size());
+		std::vector<native_remote_equipment_instance> next_instances;
+		next_instances.reserve(desired.size());
+		for (const auto &item : desired)
 		{
+			for (std::size_t index = 0; index < item_instances.size(); ++index)
+			{
+				if (!retained[index]
+				    && item_instances[index].definition_id
+			        == item.wire->definition_id()
+				    && item_instances[index].equipped_slot
+			        == item.wire->equipped_slot())
+				{
+					retained[index] = true;
+					next_instances.push_back(item_instances[index]);
+					break;
+				}
+			}
+		}
+
+		const bool changed = next_instances.size() != desired.size()
+		    || next_instances.size() != item_instances.size();
+		if (!changed)
+			return true;
+		if (native.human.IsWeaponDrawn()
+		    && !set_weapon_set_drawn(
+		        native.human,
+		        native_weapon_set::any,
+		        false))
+		{
+			error = "remote equipment change could not holster active weapon";
 			return false;
 		}
 
+		for (std::size_t index = item_instances.size(); index-- > 0;)
+		{
+			if (retained[index])
+				continue;
+			auto *stale = find_inventory_item(
+			    native.inventory,
+			    item_instances[index].instance_id);
+			if (stale && !remove_item(
+			        native.soul,
+			        native.inventory,
+			        *stale,
+			        item_instances[index].instance_id,
+			        error))
+				return false;
+		}
+		item_instances = std::move(next_instances);
+
 		for (const auto &item : desired)
 		{
+			if (std::ranges::any_of(
+			        item_instances,
+			        [&](const native_remote_equipment_instance &existing)
+			        {
+				        return existing.definition_id
+				                == item.wire->definition_id()
+				            && existing.equipped_slot
+				                == item.wire->equipped_slot();
+			        }))
+				continue;
 			KCD2MP_JOIN_TRACE(
 			    "join.remote-appearance.CreateItem.begin",
 			    std::format(
@@ -219,7 +267,10 @@ namespace kcd2mp::kcse
 			        static_cast<void *>(created)));
 			created->SetInstanceGuid(instance);
 			const auto instance_text = wh::FormatGuid(instance);
-			item_instances.push_back(instance_text);
+			item_instances.push_back({
+			    item.wire->definition_id(),
+			    item.wire->equipped_slot(),
+			    instance_text});
 			KCD2MP_JOIN_TRACE(
 			    "join.remote-appearance.EquipItem.begin",
 			    std::format(

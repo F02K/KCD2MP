@@ -81,8 +81,7 @@ namespace kcd2mp
 		}
 	}
 
-	[[nodiscard]] constexpr bool server_message_requires_game_thread(
-	    protocol::Envelope::PayloadCase payload) noexcept
+	[[nodiscard]] constexpr bool server_message_requires_game_thread(protocol::Envelope::PayloadCase payload) noexcept
 	{
 		using payload_case = protocol::Envelope::PayloadCase;
 		switch (payload)
@@ -91,9 +90,8 @@ namespace kcd2mp
 		case payload_case::kServerRejected:
 		case payload_case::kServerShutdown:
 		case payload_case::kPong:
-			return false;
-		default:
-			return true;
+		case payload_case::kChatBroadcast:   return false;
+		default:                             return true;
 		}
 	}
-}
+} // namespace kcd2mp

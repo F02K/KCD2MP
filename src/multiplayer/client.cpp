@@ -312,7 +312,10 @@ namespace kcd2mp
 			m_manual_disconnect_pending = false;
 			m_disconnect_capture_profile = false;
 			m_remote_players.clear();
-			m_chat.clear();
+			{
+				std::scoped_lock chat_lock(m_chat_mutex);
+				m_chat.clear();
+			}
 			m_local_correction.reset();
 			m_profile.reset();
 			m_pending_profile.reset();
@@ -337,16 +340,17 @@ namespace kcd2mp
 			m_activity_denial.reset();
 			m_pending_bootstrap.reset();
 			m_profile_update_pending = false;
-			m_avatar_update_pending = false;
-			m_last_transform_sent = {};
-			m_last_profile_sent = {};
-			m_last_avatar_sent = {};
-			m_last_avatar_sampled = {};
+			m_avatar_update_pending  = false;
+			m_last_transform_sent    = {};
+			m_last_sent_transform.reset();
+			m_last_profile_sent                 = {};
+			m_last_avatar_sent                  = {};
+			m_last_avatar_sampled               = {};
 			m_profile_snapshot_interval_seconds = 15;
-			m_environment_revision = 0;
-			m_weather_revision = 0;
-			m_sleep_revision = 0;
-			m_last_environment_applied = {};
+			m_environment_revision              = 0;
+			m_weather_revision                  = 0;
+			m_sleep_revision                    = 0;
+			m_last_environment_applied          = {};
 			m_resume_token.clear();
 			m_pending_connect = std::move(options);
 			if (!transition_state_locked(client_state::runtime_preflight))
@@ -410,16 +414,10 @@ namespace kcd2mp
 
 	bool multiplayer_client::send_chat(std::string text)
 	{
-		if (!is_valid_chat(text))
+		if (!is_valid_chat(text)
+		    || !m_chat_connected.load(std::memory_order_acquire))
 		{
 			return false;
-		}
-		{
-			std::scoped_lock lock(m_state_mutex);
-			if (m_status.state != client_state::connected)
-			{
-				return false;
-			}
 		}
 		queue_network(chat_command{std::move(text)});
 		return true;
@@ -714,24 +712,31 @@ namespace kcd2mp
 		}
 		if (avatar_update)
 			queue_network(avatar_command{std::move(*avatar_update)});
-		if (connected
-		    && canonical_level_id(current_level)
-		        != canonical_level_id(expected_level))
+		if (connected && canonical_level_id(current_level) != canonical_level_id(expected_level))
 		{
-			set_state(
-			    client_state::disconnected,
-			    "loaded level no longer matches the server");
+			set_state(client_state::disconnected, "loaded level no longer matches the server");
 			queue_network(disconnect_command{});
 			return;
 		}
-		const auto transform_interval =
-		    std::chrono::duration_cast<std::chrono::steady_clock::duration>(
-		        std::chrono::duration<double>(1.0 / tick_rate));
-		if (connected && local_transform
-		    && (m_last_transform_sent == std::chrono::steady_clock::time_point{}
-		        || now - m_last_transform_sent >= transform_interval))
+		const auto transform_interval = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(1.0 / tick_rate));
+		if (connected && local_transform && (m_last_transform_sent == std::chrono::steady_clock::time_point{} || now - m_last_transform_sent >= transform_interval))
 		{
-			queue_network(transform_command{std::move(*local_transform)});
+			auto outgoing = std::move(*local_transform);
+			if (m_last_sent_transform && m_last_transform_sent != std::chrono::steady_clock::time_point{})
+			{
+				const auto elapsed = std::chrono::duration<float>(now - m_last_transform_sent).count();
+				if (elapsed >= 0.001F)
+				{
+					const auto &previous = m_last_sent_transform->position();
+					const auto &current  = outgoing.position();
+					auto *velocity       = outgoing.mutable_velocity();
+					velocity->set_x((current.x() - previous.x()) / elapsed);
+					velocity->set_y((current.y() - previous.y()) / elapsed);
+					velocity->set_z((current.z() - previous.z()) / elapsed);
+				}
+			}
+			m_last_sent_transform = outgoing;
+			queue_network(transform_command{std::move(outgoing)});
 			m_last_transform_sent = now;
 		}
 		std::vector<protocol::WorldObjectState> world_objects;
@@ -740,11 +745,10 @@ namespace kcd2mp
 		if (connected)
 		{
 			world_objects = m_runtime.poll_world_object_updates();
-			world_items = m_runtime.poll_world_item_updates();
-			if (m_last_npc_sampled == std::chrono::steady_clock::time_point{}
-			    || now - m_last_npc_sampled >= std::chrono::milliseconds(200))
+			world_items   = m_runtime.poll_world_item_updates();
+			if (m_last_npc_sampled == std::chrono::steady_clock::time_point{} || now - m_last_npc_sampled >= std::chrono::milliseconds(200))
 			{
-				npc_observations = m_runtime.poll_npc_observations();
+				npc_observations   = m_runtime.poll_npc_observations();
 				m_last_npc_sampled = now;
 			}
 		}
@@ -874,7 +878,7 @@ namespace kcd2mp
 
 	std::vector<chat_entry> multiplayer_client::chat_history() const
 	{
-		std::scoped_lock lock(m_state_mutex);
+		std::scoped_lock lock(m_chat_mutex);
 		return {m_chat.begin(), m_chat.end()};
 	}
 
@@ -1262,66 +1266,56 @@ namespace kcd2mp
 					        }
 					        else if (envelope->has_server_rejected())
 					        {
-						        KCD2MP_JOIN_TRACE(
-						            "join.handshake.server-rejected",
-						            envelope->server_rejected().message());
-						        set_state(
-						            client_state::disconnected,
-						            envelope->server_rejected().message());
+						        KCD2MP_JOIN_TRACE("join.handshake.server-rejected", envelope->server_rejected().message());
+						        set_state(client_state::disconnected, envelope->server_rejected().message());
 						        if (transport)
 						        {
-							        transport->abort_connection(
-							            "server rejected connection");
+							        transport->abort_connection("server rejected connection");
 						        }
-						        }
+					        }
 					        else if (envelope->has_server_shutdown())
 					        {
-						        const auto reason =
-						            envelope->server_shutdown().reason();
-						        KCD2MP_JOIN_TRACE(
-						            "join.server.shutdown",
-						            reason);
+						        const auto reason = envelope->server_shutdown().reason();
+						        KCD2MP_JOIN_TRACE("join.server.shutdown", reason);
 						        set_state(client_state::disconnected, reason);
 						        if (transport)
 						        {
-							        transport->abort_connection(
-							            "server shutdown");
+							        transport->abort_connection("server shutdown");
 						        }
 					        }
-					        else if (envelope->has_world_snapshot()
-					            && !first_world_snapshot_seen)
+					        else if (envelope->has_world_snapshot() && !first_world_snapshot_seen)
 					        {
 						        first_world_snapshot_seen = true;
-						        KCD2MP_JOIN_TRACE(
-						            "join.snapshot.first-received",
-						            std::format(
-						                "players={} server_time_ms={}",
-						                envelope->world_snapshot().players_size(),
-						                envelope->world_snapshot().server_time_ms()));
+						        KCD2MP_JOIN_TRACE("join.snapshot.first-received",
+						                          std::format("players={} server_time_ms={}",
+						                                      envelope->world_snapshot().players_size(),
+						                                      envelope->world_snapshot().server_time_ms()));
+					        }
+					        else if (envelope->has_chat_broadcast())
+					        {
+						        // Chat has no native game-thread work. Publish it directly
+						        // from the network callback so a busy KCSE command queue cannot
+						        // delay messages behind world or NPC updates.
+						        const auto &message = envelope->chat_broadcast();
+						        std::scoped_lock lock(m_chat_mutex);
+						        m_chat.push_back({message.player_id(), message.display_name(), message.text(), message.server_time_ms()});
+						        while (m_chat.size() > 200)
+						        {
+							        m_chat.pop_front();
+						        }
+						        return;
 					        }
 
-					        if (!server_message_requires_game_thread(
-					                envelope->payload_case()))
+					        if (!server_message_requires_game_thread(envelope->payload_case()))
 					        {
 						        return;
 					        }
 
-					        const bool reliable =
-					            !envelope->has_world_snapshot()
-					            && !envelope->has_server_npc_snapshot();
-					        if (!m_game_commands.push(
-					                std::move(*envelope),
-					                reliable)
-					            && reliable)
+					        const bool reliable = !envelope->has_world_snapshot() && !envelope->has_server_npc_snapshot();
+					        if (!m_game_commands.push(std::move(*envelope), reliable) && reliable)
 					        {
-						        KCD2MP_JOIN_TRACE(
-						            "join.game-queue.push.failed",
-						            std::format(
-						                "message={} reliable=true",
-						                message_kind));
-						        set_state(
-						            client_state::disconnected,
-						            "game-thread queue overflow");
+						        KCD2MP_JOIN_TRACE("join.game-queue.push.failed", std::format("message={} reliable=true", message_kind));
+						        set_state(client_state::disconnected, "game-thread queue overflow");
 						        if (transport)
 						        {
 							        transport->abort_connection(
@@ -1706,6 +1700,9 @@ namespace kcd2mp
 			m_pending_activity_start.reset();
 			m_last_environment_applied = {};
 		}
+		m_chat_connected.store(
+		    state == client_state::connected,
+		    std::memory_order_release);
 		KCD2MP_JOIN_TRACE(
 		    "join.state.transition",
 		    std::format(
@@ -1719,7 +1716,20 @@ namespace kcd2mp
 	void multiplayer_client::queue_network(network_command command)
 	{
 		std::scoped_lock lock(m_network_mutex);
-		m_network_commands.push_back(std::move(command));
+		if (std::holds_alternative<chat_command>(command))
+		{
+			const auto first_sync = std::ranges::find_if(
+			    m_network_commands,
+			    [](const network_command &queued)
+			    {
+				    return !std::holds_alternative<chat_command>(queued);
+			    });
+			m_network_commands.insert(first_sync, std::move(command));
+		}
+		else
+		{
+			m_network_commands.push_back(std::move(command));
+		}
 	}
 
 	void multiplayer_client::queue_profile_snapshot(
@@ -2197,27 +2207,23 @@ namespace kcd2mp
 			lock.lock();
 			if (!applied)
 			{
-				(void)transition_state_locked(
-				    client_state::closing,
-				    "could not revive the native local player");
+				(void)transition_state_locked(client_state::closing, "could not revive the native local player");
 				queue_network(disconnect_command{});
 				return;
 			}
-			m_status.dead = false;
+			m_status.dead            = false;
 			m_status.respawn_pending = false;
 			m_local_correction.reset();
+			m_last_sent_transform.reset();
+			m_last_transform_sent = {};
 		}
 		else if (envelope.has_activity_granted())
 		{
 			const auto &activity = envelope.activity_granted().activity();
-			if (!m_pending_activity_start
-			    || m_pending_activity_start->kind() != activity.kind()
-			    || m_pending_activity_start->station_guid()
-			        != activity.station_guid())
+			if (!m_pending_activity_start || m_pending_activity_start->kind() != activity.kind()
+			    || m_pending_activity_start->station_guid() != activity.station_guid())
 			{
-				(void)transition_state_locked(
-				    client_state::closing,
-				    "server granted an unexpected activity session");
+				(void)transition_state_locked(client_state::closing, "server granted an unexpected activity session");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -2259,29 +2265,27 @@ namespace kcd2mp
 				return;
 			}
 			auto &remote = m_remote_players[message.player_id()];
-			remote.rendered.id = message.player_id();
-			remote.rendered.activity = message.activity();
+			remote.rendered.id           = message.player_id();
+			remote.rendered.activity     = message.activity();
 			remote.rendered.has_activity = message.activity().active();
 			if (message.has_final_transform())
 			{
-				remote.rendered.transform = message.final_transform();
+				remote.rendered.transform     = message.final_transform();
 				remote.rendered.has_transform = true;
 			}
 		}
 		else if (envelope.has_state_correction())
 		{
-			m_local_correction =
-			    envelope.state_correction().accepted_transform();
+			m_local_correction = envelope.state_correction().accepted_transform();
+			m_last_sent_transform.reset();
+			m_last_transform_sent = {};
 		}
 		else if (envelope.has_profile_accepted())
 		{
 			if (!m_profile || !m_pending_profile || !m_profile_update_pending
-			    || envelope.profile_accepted().revision()
-			        != m_profile->revision() + 1)
+			    || envelope.profile_accepted().revision() != m_profile->revision() + 1)
 			{
-				(void)transition_state_locked(
-				    client_state::closing,
-				    "server returned an invalid profile revision");
+				(void)transition_state_locked(client_state::closing, "server returned an invalid profile revision");
 				queue_network(disconnect_command{});
 				return;
 			}
@@ -2638,6 +2642,7 @@ namespace kcd2mp
 		else if (envelope.has_chat_broadcast())
 		{
 			const auto &message = envelope.chat_broadcast();
+			std::scoped_lock chat_lock(m_chat_mutex);
 			m_chat.push_back({
 			    message.player_id(),
 			    message.display_name(),
@@ -2892,16 +2897,17 @@ namespace kcd2mp
 			m_desired_avatar.reset();
 			m_desired_archetype.reset();
 			m_profile_update_pending = false;
-			m_avatar_update_pending = false;
+			m_avatar_update_pending  = false;
 		}
 		queue_network(world_ready_command{std::move(ready)});
 	}
 
-	void multiplayer_client::update_interpolation(
-	    std::chrono::steady_clock::time_point now)
+	void multiplayer_client::update_interpolation(std::chrono::steady_clock::time_point now)
 	{
-		const auto target = now - std::chrono::milliseconds(100);
 		std::scoped_lock lock(m_state_mutex);
+		const auto snapshot_rate       = std::clamp(m_update_rates.snapshot_rate, 1U, 120U);
+		const auto interpolation_delay = std::chrono::milliseconds(std::clamp(1000U / snapshot_rate + 10U, 40U, 100U));
+		const auto target              = now - interpolation_delay;
 		for (auto &[id, player] : m_remote_players)
 		{
 			(void)id;
@@ -2909,23 +2915,19 @@ namespace kcd2mp
 			{
 				continue;
 			}
-			while (player.history.size() > 2
-			    && player.history[1].received_at <= target)
+			while (player.history.size() > 2 && player.history[1].received_at <= target)
 			{
 				player.history.pop_front();
 			}
 
-			auto rendered = player.history.front().transform;
-			auto mode = player.history.front().mode;
+			auto rendered  = player.history.front().transform;
+			auto mode      = player.history.front().mode;
 			bool connected = player.history.front().connected;
-			if (player.history.size() >= 2
-			    && player.history.front().received_at <= target)
+			if (player.history.size() >= 2 && player.history.front().received_at <= target)
 			{
-				const auto &from = player.history[0];
-				const auto &to = player.history[1];
-				const auto duration =
-				    std::chrono::duration<float>(to.received_at - from.received_at)
-				        .count();
+				const auto &from    = player.history[0];
+				const auto &to      = player.history[1];
+				const auto duration = std::chrono::duration<float>(to.received_at - from.received_at).count();
 				const auto elapsed =
 				    std::chrono::duration<float>(target - from.received_at).count();
 				const auto factor = duration <= 0.0F
@@ -3033,6 +3035,35 @@ namespace kcd2mp
 		    lerp(from.velocity().y(), to.velocity().y()));
 		result.mutable_velocity()->set_z(
 		    lerp(from.velocity().z(), to.velocity().z()));
+		if (from.has_locomotion() && to.has_locomotion())
+		{
+			auto *state = result.mutable_locomotion();
+			auto lerp_vec = [&](protocol::Vec3 *output,
+			                    const protocol::Vec3 &left,
+			                    const protocol::Vec3 &right)
+			{
+				output->set_x(lerp(left.x(), right.x()));
+				output->set_y(lerp(left.y(), right.y()));
+				output->set_z(lerp(left.z(), right.z()));
+			};
+			lerp_vec(
+			    state->mutable_local_velocity(),
+			    from.locomotion().local_velocity(),
+			    to.locomotion().local_velocity());
+			lerp_vec(
+			    state->mutable_acceleration(),
+			    from.locomotion().acceleration(),
+			    to.locomotion().acceleration());
+			lerp_vec(
+			    state->mutable_facing_direction(),
+			    from.locomotion().facing_direction(),
+			    to.locomotion().facing_direction());
+			state->set_speed(lerp(
+			    from.locomotion().speed(), to.locomotion().speed()));
+			state->set_yaw_rate(lerp(
+			    from.locomotion().yaw_rate(),
+			    to.locomotion().yaw_rate()));
+		}
 		auto *rotation = result.mutable_rotation();
 		const auto dot = from.rotation().x() * to.rotation().x()
 		    + from.rotation().y() * to.rotation().y()
